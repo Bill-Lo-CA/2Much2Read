@@ -1,0 +1,11 @@
+[Unit]
+Description=Newsletter Digest
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/newsletter-digest/newsletter-digest.env
+ExecStart=__EXECUTABLE__ run
+TimeoutStartSec=30min
+NoNewPrivileges=true
+PrivateTmp=true

@@ -1,0 +1,52 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "newsletter-digest"
+version = "0.1.0"
+description = "Local-first Gmail newsletter summaries via Ollama and Discord"
+readme = "README.md"
+requires-python = ">=3.11,<3.14"
+dependencies = [
+  "beautifulsoup4>=4.12,<5",
+  "google-api-python-client>=2.170,<3",
+  "google-auth-oauthlib>=1.2,<2",
+  "httpx>=0.28,<1",
+  "lxml>=5.4,<7",
+  "pydantic>=2.11,<3",
+  "pydantic-settings>=2.9,<3",
+  "pyyaml>=6.0,<7",
+  "typer>=0.16,<1",
+]
+
+[dependency-groups]
+dev = [
+  "mypy>=1.16,<2",
+  "pytest>=8.4,<9",
+  "respx>=0.22,<1",
+  "ruff>=0.12,<1",
+  "types-pyyaml>=6.0,<7",
+]
+
+[project.scripts]
+newsletter-digest = "newsletter_digest.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/newsletter_digest"]
+
+[tool.ruff]
+line-length = 130
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+packages = ["newsletter_digest"]
+mypy_path = "src"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

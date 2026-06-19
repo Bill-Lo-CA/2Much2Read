@@ -1,0 +1,7 @@
+sources:
+  - id: alphasignal
+    name: AlphaSignal
+    enabled: true
+    category: AI
+    gmail_query: 'subject:(AlphaSignal) newer_than:14d'
+    max_items_per_email: 10
