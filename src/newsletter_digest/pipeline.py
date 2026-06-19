@@ -51,9 +51,13 @@ def run_pipeline(
 ) -> dict[str, int | str]:
     sources = [source for source in load_sources(settings.sources_config_path).sources if source.enabled]
     if source_id:
-        sources = [source for source in sources if source.id == source_id]
+        matching_sources = [source for source in sources if source.id == source_id]
+        if not matching_sources:
+            enabled_ids = ", ".join(source.id for source in sources) or "(none)"
+            raise ValueError(f"unknown or disabled source_id {source_id!r}; enabled source IDs: {enabled_ids}")
+        sources = matching_sources
     if not sources:
-        raise ValueError("no enabled matching source")
+        raise ValueError("no enabled sources configured")
 
     creds = credentials(
         settings.gmail_credentials_path,

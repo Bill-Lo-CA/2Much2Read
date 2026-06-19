@@ -101,6 +101,9 @@ uv run newsletter-digest retry-delivery
 uv run newsletter-digest backfill --days 7 --source ai-newspaper
 ```
 
+Replace `ai-newspaper` with an enabled `id` from your local `sources.yaml`. If `--source` is
+omitted, the command processes every enabled source.
+
 `labels ensure` and `discover` are the current live Gmail API checks. `doctor` only checks whether
 the Gmail token file exists; it does not make a Gmail API request. Dry run uses an in-memory
 database and does not apply processed/source labels or send Discord messages. It may create missing
@@ -137,6 +140,20 @@ The audit command requires network access and is intentionally not part of offli
 Gmail, Ollama, and Discord checks are opt-in and require local secrets.
 
 ## Recovery and troubleshooting
+
+To isolate Ollama from the Gmail pipeline, test `/api/chat` directly. `think: false` prevents
+Qwen from returning a separate reasoning trace:
+
+```bash
+curl -i http://127.0.0.1:11434/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "model": "qwen3:8b",
+    "messages": [{"role": "user", "content": "Reply only with: test successful"}],
+    "stream": false,
+    "think": false
+  }'
+```
 
 - OAuth expired: rerun `newsletter-digest auth gmail`; check the consent-screen publishing status.
 - Model missing or GPU fallback: run `ollama list`, `ollama pull qwen3:8b`, and inspect Ollama logs.
