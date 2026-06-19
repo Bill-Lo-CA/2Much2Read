@@ -36,13 +36,42 @@ credentials. Save the downloaded JSON at `GMAIL_CREDENTIALS_PATH`. Projects left
 may issue refresh tokens that expire after seven days; use the appropriate production publishing
 status for persistent personal use.
 
+Google normally downloads the desktop OAuth credential with a name similar to
+`client_secret_123.apps.googleusercontent.com.json`. This is the OAuth client credential, not the
+user token. Keep its original name if preferred and set the full path in `.env`:
+
+```dotenv
+GMAIL_CREDENTIALS_PATH=/home/USER/.config/newsletter-digest/client_secret_123.apps.googleusercontent.com.json
+GMAIL_TOKEN_PATH=/home/USER/.config/newsletter-digest/google-token.json
+```
+
+Neither file belongs in Git. Transfer the client credential directly to Linux, then let the auth
+command create `google-token.json` there:
+
+```bash
+scp client_secret_*.apps.googleusercontent.com.json USER@SERVER:~/.config/newsletter-digest/
+chmod 600 ~/.config/newsletter-digest/client_secret_*.apps.googleusercontent.com.json
+```
+
+For a manually curated Gmail label, use this local `sources.yaml` entry:
+
+```yaml
+sources:
+  - id: ai-newspaper
+    name: AI Newspaper
+    enabled: true
+    category: AI
+    gmail_query: 'label:ai-newspaper'
+    max_items_per_email: 10
+```
+
 ```bash
 # When authorizing a remote Linux machine, run this locally first:
 ssh -L 8765:localhost:8765 USER@SERVER
 
 uv run newsletter-digest auth gmail
 uv run newsletter-digest labels ensure
-uv run newsletter-digest discover --query 'AlphaSignal newer_than:30d'
+uv run newsletter-digest discover --query 'label:ai-newspaper'
 ```
 
 `discover` prints metadata only. After observing the real sender, optionally strengthen the local
@@ -52,14 +81,28 @@ uv run newsletter-digest discover --query 'AlphaSignal newer_than:30d'
 ## Run
 
 ```bash
+# Configuration and Ollama checks. Add --send-test only when a Discord test post is wanted.
 uv run newsletter-digest doctor
-uv run newsletter-digest run --dry-run --source alphasignal --max-messages 1
-uv run newsletter-digest run
+
+# Gmail metadata-only connectivity check.
+uv run newsletter-digest discover --query 'label:ai-newspaper' --limit 1
+
+# Gmail → MIME → Ollama without persistent database state, processed labels, or Discord delivery.
+uv run newsletter-digest run --dry-run --source ai-newspaper --max-messages 1
+
+# Persist one result and apply Gmail labels, but hold Discord delivery.
+uv run newsletter-digest run --no-deliver --source ai-newspaper --max-messages 1
+
+# Deliver the already stored digest without calling Gmail or Ollama again.
 uv run newsletter-digest retry-delivery
-uv run newsletter-digest backfill --days 7 --source alphasignal
+
+uv run newsletter-digest backfill --days 7 --source ai-newspaper
 ```
 
-Dry run uses an in-memory database and does not change Gmail labels or send Discord messages.
+`labels ensure` and `discover` are the current live Gmail API checks. `doctor` only checks whether
+the Gmail token file exists; it does not make a Gmail API request. Dry run uses an in-memory
+database and does not apply processed/source labels or send Discord messages. It may create missing
+app-owned labels during startup, so run `labels ensure` first when that distinction matters.
 Backfill does not deliver unless `--deliver` is supplied. Discord mentions are disabled on every
 request.
 

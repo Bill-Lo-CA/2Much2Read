@@ -9,4 +9,5 @@ dist/
 *.sqlite3
 *.db
 google-client-secret*.json
+client_secret*.json
 google-token*.json
