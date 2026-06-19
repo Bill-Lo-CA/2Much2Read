@@ -11,3 +11,4 @@ dist/
 google-client-secret*.json
 client_secret*.json
 google-token*.json
+NEWSLETTER_CATALOG.md
