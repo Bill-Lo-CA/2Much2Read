@@ -39,3 +39,5 @@ def test_repairs_invalid_schema_once() -> None:
     result = OllamaClient().extract("alphasignal", "News https://example.com/a")
     assert result.items[0].importance == 8
     assert route.call_count == 2
+    request_payload = json.loads(route.calls[0].request.content)
+    assert "maxLength" not in json.dumps(request_payload["format"])

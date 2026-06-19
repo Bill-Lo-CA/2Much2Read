@@ -157,6 +157,8 @@ curl -i http://127.0.0.1:11434/api/chat \
 
 - OAuth expired: rerun `newsletter-digest auth gmail`; check the consent-screen publishing status.
 - Model missing or GPU fallback: run `ollama list`, `ollama pull qwen3:8b`, and inspect Ollama logs.
+- Ollama grammar errors: the application removes `maxLength` from the generation schema because
+  Ollama rejects large repetition limits; Pydantic still validates those limits after generation.
 - Invalid model JSON: one repair is automatic; repeated failure remains retryable on a later run.
 - Gmail query mismatch: use `discover`, then update only the local `sources.yaml` query.
 - Discord rate limit/outage: run `retry-delivery`; Gmail and Ollama are not called again.
