@@ -9,8 +9,8 @@ import typer
 
 from .config import Settings, load_sources
 from .gmail import GmailClient, credentials, display_id
+from .pipeline import resend_latest, run_pipeline
 from .pipeline import retry_delivery as retry_pending
-from .pipeline import run_pipeline
 
 app = typer.Typer(no_args_is_help=True)
 auth_app = typer.Typer()
@@ -119,8 +119,18 @@ def run_command(
     source: Annotated[str | None, typer.Option()] = None,
     no_deliver: Annotated[bool, typer.Option()] = False,
     max_messages: Annotated[int | None, typer.Option(min=1)] = None,
+    force: Annotated[bool, typer.Option()] = False,
+    resend: Annotated[bool, typer.Option()] = False,
 ) -> None:
-    emit(**run_pipeline(Settings(), source, max_messages, no_deliver, dry_run))
+    if resend:
+        if dry_run or source is not None or no_deliver or max_messages is not None or force:
+            raise typer.BadParameter("--resend cannot be combined with other run options")
+        delivered = resend_latest(Settings())
+        emit(status="ok" if delivered else "no_digest", delivered=delivered)
+        return
+    if force and (dry_run or source is None or max_messages is None):
+        raise typer.BadParameter("--force requires --source and --max-messages and cannot use --dry-run")
+    emit(**run_pipeline(Settings(), source, max_messages, no_deliver, dry_run, force))
 
 
 @app.command("retry-delivery")

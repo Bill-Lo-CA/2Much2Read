@@ -37,26 +37,25 @@ class OllamaClient:
         self.num_ctx = num_ctx
         self.keep_alive = keep_alive
 
-    def extract(self, source_id: str, content: str, truncated: bool = False) -> EmailExtraction:
+    def extract(
+        self,
+        source_id: str,
+        content: str,
+        truncated: bool = False,
+        max_items: int = 10,
+    ) -> EmailExtraction:
         # Ollama's grammar parser rejects large maxLength values such as HttpUrl's 2083-character limit.
         # Pydantic still validates all original constraints after generation.
         schema = _ollama_schema(EmailExtraction.model_json_schema())
         prompt = (
-            f"source_id={source_id}\ntruncated_input={str(truncated).lower()}\n"
+            f"source_id={source_id}\ntruncated_input={str(truncated).lower()}\nmax_items={max_items}\n"
             f"Schema: {json.dumps(schema)}\n<newsletter_content>\n{content}\n</newsletter_content>"
         )
+        messages = [
+            {"role": "system", "content": SYSTEM_PROMPT},
+            {"role": "user", "content": prompt},
+        ]
         for attempt in range(2):
-            messages = [
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ]
-            if attempt:
-                messages.append(
-                    {
-                        "role": "user",
-                        "content": "Repair the previous response to valid schema JSON.",
-                    }
-                )
             response = httpx.post(
                 f"{self.base_url}/api/chat",
                 json={
@@ -71,9 +70,15 @@ class OllamaClient:
                 timeout=self.timeout,
             )
             response.raise_for_status()
-            raw = response.json()["message"]["content"]
+            raw = ""
             try:
+                raw = response.json()["message"]["content"]
+                if not isinstance(raw, str):
+                    raise TypeError
                 result = EmailExtraction.model_validate_json(raw)
+                result.source_id = source_id
+                result.truncated_input = truncated
+                result.items = result.items[:max_items]
                 supplied_urls = {token.rstrip(").,>") for token in content.split() if token.startswith("http")}
                 if any(str(item.source_url) not in supplied_urls for item in result.items if item.source_url):
                     raise ValueError("model returned a URL absent from input")
@@ -81,4 +86,13 @@ class OllamaClient:
             except (ValidationError, ValueError, KeyError, TypeError):
                 if attempt:
                     raise ValueError("OLLAMA_SCHEMA_INVALID") from None
+                messages.extend(
+                    [
+                        {"role": "assistant", "content": raw},
+                        {
+                            "role": "user",
+                            "content": "Repair the previous response to valid schema JSON.",
+                        },
+                    ]
+                )
         raise AssertionError("unreachable")

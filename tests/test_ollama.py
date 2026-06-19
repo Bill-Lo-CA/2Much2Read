@@ -41,3 +41,27 @@ def test_repairs_invalid_schema_once() -> None:
     assert route.call_count == 2
     request_payload = json.loads(route.calls[0].request.content)
     assert "maxLength" not in json.dumps(request_payload["format"])
+    repair_payload = json.loads(route.calls[1].request.content)
+    assert repair_payload["messages"][-2] == {"role": "assistant", "content": "not json"}
+
+
+@respx.mock
+def test_normalizes_trusted_fields_and_limits_items() -> None:
+    model_result = valid_result()
+    model_result["source_id"] = "wrong-source"
+    model_result["truncated_input"] = False
+    model_result["items"] = [*model_result["items"], *model_result["items"]]
+    respx.post("http://127.0.0.1:11434/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": json.dumps(model_result)}})
+    )
+
+    result = OllamaClient().extract(
+        "alphasignal",
+        "News https://example.com/a",
+        truncated=True,
+        max_items=1,
+    )
+
+    assert result.source_id == "alphasignal"
+    assert result.truncated_input is True
+    assert len(result.items) == 1

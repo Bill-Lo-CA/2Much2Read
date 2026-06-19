@@ -99,10 +99,19 @@ uv run newsletter-digest run --no-deliver --source ai-newspaper --max-messages 1
 uv run newsletter-digest retry-delivery
 
 uv run newsletter-digest backfill --days 7 --source ai-newspaper
+
+# Reprocess a bounded number of messages even if they already have processed labels, then send a new digest.
+uv run newsletter-digest run --force --source ai-newspaper --max-messages 1
+
+# Resend the latest stored digest without calling Gmail or Ollama.
+uv run newsletter-digest run --resend
 ```
 
 Replace `ai-newspaper` with an enabled `id` from your local `sources.yaml`. If `--source` is
 omitted, the command processes every enabled source.
+`--force` requires both `--source` and `--max-messages`; it replaces stored items for matching
+messages and creates a new digest delivery. `--resend` cannot be combined with other run options
+and sends a newly recorded copy of the latest digest directly from SQLite.
 
 `labels ensure` and `discover` are the current live Gmail API checks. `doctor` only checks whether
 the Gmail token file exists; it does not make a Gmail API request. Dry run uses an in-memory

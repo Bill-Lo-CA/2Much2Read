@@ -7,6 +7,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import cast
 
 from .digest import canonical_url, normalized_title
 from .schemas import EmailExtraction
@@ -65,8 +66,14 @@ class Database:
         subject: str,
         sender: str,
         body: str,
+        force: bool = False,
     ) -> int | None:
         now = datetime.now(UTC).isoformat()
+        body_sha256 = hashlib.sha256(body.encode()).hexdigest()
+        if force:
+            existing = self.connection.execute("SELECT id FROM messages WHERE gmail_message_id=?", (gmail_id,)).fetchone()
+            if existing:
+                return int(existing["id"])
         cursor = self.connection.execute(
             """INSERT OR IGNORE INTO messages
             (gmail_message_id,gmail_thread_id,source_id,received_at,subject,sender,body_sha256,state,created_at,updated_at)
@@ -78,7 +85,7 @@ class Database:
                 received_at,
                 subject,
                 sender,
-                hashlib.sha256(body.encode()).hexdigest(),
+                body_sha256,
                 now,
                 now,
             ),
@@ -86,9 +93,11 @@ class Database:
         self.connection.commit()
         return int(cursor.lastrowid) if cursor.rowcount and cursor.lastrowid is not None else None
 
-    def store_extraction(self, message_id: int, extraction: EmailExtraction) -> None:
+    def store_extraction(self, message_id: int, extraction: EmailExtraction, replace: bool = False) -> None:
         now = datetime.now(UTC).isoformat()
         with self.transaction() as connection:
+            if replace:
+                connection.execute("DELETE FROM items WHERE message_id=?", (message_id,))
             for item in extraction.items:
                 url = str(item.source_url) if item.source_url else None
                 connection.execute(
@@ -140,6 +149,30 @@ class Database:
         )
         self.connection.commit()
         return bool(cursor.rowcount)
+
+    def prepare_latest_resend(self) -> sqlite3.Row | None:
+        latest = self.connection.execute("SELECT * FROM digests ORDER BY id DESC LIMIT 1").fetchone()
+        if latest is None:
+            return None
+        now = datetime.now(UTC).isoformat()
+        cursor = self.connection.execute(
+            """INSERT INTO digests
+            (digest_key,period_start,period_end,timezone,content_sha256,rendered_content,state,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,'pending',?,?)""",
+            (
+                f"resend:{latest['id']}:{now}",
+                latest["period_start"],
+                latest["period_end"],
+                latest["timezone"],
+                latest["content_sha256"],
+                latest["rendered_content"],
+                now,
+                now,
+            ),
+        )
+        self.connection.commit()
+        resend = self.connection.execute("SELECT * FROM digests WHERE id=?", (cursor.lastrowid,)).fetchone()
+        return cast(sqlite3.Row | None, resend)
 
     def pending_digests(self) -> list[sqlite3.Row]:
         return self.connection.execute("SELECT * FROM digests WHERE state IN ('pending','failed') ORDER BY id").fetchall()

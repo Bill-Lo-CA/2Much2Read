@@ -48,6 +48,7 @@ def run_pipeline(
     max_messages: int | None = None,
     no_deliver: bool = False,
     dry_run: bool = False,
+    force: bool = False,
 ) -> dict[str, int | str]:
     sources = [source for source in load_sources(settings.sources_config_path).sources if source.enabled]
     if source_id:
@@ -81,10 +82,9 @@ def run_pipeline(
             for source in sources:
                 processed_label = "NewsletterBot/Processed"
                 failed_label = "NewsletterBot/Failed"
-                query = (
-                    f"({source.gmail_query}) newer_than:{settings.gmail_lookback_days}d "
-                    f'-label:"{processed_label}" -label:"{failed_label}"'
-                )
+                query = f"({source.gmail_query}) newer_than:{settings.gmail_lookback_days}d"
+                if not force:
+                    query += f' -label:"{processed_label}" -label:"{failed_label}"'
                 limit = max_messages or settings.gmail_max_messages_per_run
                 for gmail_id in gmail.list_messages(query, limit):
                     message = gmail.get_message(gmail_id)
@@ -104,14 +104,13 @@ def run_pipeline(
                         headers.get("subject", ""),
                         headers.get("from", ""),
                         body,
+                        force=force,
                     )
                     if message_id is None:
                         continue
                     discovered += 1
-                    extraction = ollama.extract(source.id, body, truncated)
-                    if extraction.source_id != source.id or len(extraction.items) > source.max_items_per_email:
-                        raise ValueError("OLLAMA_SCHEMA_INVALID")
-                    database.store_extraction(message_id, extraction)
+                    extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
+                    database.store_extraction(message_id, extraction, replace=force)
                     processed += 1
                     if not dry_run:
                         gmail.add_labels(
@@ -133,6 +132,8 @@ def run_pipeline(
             if content and not dry_run:
                 period_start = now - timedelta(days=1)
                 digest_key = f"daily:{now.date()}:{settings.digest_timezone}"
+                if force:
+                    digest_key += f":force:{datetime.now(UTC).isoformat()}"
                 created = database.save_digest(
                     digest_key,
                     period_start.isoformat(),
@@ -174,3 +175,24 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> int:
         if owned:
             database.close()
     return delivered
+
+
+def resend_latest(settings: Settings) -> int:
+    database = Database(settings.database_path)
+    try:
+        digest = database.prepare_latest_resend()
+        if digest is None:
+            return 0
+        try:
+            ids = deliver(
+                settings.discord_webhook_url,
+                str(digest["rendered_content"]),
+                settings.discord_username,
+            )
+            database.finish_delivery(int(digest["id"]), ids)
+            return 1
+        except Exception:
+            database.fail_delivery(int(digest["id"]))
+            raise
+    finally:
+        database.close()
