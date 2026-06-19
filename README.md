@@ -21,11 +21,13 @@ ollama pull qwen3:8b
 ollama list
 uv sync --all-groups
 cp .env.example .env
+mkdir ~/.config/newsletter-digest
 cp config/sources.example.yaml ~/.config/newsletter-digest/sources.yaml
 chmod 600 .env ~/.config/newsletter-digest/sources.yaml
 ```
 
-Edit `.env` paths for the deployment user. Keep the runtime directory at mode `0700` and all
+The paths in `.env.example` use `${HOME}`, which dotenv expands to the deployment user's home
+directory. Keep the runtime directory at mode `0700` and all
 credential, token, and environment files at `0600`. Never commit `.env`, Google JSON files, the
 SQLite database, or real newsletter fixtures.
 
@@ -41,8 +43,8 @@ Google normally downloads the desktop OAuth credential with a name similar to
 user token. Keep its original name if preferred and set the full path in `.env`:
 
 ```dotenv
-GMAIL_CREDENTIALS_PATH=/home/USER/.config/newsletter-digest/client_secret_123.apps.googleusercontent.com.json
-GMAIL_TOKEN_PATH=/home/USER/.config/newsletter-digest/google-token.json
+GMAIL_CREDENTIALS_PATH=${HOME}/.config/newsletter-digest/client_secret_123.apps.googleusercontent.com.json
+GMAIL_TOKEN_PATH=${HOME}/.config/newsletter-digest/google-token.json
 ```
 
 Neither file belongs in Git. Transfer the client credential directly to Linux, then let the auth
