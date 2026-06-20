@@ -117,20 +117,20 @@ def doctor(send_test: Annotated[bool, typer.Option()] = False) -> None:
 def run_command(
     dry_run: Annotated[bool, typer.Option()] = False,
     source: Annotated[str | None, typer.Option()] = None,
-    no_deliver: Annotated[bool, typer.Option()] = False,
+    deliver: Annotated[bool, typer.Option("--deliver/--no-deliver")] = True,
     max_messages: Annotated[int | None, typer.Option(min=1)] = None,
     force: Annotated[bool, typer.Option()] = False,
     resend: Annotated[bool, typer.Option()] = False,
 ) -> None:
     if resend:
-        if dry_run or source is not None or no_deliver or max_messages is not None or force:
+        if dry_run or source is not None or not deliver or max_messages is not None or force:
             raise typer.BadParameter("--resend cannot be combined with other run options")
         delivered = resend_latest(Settings())
         emit(status="ok" if delivered else "no_digest", delivered=delivered)
         return
     if force and (dry_run or source is None or max_messages is None):
         raise typer.BadParameter("--force requires --source and --max-messages and cannot use --dry-run")
-    emit(**run_pipeline(Settings(), source, max_messages, no_deliver, dry_run, force))
+    emit(**run_pipeline(Settings(), source, max_messages, not deliver, dry_run, force))
 
 
 @app.command("retry-delivery")
