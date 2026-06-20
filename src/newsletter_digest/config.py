@@ -21,6 +21,8 @@ class Source(BaseModel):
     def valid_id(cls, value: str) -> str:
         if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*", value):
             raise ValueError("source id must be a lowercase slug")
+        if value == "list":
+            raise ValueError("source id 'list' is reserved for the CLI; choose another id")
         return value
 
 

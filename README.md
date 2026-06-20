@@ -73,10 +73,15 @@ ssh -L 8765:localhost:8765 USER@SERVER
 
 uv run newsletter-digest auth gmail
 uv run newsletter-digest labels ensure
+uv run newsletter-digest discover --source list
+uv run newsletter-digest discover --source ai-newspaper
 uv run newsletter-digest discover --query 'label:ai-newspaper'
 ```
 
-`discover` prints metadata only. After observing the real sender, optionally strengthen the local
+`discover --source <id>` uses that source's `gmail_query`; `discover --source list` prints the
+configured source IDs without connecting to Gmail. The source ID `list` is reserved and cannot be used
+in `sources.yaml`. `--source` and `--query` are mutually exclusive. `discover` prints metadata only.
+After observing the real sender, optionally strengthen the local
 `sources.yaml` query with `from:`. The application never fetches links or modifies non-
 `NewsletterBot/` labels.
 

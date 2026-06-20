@@ -51,10 +51,24 @@ def labels_ensure() -> None:
 
 @app.command()
 def discover(
-    query: Annotated[str, typer.Option()] = "newer_than:30d",
+    query: Annotated[str | None, typer.Option()] = None,
+    source: Annotated[str | None, typer.Option()] = None,
     limit: Annotated[int, typer.Option(min=1, max=100)] = 20,
 ) -> None:
+    if query is not None and source is not None:
+        raise typer.BadParameter("--query and --source cannot be used together")
     settings = Settings()
+    if source is not None:
+        sources = load_sources(settings.sources_config_path).sources
+        if source == "list":
+            emit(status="ok", source_ids=[item.id for item in sources])
+            return
+        matching_sources = [item for item in sources if item.id == source]
+        if not matching_sources:
+            available_ids = ", ".join(item.id for item in sources) or "(none)"
+            raise typer.BadParameter(f"unknown source id {source!r}; available source IDs: {available_ids}")
+        query = matching_sources[0].gmail_query
+    query = query or "newer_than:30d"
     gmail = GmailClient(
         credentials(
             settings.gmail_credentials_path,
