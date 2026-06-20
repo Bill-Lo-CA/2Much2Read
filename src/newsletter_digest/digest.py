@@ -28,7 +28,7 @@ def dedupe(items: list[DigestItem]) -> list[DigestItem]:
     # ponytail: one-pass in-memory dedupe; move history lookup to SQLite when volume warrants it.
     winners: dict[str, DigestItem] = {}
     for item in items:
-        key = canonical_url(str(item.source_url)) or normalized_title(item.title)
+        key = (canonical_url(str(item.source_url)) if item.source_url else None) or normalized_title(item.title)
         current = winners.get(key)
         if current is None or (item.confidence, item.importance) > (
             current.confidence,

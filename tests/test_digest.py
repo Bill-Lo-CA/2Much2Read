@@ -4,7 +4,7 @@ from newsletter_digest.digest import canonical_url, chunk_text, dedupe, render_d
 from newsletter_digest.schemas import DigestItem
 
 
-def item(title: str, url: str, confidence: float = 0.8) -> DigestItem:
+def item(title: str, url: str | None, confidence: float = 0.8) -> DigestItem:
     return DigestItem(
         title=title,
         category="AI_MODEL",
@@ -20,6 +20,12 @@ def item(title: str, url: str, confidence: float = 0.8) -> DigestItem:
 def test_canonical_url_and_dedupe() -> None:
     assert canonical_url("HTTPS://Example.COM/a?utm_source=x&id=1#top") == "https://example.com/a?id=1"
     assert dedupe([item("A", "https://example.com/a", 0.5), item("B", "https://example.com/a", 0.9)])[0].title == "B"
+
+
+def test_items_without_urls_dedupe_by_title() -> None:
+    items = dedupe([item("First story", None), item("Second story", None)])
+
+    assert [entry.title for entry in items] == ["First story", "Second story"]
 
 
 def test_renderer_and_chunks_disable_mentions() -> None:

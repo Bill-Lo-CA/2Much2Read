@@ -9,6 +9,8 @@ import typer
 
 from .config import Settings, load_sources
 from .gmail import GmailClient, credentials, display_id
+from .mime import extract_gmail_payload
+from .ollama import OllamaClient
 from .pipeline import resend_latest, run_pipeline
 from .pipeline import retry_delivery as retry_pending
 
@@ -89,6 +91,74 @@ def discover(
             sender=values.get("from"),
             subject=values.get("subject"),
         )
+
+
+@app.command()
+def inspect(
+    source: Annotated[str, typer.Option()],
+    message_id: Annotated[str, typer.Option("--id")],
+    extract: Annotated[bool, typer.Option()] = False,
+    limit: Annotated[int, typer.Option(min=1, max=100)] = 100,
+) -> None:
+    settings = Settings()
+    sources = load_sources(settings.sources_config_path).sources
+    matching_sources = [item for item in sources if item.id == source]
+    if not matching_sources:
+        available_ids = ", ".join(item.id for item in sources) or "(none)"
+        raise typer.BadParameter(f"unknown source id {source!r}; available source IDs: {available_ids}")
+    configured_source = matching_sources[0]
+    gmail = GmailClient(
+        credentials(
+            settings.gmail_credentials_path,
+            settings.gmail_token_path,
+            settings.gmail_oauth_callback_port,
+        )
+    )
+    for gmail_id in gmail.list_messages(configured_source.gmail_query, limit):
+        if display_id(gmail_id) != message_id:
+            continue
+        message = gmail.get_message(gmail_id)
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            raise ValueError("email has no Gmail payload")
+        text = extract_gmail_payload(payload)
+        truncated = len(text) > 45_000
+        llm_input = text[:45_000] if truncated else text
+        headers = payload.get("headers", [])
+        result: dict[str, object] = {
+            "status": "ok",
+            "id": message_id,
+            "metadata": {
+                "received": message.get("internalDate"),
+                "headers": headers if isinstance(headers, list) else [],
+                "label_ids": message.get("labelIds", []),
+                "mime_type": payload.get("mimeType"),
+            },
+            "parsed": {
+                "text": llm_input,
+                "original_characters": len(text),
+                "input_characters": len(llm_input),
+                "truncated": truncated,
+            },
+        }
+        if extract:
+            ollama = OllamaClient(
+                settings.ollama_base_url,
+                settings.ollama_model,
+                settings.ollama_timeout_seconds,
+                settings.ollama_num_ctx,
+                settings.ollama_keep_alive,
+            )
+            extraction = ollama.extract(
+                configured_source.id,
+                llm_input,
+                truncated,
+                configured_source.max_items_per_email,
+            )
+            result["extraction"] = extraction.model_dump(mode="json")
+        emit(**result)
+        return
+    raise typer.BadParameter(f"message id {message_id!r} was not found in source {source!r} within the first {limit} matches")
 
 
 @app.command()

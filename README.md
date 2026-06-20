@@ -76,6 +76,12 @@ uv run newsletter-digest labels ensure
 uv run newsletter-digest discover --source list
 uv run newsletter-digest discover --source ai-newspaper
 uv run newsletter-digest discover --query 'label:ai-newspaper'
+
+# Inspect the sanitized text for one discover result without writing state or applying labels.
+uv run newsletter-digest inspect --source ai-newspaper --id DISPLAY_ID
+
+# Also send that sanitized text to Ollama and print the structured extraction.
+uv run newsletter-digest inspect --source ai-newspaper --id DISPLAY_ID --extract
 ```
 
 `discover --source <id>` uses that source's `gmail_query`; `discover --source list` prints the
@@ -84,6 +90,13 @@ in `sources.yaml`. `--source` and `--query` are mutually exclusive. `discover` p
 After observing the real sender, optionally strengthen the local
 `sources.yaml` query with `from:`. The application never fetches links or modifies non-
 `NewsletterBot/` labels.
+
+`inspect` searches up to 100 messages matching the source query and compares the privacy-safe
+display ID printed by `discover`. It prints message headers, Gmail label IDs, MIME type, and the
+sanitized text that would be sent to Ollama. `--extract` additionally calls Ollama and prints its
+structured result. Inspect never writes SQLite state, applies Gmail labels, or sends Discord. Its
+terminal output can contain private email text, so do not run it from systemd or save the output in
+logs.
 
 ## Run
 
