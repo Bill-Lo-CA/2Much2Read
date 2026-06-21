@@ -48,7 +48,8 @@ def labels_ensure() -> None:
         )
     )
     labels = gmail.ensure_labels([source.name for source in sources])
-    emit(status="ok", labels=sorted(name for name in labels if name.startswith("NewsletterBot/")))
+    filters = gmail.ensure_source_filters(sources)
+    emit(status="ok", labels=sorted(name for name in labels if name.startswith("NewsletterBot/")), filters=filters)
 
 
 @app.command()

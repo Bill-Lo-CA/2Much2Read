@@ -10,20 +10,27 @@ from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-untyped]
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
 
-SCOPE = "https://www.googleapis.com/auth/gmail.modify"
+from .config import Source
+
+SCOPES = (
+    "https://www.googleapis.com/auth/gmail.modify",
+    "https://www.googleapis.com/auth/gmail.settings.basic",
+)
 LABEL_PREFIX = "NewsletterBot/"
 
 
 def credentials(credentials_path: Path, token_path: Path, port: int = 8765) -> Credentials:
     creds: Credentials | None = None
     if token_path.is_file():
-        creds = Credentials.from_authorized_user_file(str(token_path), [SCOPE])  # type: ignore[no-untyped-call]
+        creds = Credentials.from_authorized_user_file(str(token_path))  # type: ignore[no-untyped-call]
+    if creds and not creds.has_scopes(SCOPES):  # type: ignore[no-untyped-call]
+        creds = None
     if creds and creds.expired and creds.refresh_token:
         creds.refresh(Request())  # type: ignore[no-untyped-call]
     if not creds or not creds.valid:
         if not credentials_path.is_file():
             raise ValueError(f"GMAIL_AUTH_REQUIRED: missing {credentials_path}")
-        flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), [SCOPE])
+        flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
         creds = flow.run_local_server(port=port, access_type="offline", prompt="consent", open_browser=False)
     token_path.parent.mkdir(parents=True, exist_ok=True)
     token_path.write_text(creds.to_json(), encoding="utf-8")
@@ -61,6 +68,50 @@ class GmailClient:
                 )
                 self.labels[name] = label["id"]
         return self.labels
+
+    def ensure_source_filters(self, sources: list[Source]) -> list[dict[str, str]]:
+        existing: list[dict[str, Any]] = self.service.users().settings().filters().list(userId="me").execute().get("filter", [])
+        results: list[dict[str, str]] = []
+        for source in sources:
+            if source.gmail_filter is None:
+                continue
+            label_name = source.gmail_filter.label
+            if label_name not in self.labels:
+                label = (
+                    self.service.users()
+                    .labels()
+                    .create(
+                        userId="me",
+                        body={
+                            "name": label_name,
+                            "labelListVisibility": "labelShow",
+                            "messageListVisibility": "show",
+                        },
+                    )
+                    .execute()
+                )
+                self.labels[label_name] = label["id"]
+            body: dict[str, Any] = {
+                "criteria": source.gmail_filter.criteria,
+                "action": {"addLabelIds": [self.labels[label_name]]},
+            }
+            found = next(
+                (
+                    item
+                    for item in existing
+                    if item.get("criteria") == body["criteria"]
+                    and self.labels[label_name] in item.get("action", {}).get("addLabelIds", [])
+                ),
+                None,
+            )
+            if found is None:
+                found = self.service.users().settings().filters().create(userId="me", body=body).execute()
+                existing.append({**body, **found})
+                status = "created"
+            else:
+                status = "exists"
+            results.append({"source_id": source.id, "filter_id": str(found["id"]), "status": status})
+        return results
 
     def list_messages(self, query: str, limit: int) -> list[str]:
         ids: list[str] = []

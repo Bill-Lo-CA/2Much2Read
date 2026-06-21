@@ -55,17 +55,26 @@ scp client_secret_*.apps.googleusercontent.com.json USER@SERVER:~/.config/newsle
 chmod 600 ~/.config/newsletter-digest/client_secret_*.apps.googleusercontent.com.json
 ```
 
-For a manually curated Gmail label, use this local `sources.yaml` entry:
+To let the application create a Gmail label and incoming-message filter, use a criteria dictionary
+in the local `sources.yaml`:
 
 ```yaml
 sources:
-  - id: ai-newspaper
-    name: AI Newspaper
+  - id: alphasignal
+    name: AlphaSignal
     enabled: true
     category: AI
-    gmail_query: 'label:ai-newspaper'
+    gmail_query: 'label:"Newsletters/AlphaSignal"'
+    gmail_filter:
+      label: Newsletters/AlphaSignal
+      criteria:
+        from: news@alphasignal.ai
     max_items_per_email: 10
 ```
+
+Filter criteria support `from`, `to`, `subject`, `query`, `negatedQuery`, `hasAttachment`,
+`excludeChats`, `size`, and `sizeComparison`. Actions are intentionally fixed to adding the one
+configured label; the application cannot configure archive, delete, or forwarding actions.
 
 ```bash
 # When authorizing a remote Linux machine, run this locally first:
@@ -74,15 +83,21 @@ ssh -L 8765:localhost:8765 USER@SERVER
 uv run newsletter-digest auth gmail
 uv run newsletter-digest labels ensure
 uv run newsletter-digest discover --source list
-uv run newsletter-digest discover --source ai-newspaper
-uv run newsletter-digest discover --query 'label:ai-newspaper'
+uv run newsletter-digest discover --source alphasignal
+uv run newsletter-digest discover --query 'label:"Newsletters/AlphaSignal"'
 
 # Inspect the sanitized text for one discover result without writing state or applying labels.
-uv run newsletter-digest inspect --source ai-newspaper --id DISPLAY_ID
+uv run newsletter-digest inspect --source alphasignal --id DISPLAY_ID
 
 # Also send that sanitized text to Ollama and print the structured extraction.
-uv run newsletter-digest inspect --source ai-newspaper --id DISPLAY_ID --extract
+uv run newsletter-digest inspect --source alphasignal --id DISPLAY_ID --extract
 ```
+
+The application requests both `gmail.modify` and `gmail.settings.basic`. Running `auth gmail` with
+an older token automatically opens the consent flow again when the settings scope is missing. A
+successful flow replaces the token; the old token is not overwritten if authorization fails.
+`labels ensure` creates missing configured labels and filters idempotently. Gmail filters affect
+new matching messages and do not retroactively classify existing mail.
 
 `discover --source <id>` uses that source's `gmail_query`; `discover --source list` prints the
 configured source IDs without connecting to Gmail. The source ID `list` is reserved and cannot be used
@@ -105,27 +120,27 @@ logs.
 uv run newsletter-digest doctor
 
 # Gmail metadata-only connectivity check.
-uv run newsletter-digest discover --query 'label:ai-newspaper' --limit 1
+uv run newsletter-digest discover --source alphasignal --limit 1
 
 # Gmail → MIME → Ollama without persistent database state, processed labels, or Discord delivery.
-uv run newsletter-digest run --dry-run --source ai-newspaper --max-messages 1
+uv run newsletter-digest run --dry-run --source alphasignal --max-messages 1
 
 # Persist one result and apply Gmail labels, but hold Discord delivery.
-uv run newsletter-digest run --no-deliver --source ai-newspaper --max-messages 1
+uv run newsletter-digest run --no-deliver --source alphasignal --max-messages 1
 
 # Deliver the already stored digest without calling Gmail or Ollama again.
 uv run newsletter-digest retry-delivery
 
-uv run newsletter-digest backfill --days 7 --source ai-newspaper
+uv run newsletter-digest backfill --days 7 --source alphasignal
 
 # Reprocess a bounded number of messages even if they already have processed labels, then send a new digest.
-uv run newsletter-digest run --force --source ai-newspaper --max-messages 1
+uv run newsletter-digest run --force --source alphasignal --max-messages 1
 
 # Resend the latest stored digest without calling Gmail or Ollama.
 uv run newsletter-digest run --resend
 ```
 
-Replace `ai-newspaper` with an enabled `id` from your local `sources.yaml`. If `--source` is
+Replace `alphasignal` with an enabled `id` from your local `sources.yaml`. If `--source` is
 omitted, the command processes every enabled source.
 `--force` requires both `--source` and `--max-messages`; it replaces stored items for matching
 messages and creates a new digest delivery. `--resend` cannot be combined with other run options

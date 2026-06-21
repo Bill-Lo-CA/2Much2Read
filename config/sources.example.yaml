@@ -3,5 +3,9 @@ sources:
     name: AlphaSignal
     enabled: true
     category: AI
-    gmail_query: 'label:ai-newspaper from:news@alphasignal.ai'
+    gmail_query: 'label:"Newsletters/AlphaSignal"'
+    gmail_filter:
+      label: Newsletters/AlphaSignal
+      criteria:
+        from: news@alphasignal.ai
     max_items_per_email: 10

@@ -4,8 +4,36 @@ import re
 from pathlib import Path
 
 import yaml
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+
+class GmailFilter(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    label: str = Field(min_length=1)
+    criteria: dict[str, str | bool | int]
+
+    @field_validator("criteria")
+    @classmethod
+    def valid_criteria(cls, value: dict[str, str | bool | int]) -> dict[str, str | bool | int]:
+        allowed = {
+            "from",
+            "to",
+            "subject",
+            "query",
+            "negatedQuery",
+            "hasAttachment",
+            "excludeChats",
+            "size",
+            "sizeComparison",
+        }
+        if not value:
+            raise ValueError("gmail filter criteria must not be empty")
+        unknown = sorted(value.keys() - allowed)
+        if unknown:
+            raise ValueError(f"unsupported gmail filter criteria: {', '.join(unknown)}")
+        return value
 
 
 class Source(BaseModel):
@@ -14,6 +42,7 @@ class Source(BaseModel):
     enabled: bool = True
     category: str = "OTHER"
     gmail_query: str
+    gmail_filter: GmailFilter | None = None
     max_items_per_email: int = Field(default=10, ge=1, le=50)
 
     @field_validator("id")
