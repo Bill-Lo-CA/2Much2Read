@@ -17,8 +17,10 @@ from .pipeline import retry_delivery as retry_pending
 app = typer.Typer(no_args_is_help=True)
 auth_app = typer.Typer()
 labels_app = typer.Typer()
+filters_app = typer.Typer()
 app.add_typer(auth_app, name="auth")
 app.add_typer(labels_app, name="labels")
+app.add_typer(filters_app, name="filters")
 
 
 def emit(**values: object) -> None:
@@ -47,9 +49,24 @@ def labels_ensure() -> None:
             settings.gmail_oauth_callback_port,
         )
     )
-    labels = gmail.ensure_labels([source.name for source in sources])
+    gmail.ensure_labels()
     filters = gmail.ensure_source_filters(sources)
-    emit(status="ok", labels=sorted(name for name in labels if name.startswith("NewsletterBot/")), filters=filters)
+    labels = {"NewsletterBot/Processed", "NewsletterBot/Failed"}
+    labels.update(source.gmail_filter.label for source in sources if source.gmail_filter is not None)
+    emit(status="ok", labels=sorted(labels), filters=filters)
+
+
+@filters_app.command("list")
+def filters_list() -> None:
+    settings = Settings()
+    gmail = GmailClient(
+        credentials(
+            settings.gmail_credentials_path,
+            settings.gmail_token_path,
+            settings.gmail_oauth_callback_port,
+        )
+    )
+    emit(status="ok", filters=gmail.list_filters())
 
 
 @app.command()

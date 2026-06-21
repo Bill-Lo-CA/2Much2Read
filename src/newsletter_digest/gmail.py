@@ -19,6 +19,19 @@ SCOPES = (
 LABEL_PREFIX = "NewsletterBot/"
 
 
+def find_label_id(labels: dict[str, str], name: str) -> str | None:
+    return next((label_id for label_name, label_id in labels.items() if label_name.casefold() == name.casefold()), None)
+
+
+def source_backfill_query(source: Source) -> str:
+    if source.gmail_filter is None:
+        raise ValueError(f"source {source.id!r} has no gmail_filter")
+    sender = source.gmail_filter.criteria.get("from")
+    if not isinstance(sender, str) or not sender.strip():
+        raise ValueError(f"source {source.id!r} has no string gmail_filter.criteria.from")
+    return f'from:{sender} -label:"{source.gmail_filter.label}"'
+
+
 def credentials(credentials_path: Path, token_path: Path, port: int = 8765) -> Credentials:
     creds: Credentials | None = None
     if token_path.is_file():
@@ -47,26 +60,29 @@ class GmailClient:
         data = self.service.users().labels().list(userId="me").execute()
         return {label["name"]: label["id"] for label in data.get("labels", [])}
 
-    def ensure_labels(self, source_names: list[str]) -> dict[str, str]:
-        names = [f"{LABEL_PREFIX}Processed", f"{LABEL_PREFIX}Failed"] + [
-            f"{LABEL_PREFIX}Source/{name.replace('/', '-')}" for name in source_names
-        ]
-        for name in names:
-            if name not in self.labels:
-                label = (
-                    self.service.users()
-                    .labels()
-                    .create(
-                        userId="me",
-                        body={
-                            "name": name,
-                            "labelListVisibility": "labelShow",
-                            "messageListVisibility": "show",
-                        },
-                    )
-                    .execute()
+    def _ensure_label(self, name: str) -> str:
+        label_id = find_label_id(self.labels, name)
+        if label_id is None:
+            label = (
+                self.service.users()
+                .labels()
+                .create(
+                    userId="me",
+                    body={
+                        "name": name,
+                        "labelListVisibility": "labelShow",
+                        "messageListVisibility": "show",
+                    },
                 )
-                self.labels[name] = label["id"]
+                .execute()
+            )
+            label_id = str(label["id"])
+        self.labels[name] = label_id
+        return label_id
+
+    def ensure_labels(self) -> dict[str, str]:
+        for name in (f"{LABEL_PREFIX}Processed", f"{LABEL_PREFIX}Failed"):
+            self._ensure_label(name)
         return self.labels
 
     def ensure_source_filters(self, sources: list[Source]) -> list[dict[str, str]]:
@@ -76,31 +92,16 @@ class GmailClient:
             if source.gmail_filter is None:
                 continue
             label_name = source.gmail_filter.label
-            if label_name not in self.labels:
-                label = (
-                    self.service.users()
-                    .labels()
-                    .create(
-                        userId="me",
-                        body={
-                            "name": label_name,
-                            "labelListVisibility": "labelShow",
-                            "messageListVisibility": "show",
-                        },
-                    )
-                    .execute()
-                )
-                self.labels[label_name] = label["id"]
+            label_id = self._ensure_label(label_name)
             body: dict[str, Any] = {
                 "criteria": source.gmail_filter.criteria,
-                "action": {"addLabelIds": [self.labels[label_name]]},
+                "action": {"addLabelIds": [label_id]},
             }
             found = next(
                 (
                     item
                     for item in existing
-                    if item.get("criteria") == body["criteria"]
-                    and self.labels[label_name] in item.get("action", {}).get("addLabelIds", [])
+                    if item.get("criteria") == body["criteria"] and label_id in item.get("action", {}).get("addLabelIds", [])
                 ),
                 None,
             )
@@ -112,6 +113,13 @@ class GmailClient:
                 status = "exists"
             results.append({"source_id": source.id, "filter_id": str(found["id"]), "status": status})
         return results
+
+    def list_filters(self) -> list[dict[str, Any]]:
+        response: dict[str, Any] = self.service.users().settings().filters().list(userId="me").execute()
+        filters = response.get("filter")
+        if not isinstance(filters, list):
+            return []
+        return [dict(item) for item in filters if isinstance(item, dict)]
 
     def list_messages(self, query: str, limit: int) -> list[str]:
         ids: list[str] = []
@@ -144,6 +152,9 @@ class GmailClient:
         self.service.users().messages().modify(
             userId="me", id=message_id, body={"addLabelIds": [self.labels[name] for name in names]}
         ).execute()
+
+    def add_label_id(self, message_id: str, label_id: str) -> None:
+        self.service.users().messages().modify(userId="me", id=message_id, body={"addLabelIds": [label_id]}).execute()
 
 
 def display_id(message_id: str) -> str:

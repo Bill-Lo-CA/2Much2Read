@@ -37,6 +37,23 @@ def test_discover_source_list_reads_config_without_gmail(tmp_path: Path, monkeyp
     assert payload == {"status": "ok", "source_ids": ["alphasignal"]}
 
 
+def test_filters_list_outputs_existing_filters(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeGmailClient:
+        def __init__(self, creds: object) -> None:
+            pass
+
+        def list_filters(self) -> list[dict[str, Any]]:
+            return [{"id": "Filter_1", "criteria": {"from": "news@example.com"}, "action": {"addLabelIds": ["Label_1"]}}]
+
+    monkeypatch.setattr(cli, "credentials", lambda *args: object())
+    monkeypatch.setattr(cli, "GmailClient", FakeGmailClient)
+
+    result = CliRunner().invoke(cli.app, ["filters", "list"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["filters"][0]["id"] == "Filter_1"
+
+
 def test_inspect_outputs_parsed_text_and_optional_extraction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sources_path = tmp_path / "sources.yaml"
     sources_path.write_text(

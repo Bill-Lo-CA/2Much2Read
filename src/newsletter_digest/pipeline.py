@@ -66,7 +66,7 @@ def run_pipeline(
         settings.gmail_oauth_callback_port,
     )
     gmail = GmailClient(creds)
-    gmail.ensure_labels([source.name for source in sources])
+    gmail.ensure_labels()
     ollama = OllamaClient(
         settings.ollama_base_url,
         settings.ollama_model,
@@ -113,13 +113,7 @@ def run_pipeline(
                     database.store_extraction(message_id, extraction, replace=force)
                     processed += 1
                     if not dry_run:
-                        gmail.add_labels(
-                            gmail_id,
-                            [
-                                processed_label,
-                                f"NewsletterBot/Source/{source.name.replace('/', '-')}",
-                            ],
-                        )
+                        gmail.add_labels(gmail_id, [processed_label])
 
             now = datetime.now(ZoneInfo(settings.digest_timezone))
             content = render_digest(

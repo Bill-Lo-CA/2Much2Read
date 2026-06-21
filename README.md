@@ -64,9 +64,9 @@ sources:
     name: AlphaSignal
     enabled: true
     category: AI
-    gmail_query: 'label:"Newsletters/AlphaSignal"'
+    gmail_query: 'label:ai-newsPaper from:news@alphasignal.ai'
     gmail_filter:
-      label: Newsletters/AlphaSignal
+      label: ai-newsPaper
       criteria:
         from: news@alphasignal.ai
     max_items_per_email: 10
@@ -82,9 +82,13 @@ ssh -L 8765:localhost:8765 USER@SERVER
 
 uv run newsletter-digest auth gmail
 uv run newsletter-digest labels ensure
+uv run newsletter-digest filters list
+# Preview totals by topic, then apply category labels to existing messages matched by each source's sender.
+uv run python scripts/backfill_category_labels.py
+uv run python scripts/backfill_category_labels.py --apply
 uv run newsletter-digest discover --source list
 uv run newsletter-digest discover --source alphasignal
-uv run newsletter-digest discover --query 'label:"Newsletters/AlphaSignal"'
+uv run newsletter-digest discover --query 'label:ai-newsPaper from:news@alphasignal.ai'
 
 # Inspect the sanitized text for one discover result without writing state or applying labels.
 uv run newsletter-digest inspect --source alphasignal --id DISPLAY_ID
@@ -96,7 +100,9 @@ uv run newsletter-digest inspect --source alphasignal --id DISPLAY_ID --extract
 The application requests both `gmail.modify` and `gmail.settings.basic`. Running `auth gmail` with
 an older token automatically opens the consent flow again when the settings scope is missing. A
 successful flow replaces the token; the old token is not overwritten if authorization fails.
-`labels ensure` creates missing configured labels and filters idempotently. Gmail filters affect
+`labels ensure` creates the two processing labels, configured category labels, and filters
+idempotently. Sender-specific queries combine `label:` with `from:` so sources sharing a category
+remain distinct. Gmail filters affect
 new matching messages and do not retroactively classify existing mail.
 
 `discover --source <id>` uses that source's `gmail_query`; `discover --source list` prints the

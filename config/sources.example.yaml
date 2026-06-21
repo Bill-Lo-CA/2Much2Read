@@ -1,11 +1,17 @@
+# Gmail category labels:
+# - ai-newsPaper
+# - cloud-data-newspaper
+# - cyber-newspaper
+# - dev-newspaper
+# - product-business-newspaper
 sources:
   - id: alphasignal
     name: AlphaSignal
     enabled: true
     category: AI
-    gmail_query: 'label:"Newsletters/AlphaSignal"'
+    gmail_query: 'label:ai-newsPaper from:news@alphasignal.ai'
     gmail_filter:
-      label: Newsletters/AlphaSignal
+      label: ai-newsPaper
       criteria:
         from: news@alphasignal.ai
     max_items_per_email: 10
