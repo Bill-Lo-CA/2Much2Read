@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
@@ -176,6 +177,27 @@ class Database:
 
     def pending_digests(self) -> list[sqlite3.Row]:
         return self.connection.execute("SELECT * FROM digests WHERE state IN ('pending','failed') ORDER BY id").fetchall()
+
+    def counts(self) -> dict[str, int]:
+        return {
+            table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+            for table in ("messages", "items", "digests", "runs")
+        }
+
+    def backup(self, path: Path) -> None:
+        backup = sqlite3.connect(path)
+        try:
+            self.connection.backup(backup)
+        finally:
+            backup.close()
+        os.chmod(path, 0o600)
+
+    def reset(self) -> dict[str, int]:
+        counts = self.counts()
+        with self.transaction() as connection:
+            for table in ("items", "messages", "digests", "runs"):
+                connection.execute(f"DELETE FROM {table}")
+        return counts
 
     def finish_delivery(self, digest_id: int, message_ids: list[str]) -> None:
         now = datetime.now(UTC).isoformat()

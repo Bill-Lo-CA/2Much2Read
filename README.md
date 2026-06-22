@@ -86,6 +86,9 @@ uv run newsletter-digest filters list
 # Preview totals by topic, then apply category labels to existing messages matched by each source's sender.
 uv run python scripts/backfill_category_labels.py
 uv run python scripts/backfill_category_labels.py --apply
+# Preview, then reset all local database state and Gmail processing labels for testing.
+uv run python scripts/cleanup_test_environment.py
+uv run python scripts/cleanup_test_environment.py --apply
 uv run newsletter-digest discover --source list
 uv run newsletter-digest discover --source alphasignal
 uv run newsletter-digest discover --query 'label:ai-newsPaper from:news@alphasignal.ai'

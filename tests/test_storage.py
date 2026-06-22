@@ -68,3 +68,20 @@ def test_force_replaces_existing_extraction(tmp_path: Path) -> None:
     database.store_extraction(forced_id, extraction, replace=True)
     assert database.recent_items()[0]["title"] == "New title"
     database.close()
+
+
+def test_backup_and_reset(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    assert database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body") is not None
+    backup_path = tmp_path / "backup.sqlite3"
+
+    database.backup(backup_path)
+    counts = database.reset()
+
+    assert counts["messages"] == 1
+    assert database.counts() == {"messages": 0, "items": 0, "digests": 0, "runs": 0}
+    assert backup_path.stat().st_mode & 0o777 == 0o600
+    backup = Database(backup_path)
+    assert backup.counts()["messages"] == 1
+    backup.close()
+    database.close()

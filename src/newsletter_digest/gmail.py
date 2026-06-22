@@ -121,17 +121,18 @@ class GmailClient:
             return []
         return [dict(item) for item in filters if isinstance(item, dict)]
 
-    def list_messages(self, query: str, limit: int) -> list[str]:
+    def list_messages(self, query: str, limit: int | None = None) -> list[str]:
         ids: list[str] = []
         page_token: str | None = None
-        while len(ids) < limit:
+        while limit is None or len(ids) < limit:
+            page_size = 100 if limit is None else min(100, limit - len(ids))
             response = (
                 self.service.users()
                 .messages()
                 .list(
                     userId="me",
                     q=query,
-                    maxResults=min(100, limit - len(ids)),
+                    maxResults=page_size,
                     pageToken=page_token,
                 )
                 .execute()
@@ -155,6 +156,13 @@ class GmailClient:
 
     def add_label_id(self, message_id: str, label_id: str) -> None:
         self.service.users().messages().modify(userId="me", id=message_id, body={"addLabelIds": [label_id]}).execute()
+
+    def remove_labels(self, message_id: str, names: list[str]) -> None:
+        if any(not name.startswith(LABEL_PREFIX) for name in names):
+            raise ValueError("refusing to remove a non-NewsletterBot label")
+        label_ids = [label_id for name in names if (label_id := find_label_id(self.labels, name)) is not None]
+        if label_ids:
+            self.service.users().messages().modify(userId="me", id=message_id, body={"removeLabelIds": label_ids}).execute()
 
 
 def display_id(message_id: str) -> str:
