@@ -92,9 +92,11 @@ uv run python scripts/backfill_category_labels.py --apply
 # Preview, then reset all local database state and Gmail processing labels for testing.
 uv run python scripts/cleanup_test_environment.py
 uv run python scripts/cleanup_test_environment.py --apply
-uv run newsletter-digest discover --source list
-uv run newsletter-digest discover --source alphasignal
+uv run newsletter-digest discover mails --source alphasignal
 uv run newsletter-digest discover --query 'label:ai-newsPaper from:news@alphasignal.ai'
+uv run newsletter-digest discover subscriptions list
+uv run newsletter-digest discover subscriptions --sync
+uv run newsletter-digest discover subscriptions --sync --apply
 
 # Inspect the sanitized text for one discover result without writing state or applying labels.
 uv run newsletter-digest inspect --source alphasignal --id DISPLAY_ID
@@ -119,9 +121,18 @@ creates a mode-`0600` timestamped SQLite backup beside the database, clears loca
 removes only `NewsletterBot/Processed` and `NewsletterBot/Failed` from configured newsletter mail.
 It preserves category labels, Gmail filters, OAuth credentials, and existing Discord messages.
 
-`discover --source <id>` uses that source's `gmail_query`; `discover --source list` prints the
-configured source IDs without connecting to Gmail. The source ID `list` is reserved and cannot be used
-in `sources.yaml`. `--source` and `--query` are mutually exclusive. `discover` prints metadata only.
+`discover --query` runs an explicit Gmail query. `discover mails --source <id>` uses that source's
+configured query. `discover subscriptions list` groups recent mail carrying `List-ID` or
+`List-Unsubscribe` headers and marks sources already configured. `discover subscriptions --sync`
+previews missing enabled YAML entries. Adding `--apply` prompts for one of five uppercase categories
+or `EXCLUDED` for every candidate. Categorized entries are appended to `sources.yaml`; excluded entries
+are stored in mode-`0600` `excluded-subscriptions.yaml` beside it and skipped by future list and sync runs.
+Both files are validated before replacement. Subscription discovery reads message metadata only. The source ID `list` remains
+reserved. All discovery commands print metadata only.
+Subscription identity prefers standard `List-ID`, then a hashed provider list ID, then the complete
+`From` mailbox. When one address sends multiple newsletters, sync builds a display-name query and
+checks its Gmail results before prompting. Queries that return another sender identity, no messages,
+or non-subscription mail are reported as `ambiguous` and are not written.
 After observing the real sender, optionally strengthen the local
 `sources.yaml` query with `from:`. The application never fetches links. Runtime processing modifies
 only `NewsletterBot/Processed` and `NewsletterBot/Failed`; maintenance commands may add the category
@@ -141,7 +152,7 @@ logs.
 uv run newsletter-digest doctor
 
 # Gmail metadata-only connectivity check.
-uv run newsletter-digest discover --source alphasignal --limit 1
+uv run newsletter-digest discover mails --source alphasignal --limit 1
 
 # Gmail → MIME → Ollama without persistent database state, processed labels, or Discord delivery.
 uv run newsletter-digest run --dry-run --source alphasignal --max-messages 1

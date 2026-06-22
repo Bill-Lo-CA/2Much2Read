@@ -147,6 +147,20 @@ class GmailClient:
         result: dict[str, Any] = self.service.users().messages().get(userId="me", id=message_id, format="full").execute()
         return result
 
+    def get_message_metadata(self, message_id: str) -> dict[str, Any]:
+        result: dict[str, Any] = (
+            self.service.users()
+            .messages()
+            .get(
+                userId="me",
+                id=message_id,
+                format="metadata",
+                metadataHeaders=["From", "Subject", "List-ID", "List-Unsubscribe", "X-EmailOctopus-List-Id"],
+            )
+            .execute()
+        )
+        return result
+
     def add_labels(self, message_id: str, names: list[str]) -> None:
         if any(not name.startswith(LABEL_PREFIX) for name in names):
             raise ValueError("refusing to modify a non-NewsletterBot label")

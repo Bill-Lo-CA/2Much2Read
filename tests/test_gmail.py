@@ -56,6 +56,21 @@ def test_ensure_labels_creates_only_processing_labels() -> None:
     assert names == ["NewsletterBot/Processed", "NewsletterBot/Failed"]
 
 
+def test_message_metadata_requests_only_subscription_headers() -> None:
+    service = MagicMock()
+    service.users().messages().get.return_value.execute.return_value = {"id": "message-1"}
+    client = object.__new__(GmailClient)
+    client.service = service
+
+    assert client.get_message_metadata("message-1") == {"id": "message-1"}
+    service.users().messages().get.assert_called_once_with(
+        userId="me",
+        id="message-1",
+        format="metadata",
+        metadataHeaders=["From", "Subject", "List-ID", "List-Unsubscribe", "X-EmailOctopus-List-Id"],
+    )
+
+
 def test_ensure_source_filter_creates_label_and_filter() -> None:
     service = MagicMock()
     service.users().settings().filters().list().execute.return_value = {"filter": []}

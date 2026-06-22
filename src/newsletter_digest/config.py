@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import os
 import re
+import stat
+import tempfile
 from pathlib import Path
 
 import yaml
@@ -66,6 +69,20 @@ class Sources(BaseModel):
         return self
 
 
+class ExcludedSubscription(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    key: str
+    id: str
+    name: str
+    sender: str
+    list_id: str | None = None
+
+
+class ExcludedSubscriptions(BaseModel):
+    excluded_subscriptions: list[ExcludedSubscription] = Field(default_factory=list)
+
+
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(env_file=".env", extra="ignore")
 
@@ -97,3 +114,52 @@ def load_sources(path: Path) -> Sources:
         raise ValueError(f"sources configuration not found: {path}")
     data = yaml.safe_load(path.read_text(encoding="utf-8"))
     return Sources.model_validate(data)
+
+
+def excluded_subscriptions_path(sources_path: Path) -> Path:
+    return sources_path.with_name("excluded-subscriptions.yaml")
+
+
+def load_excluded_subscriptions(path: Path) -> ExcludedSubscriptions:
+    if not path.is_file():
+        return ExcludedSubscriptions()
+    return ExcludedSubscriptions.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+
+
+def replace_file(path: Path, content: str, mode: int) -> None:
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        handle.write(content)
+        temporary = Path(handle.name)
+    try:
+        os.chmod(temporary, mode)
+        os.replace(temporary, path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def append_sources(path: Path, additions: list[dict[str, object]]) -> None:
+    if not additions:
+        return
+    original = path.read_text(encoding="utf-8")
+    if not re.search(r"(?m)^sources:\s*$", original):
+        raise ValueError("sources configuration must use a top-level block-style 'sources:' list")
+    rendered = [
+        f"  {line}" for line in yaml.safe_dump({"sources": additions}, allow_unicode=True, sort_keys=False).splitlines()[1:]
+    ]
+    updated = original.rstrip() + "\n" + "\n".join(rendered) + "\n"
+    Sources.model_validate(yaml.safe_load(updated))
+    replace_file(path, updated, stat.S_IMODE(path.stat().st_mode))
+
+
+def append_excluded_subscriptions(path: Path, additions: list[dict[str, object]]) -> None:
+    if not additions:
+        return
+    existing = load_excluded_subscriptions(path).excluded_subscriptions
+    by_key = {item.key: item for item in existing}
+    by_key.update((item.key, item) for item in (ExcludedSubscription.model_validate(value) for value in additions))
+    content = yaml.safe_dump(
+        {"excluded_subscriptions": [item.model_dump() for item in by_key.values()]},
+        allow_unicode=True,
+        sort_keys=False,
+    )
+    replace_file(path, content, 0o600)
