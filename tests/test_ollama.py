@@ -65,3 +65,17 @@ def test_normalizes_trusted_fields_and_limits_items() -> None:
     assert result.source_id == "alphasignal"
     assert result.truncated_input is True
     assert len(result.items) == 1
+
+
+@respx.mock
+def test_accepts_source_url_from_markdown_link() -> None:
+    model_result = valid_result()
+    model_result["items"][0]["source_url"] = "https://example.com"  # type: ignore[index]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": json.dumps(model_result)}})
+    )
+
+    result = OllamaClient().extract("alphasignal", "Read [article](https://example.com).")
+
+    assert str(result.items[0].source_url) == "https://example.com/"
+    assert route.call_count == 1
