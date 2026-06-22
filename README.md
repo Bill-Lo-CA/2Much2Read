@@ -75,6 +75,9 @@ sources:
 Filter criteria support `from`, `to`, `subject`, `query`, `negatedQuery`, `hasAttachment`,
 `excludeChats`, `size`, and `sizeComparison`. Actions are intentionally fixed to adding the one
 configured label; the application cannot configure archive, delete, or forwarding actions.
+The shared category labels are `ai-newsPaper`, `cloud-data-newspaper`, `cyber-newspaper`,
+`dev-newspaper`, and `product-business-newspaper`. Keep `from:` in each source query so newsletters
+sharing a category remain distinguishable.
 
 ```bash
 # When authorizing a remote Linux machine, run this locally first:
@@ -105,15 +108,24 @@ an older token automatically opens the consent flow again when the settings scop
 successful flow replaces the token; the old token is not overwritten if authorization fails.
 `labels ensure` creates the two processing labels, configured category labels, and filters
 idempotently. Sender-specific queries combine `label:` with `from:` so sources sharing a category
-remain distinct. Gmail filters affect
-new matching messages and do not retroactively classify existing mail.
+remain distinct. Label lookup is case-insensitive to match Gmail's conflict behavior. Gmail filters
+affect new matching messages and do not retroactively classify existing mail. `filters list` prints
+the existing Gmail filter criteria and actions.
+
+`backfill_category_labels.py` finds existing messages by each enabled source's sender. Its default
+mode reports totals by category; `--apply` adds only the configured category labels.
+`cleanup_test_environment.py` defaults to a preview. Its `--apply` mode acquires the process lock,
+creates a mode-`0600` timestamped SQLite backup beside the database, clears local test state, and
+removes only `NewsletterBot/Processed` and `NewsletterBot/Failed` from configured newsletter mail.
+It preserves category labels, Gmail filters, OAuth credentials, and existing Discord messages.
 
 `discover --source <id>` uses that source's `gmail_query`; `discover --source list` prints the
 configured source IDs without connecting to Gmail. The source ID `list` is reserved and cannot be used
 in `sources.yaml`. `--source` and `--query` are mutually exclusive. `discover` prints metadata only.
 After observing the real sender, optionally strengthen the local
-`sources.yaml` query with `from:`. The application never fetches links or modifies non-
-`NewsletterBot/` labels.
+`sources.yaml` query with `from:`. The application never fetches links. Runtime processing modifies
+only `NewsletterBot/Processed` and `NewsletterBot/Failed`; maintenance commands may add the category
+labels explicitly configured in `sources.yaml`.
 
 `inspect` searches up to 100 messages matching the source query and compares the privacy-safe
 display ID printed by `discover`. It prints message headers, Gmail label IDs, MIME type, and the
@@ -145,6 +157,9 @@ uv run newsletter-digest backfill --days 7 --source alphasignal
 # Reprocess a bounded number of messages even if they already have processed labels, then send a new digest.
 uv run newsletter-digest run --force --source alphasignal --max-messages 1
 
+# Reprocess and persist a new pending digest without sending it.
+uv run newsletter-digest run --force --no-deliver --source alphasignal --max-messages 1
+
 # Resend the latest stored digest without calling Gmail or Ollama.
 uv run newsletter-digest run --resend
 ```
@@ -152,12 +167,15 @@ uv run newsletter-digest run --resend
 Replace `alphasignal` with an enabled `id` from your local `sources.yaml`. If `--source` is
 omitted, the command processes every enabled source.
 `--force` requires both `--source` and `--max-messages`; it replaces stored items for matching
-messages and creates a new digest delivery. `--resend` cannot be combined with other run options
-and sends a newly recorded copy of the latest digest directly from SQLite.
+messages and creates a new digest record. With `--no-deliver`, that record remains pending for
+`retry-delivery`. `--max-messages` applies per source when multiple sources run; the rendered digest
+still contains at most `DIGEST_MAX_ITEMS` items. Topic-based runs are not currently supported.
+`--resend` cannot be combined with other run options and sends a newly recorded copy of the latest
+digest directly from SQLite.
 
-`labels ensure` and `discover` are the current live Gmail API checks. `doctor` only checks whether
-the Gmail token file exists; it does not make a Gmail API request. Dry run uses an in-memory
-database and does not apply processed/source labels or send Discord messages. It may create missing
+`labels ensure`, `filters list`, and `discover` are the current live Gmail API checks. `doctor` only
+checks whether the Gmail token file exists; it does not make a Gmail API request. Dry run uses an in-memory
+database and does not apply processing labels or send Discord messages. It may create missing
 app-owned labels during startup, so run `labels ensure` first when that distinction matters.
 Backfill does not deliver unless `--deliver` is supplied. Discord mentions are disabled on every
 request.
@@ -181,7 +199,7 @@ To run while logged out, an administrator may explicitly enable lingering with
 uv sync --all-groups
 uv run ruff format --check .
 uv run ruff check .
-uv run mypy src
+uv run mypy src scripts
 uv run pytest -q
 uv build
 uv run pip audit
@@ -210,7 +228,8 @@ curl -i http://127.0.0.1:11434/api/chat \
 - Model missing or GPU fallback: run `ollama list`, `ollama pull qwen3:8b`, and inspect Ollama logs.
 - Ollama grammar errors: the application removes `maxLength` from the generation schema because
   Ollama rejects large repetition limits; Pydantic still validates those limits after generation.
-- Invalid model JSON: one repair is automatic; repeated failure remains retryable on a later run.
+- Invalid model JSON: one repair is automatic; repeated failure returns `OLLAMA_SCHEMA_INVALID`.
+  Source URLs are checked against both plain and Markdown-formatted links after URL normalization.
 - Gmail query mismatch: use `discover`, then update only the local `sources.yaml` query.
 - Discord rate limit/outage: run `retry-delivery`; Gmail and Ollama are not called again.
 - Back up the SQLite database and OAuth token together while the service is stopped; restore with
