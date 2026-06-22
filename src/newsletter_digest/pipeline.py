@@ -119,6 +119,7 @@ def run_pipeline(
             content = render_digest(
                 _items(database, settings.digest_max_items)[: settings.digest_max_items],
                 now,
+                ", ".join(dict.fromkeys(source.category for source in sources)),
                 ", ".join(source.name for source in sources),
                 settings.digest_top_items,
             )

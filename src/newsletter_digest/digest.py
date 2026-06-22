@@ -41,7 +41,8 @@ def dedupe(items: list[DigestItem]) -> list[DigestItem]:
 def render_digest(
     items: list[DigestItem],
     when: datetime,
-    source_name: str = "AlphaSignal",
+    topic: str,
+    source_names: str,
     top_items: int = 5,
 ) -> str:
     eligible = [item for item in dedupe(items) if item.confidence >= 0.45]
@@ -56,12 +57,12 @@ def render_digest(
     top = eligible[:top_items]
     rest = eligible[top_items:]
     sections = [
-        f"📰 AI Newsletter Digest — {when:%Y-%m-%d}",
+        f"📰 {topic} Newsletter Digest — {when:%Y-%m-%d}",
         "🔥 今日重點\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)),
     ]
     if rest:
         sections.append("🧰 其他值得注意\n" + "\n\n".join(entry(item, "•") for item in rest))
-    sections.append(f"📊 本次處理\n{source_name} · {len(eligible)} 則有效項目")
+    sections.append(f"📊 本次處理\n主題：{topic}\n來源：{source_names} · {len(eligible)} 則有效項目")
     return "\n\n".join(sections).replace("@", "@\u200b")
 
 

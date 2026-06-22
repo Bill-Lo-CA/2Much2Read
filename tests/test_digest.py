@@ -1,5 +1,7 @@
 from datetime import UTC, datetime
 
+import pytest
+
 from newsletter_digest.digest import canonical_url, chunk_text, dedupe, render_digest
 from newsletter_digest.schemas import DigestItem
 
@@ -29,7 +31,21 @@ def test_items_without_urls_dedupe_by_title() -> None:
 
 
 def test_renderer_and_chunks_disable_mentions() -> None:
-    text = render_digest([item("@everyone update", "https://example.com/a")], datetime.now(UTC))
+    text = render_digest(
+        [item("@everyone update", "https://example.com/a")],
+        datetime.now(UTC),
+        "AI",
+        "AlphaSignal",
+    )
     assert "@\u200beveryone" in text
     chunks = chunk_text(text * 100)
     assert all(len(chunk) <= 2000 for chunk in chunks)
+
+
+@pytest.mark.parametrize("topic", ["Cloud & Data", "Cybersecurity"])
+def test_renderer_uses_actual_topic_and_sources(topic: str) -> None:
+    text = render_digest([item("Update", None)], datetime(2026, 6, 22, tzinfo=UTC), topic, "Source One, Source Two")
+
+    assert text.startswith(f"📰 {topic} Newsletter Digest — 2026-06-22")
+    assert f"主題：{topic}" in text
+    assert "來源：Source One, Source Two · 1 則有效項目" in text
