@@ -31,11 +31,10 @@ def test_message_and_digest_idempotency(tmp_path: Path) -> None:
         ),
     )
     assert len(database.recent_items()) == 1
-    assert database.save_digest("daily:1", "start", "end", "UTC", "digest")
-    assert not database.save_digest("daily:1", "start", "end", "UTC", "digest")
-    resend = database.prepare_latest_resend()
-    assert resend is not None
-    assert resend["rendered_content"] == "digest"
+    digest_id = database.save_digest("daily:1", "start", "end", "UTC", "digest")
+    assert digest_id is not None
+    assert database.pending_digest(digest_id)["rendered_content"] == "digest"
+    assert database.save_digest("daily:1", "start", "end", "UTC", "digest") is None
     database.close()
 
 

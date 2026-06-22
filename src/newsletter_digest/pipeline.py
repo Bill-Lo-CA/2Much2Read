@@ -129,15 +129,15 @@ def run_pipeline(
                 digest_key = f"daily:{now.date()}:{settings.digest_timezone}"
                 if force:
                     digest_key += f":force:{datetime.now(UTC).isoformat()}"
-                created = database.save_digest(
+                digest_id = database.save_digest(
                     digest_key,
                     period_start.isoformat(),
                     now.isoformat(),
                     settings.digest_timezone,
                     content,
                 )
-                if created and not no_deliver:
-                    retry_delivery(settings, database)
+                if digest_id is not None and not no_deliver:
+                    deliver_digest(settings, database, digest_id)
                     delivered = 1
             return {
                 "status": "ok" if content else "no_content",
@@ -172,22 +172,17 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> int:
     return delivered
 
 
-def resend_latest(settings: Settings) -> int:
-    database = Database(settings.database_path)
+def deliver_digest(settings: Settings, database: Database, digest_id: int) -> None:
+    digest = database.pending_digest(digest_id)
+    if digest is None:
+        raise ValueError(f"digest {digest_id} is not pending")
     try:
-        digest = database.prepare_latest_resend()
-        if digest is None:
-            return 0
-        try:
-            ids = deliver(
-                settings.discord_webhook_url,
-                str(digest["rendered_content"]),
-                settings.discord_username,
-            )
-            database.finish_delivery(int(digest["id"]), ids)
-            return 1
-        except Exception:
-            database.fail_delivery(int(digest["id"]))
-            raise
-    finally:
-        database.close()
+        ids = deliver(
+            settings.discord_webhook_url,
+            str(digest["rendered_content"]),
+            settings.discord_username,
+        )
+        database.finish_delivery(digest_id, ids)
+    except Exception:
+        database.fail_delivery(digest_id)
+        raise

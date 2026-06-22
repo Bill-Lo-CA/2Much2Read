@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,14 @@ SCOPES = (
     "https://www.googleapis.com/auth/gmail.settings.basic",
 )
 LABEL_PREFIX = "NewsletterBot/"
+
+
+@dataclass(frozen=True)
+class FilterStatus:
+    source_id: str
+    label: str
+    filter_id: str | None
+    status: str
 
 
 def find_label_id(labels: dict[str, str], name: str) -> str | None:
@@ -85,14 +94,24 @@ class GmailClient:
             self._ensure_label(name)
         return self.labels
 
-    def ensure_source_filters(self, sources: list[Source]) -> list[dict[str, str]]:
+    def ensure_source_labels(self, sources: list[Source]) -> list[str]:
+        labels = sorted({source.gmail_filter.label for source in sources if source.gmail_filter is not None})
+        for label in labels:
+            self._ensure_label(label)
+        return labels
+
+    def _source_filter_statuses(self, sources: list[Source], create: bool) -> list[FilterStatus]:
         existing: list[dict[str, Any]] = self.service.users().settings().filters().list(userId="me").execute().get("filter", [])
-        results: list[dict[str, str]] = []
+        results: list[FilterStatus] = []
         for source in sources:
             if source.gmail_filter is None:
                 continue
             label_name = source.gmail_filter.label
-            label_id = self._ensure_label(label_name)
+            label_id = find_label_id(self.labels, label_name)
+            if label_id is None and not create:
+                results.append(FilterStatus(source.id, label_name, None, "label_missing"))
+                continue
+            label_id = label_id or self._ensure_label(label_name)
             body: dict[str, Any] = {
                 "criteria": source.gmail_filter.criteria,
                 "action": {"addLabelIds": [label_id]},
@@ -105,21 +124,22 @@ class GmailClient:
                 ),
                 None,
             )
-            if found is None:
+            if found is None and create:
                 found = self.service.users().settings().filters().create(userId="me", body=body).execute()
                 existing.append({**body, **found})
                 status = "created"
-            else:
+            elif found is not None:
                 status = "exists"
-            results.append({"source_id": source.id, "filter_id": str(found["id"]), "status": status})
+            else:
+                status = "filter_missing"
+            results.append(FilterStatus(source.id, label_name, str(found["id"]) if found else None, status))
         return results
 
-    def list_filters(self) -> list[dict[str, Any]]:
-        response: dict[str, Any] = self.service.users().settings().filters().list(userId="me").execute()
-        filters = response.get("filter")
-        if not isinstance(filters, list):
-            return []
-        return [dict(item) for item in filters if isinstance(item, dict)]
+    def ensure_source_filters(self, sources: list[Source]) -> list[FilterStatus]:
+        return self._source_filter_statuses(sources, create=True)
+
+    def audit_source_filters(self, sources: list[Source]) -> list[FilterStatus]:
+        return self._source_filter_statuses(sources, create=False)
 
     def list_messages(self, query: str, limit: int | None = None) -> list[str]:
         ids: list[str] = []

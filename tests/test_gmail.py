@@ -5,7 +5,7 @@ import pytest
 
 from newsletter_digest import gmail
 from newsletter_digest.config import Source
-from newsletter_digest.gmail import SCOPES, GmailClient, find_label_id, source_backfill_query
+from newsletter_digest.gmail import SCOPES, FilterStatus, GmailClient, find_label_id, source_backfill_query
 
 
 def test_backfill_query_uses_sender_and_missing_category_label() -> None:
@@ -91,7 +91,7 @@ def test_ensure_source_filter_creates_label_and_filter() -> None:
         }
     )
 
-    assert client.ensure_source_filters([source]) == [{"source_id": "news", "filter_id": "Filter_1", "status": "created"}]
+    assert client.ensure_source_filters([source]) == [FilterStatus("news", "Newsletters/News", "Filter_1", "created")]
     service.users().settings().filters().create.assert_called_once_with(
         userId="me",
         body={
@@ -124,6 +124,6 @@ def test_ensure_source_filter_reuses_existing_filter() -> None:
         }
     )
 
-    assert client.ensure_source_filters([source]) == [{"source_id": "news", "filter_id": "Filter_1", "status": "exists"}]
+    assert client.ensure_source_filters([source]) == [FilterStatus("news", "ai-newsPaper", "Filter_1", "exists")]
     service.users().labels().create.assert_not_called()
     service.users().settings().filters().create.assert_not_called()

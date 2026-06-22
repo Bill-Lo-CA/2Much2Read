@@ -137,26 +137,31 @@ def replace_file(path: Path, content: str, mode: int) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def append_sources(path: Path, additions: list[dict[str, object]]) -> None:
+def append_sources(path: Path, additions: list[Source]) -> None:
     if not additions:
         return
     original = path.read_text(encoding="utf-8")
     if not re.search(r"(?m)^sources:\s*$", original):
         raise ValueError("sources configuration must use a top-level block-style 'sources:' list")
     rendered = [
-        f"  {line}" for line in yaml.safe_dump({"sources": additions}, allow_unicode=True, sort_keys=False).splitlines()[1:]
+        f"  {line}"
+        for line in yaml.safe_dump(
+            {"sources": [source.model_dump(exclude_defaults=True) for source in additions]},
+            allow_unicode=True,
+            sort_keys=False,
+        ).splitlines()[1:]
     ]
     updated = original.rstrip() + "\n" + "\n".join(rendered) + "\n"
     Sources.model_validate(yaml.safe_load(updated))
     replace_file(path, updated, stat.S_IMODE(path.stat().st_mode))
 
 
-def append_excluded_subscriptions(path: Path, additions: list[dict[str, object]]) -> None:
+def append_excluded_subscriptions(path: Path, additions: list[ExcludedSubscription]) -> None:
     if not additions:
         return
     existing = load_excluded_subscriptions(path).excluded_subscriptions
     by_key = {item.key: item for item in existing}
-    by_key.update((item.key, item) for item in (ExcludedSubscription.model_validate(value) for value in additions))
+    by_key.update((item.key, item) for item in additions)
     content = yaml.safe_dump(
         {"excluded_subscriptions": [item.model_dump() for item in by_key.values()]},
         allow_unicode=True,
