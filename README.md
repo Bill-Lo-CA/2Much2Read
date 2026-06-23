@@ -90,6 +90,8 @@ uv run newsletter-digest filters audit
 # Preview totals by topic, then apply category labels to existing messages matched by each source's sender.
 uv run python scripts/backfill_category_labels.py
 uv run python scripts/backfill_category_labels.py --apply
+# Limit a backfill to selected sources; repeat --source as needed.
+uv run python scripts/backfill_category_labels.py --source tldr-ai --source tldr-dev --apply
 # Preview, then reset all local database state and Gmail processing labels for testing.
 uv run python scripts/cleanup_test_environment.py
 uv run python scripts/cleanup_test_environment.py --apply
@@ -115,8 +117,9 @@ idempotently creates missing configured filters; `filters audit` reports `exists
 sources sharing a category remain distinct. Label lookup is case-insensitive to match Gmail's conflict
 behavior. Gmail filters affect new matching messages and do not retroactively classify existing mail.
 
-`backfill_category_labels.py` finds existing messages by each enabled source's sender. Its default
-mode reports totals by category; `--apply` adds only the configured category labels.
+`backfill_category_labels.py` finds existing messages using each enabled source's sender and optional
+filter query. Its default mode reports totals by category; repeatable `--source` limits the operation,
+and `--apply` adds only the configured category labels.
 `cleanup_test_environment.py` defaults to a preview. Its `--apply` mode acquires the process lock,
 creates a mode-`0600` timestamped SQLite backup beside the database, clears local test state, and
 removes only `NewsletterBot/Processed` and `NewsletterBot/Failed` from configured newsletter mail.

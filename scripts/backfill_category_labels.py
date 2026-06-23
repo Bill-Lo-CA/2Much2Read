@@ -10,12 +10,19 @@ def main() -> None:
     parser = argparse.ArgumentParser(description="Add category labels to existing newsletter emails")
     parser.add_argument("--apply", action="store_true", help="add labels; otherwise only show counts")
     parser.add_argument("--limit-per-source", type=int, default=500)
+    parser.add_argument("--source", action="append", help="limit to one source ID; repeat for multiple sources")
     args = parser.parse_args()
     if args.limit_per_source < 1:
         parser.error("--limit-per-source must be at least 1")
 
     settings = Settings()
     sources = [source for source in load_sources(settings.sources_config_path).sources if source.enabled]
+    requested = set(args.source or [])
+    unknown = requested - {source.id for source in sources}
+    if unknown:
+        parser.error(f"unknown or disabled source ID(s): {', '.join(sorted(unknown))}")
+    if requested:
+        sources = [source for source in sources if source.id in requested]
     gmail = GmailClient(
         credentials(
             settings.gmail_credentials_path,

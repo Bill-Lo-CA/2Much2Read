@@ -22,6 +22,22 @@ def test_backfill_query_uses_sender_and_missing_category_label() -> None:
     assert find_label_id({"ai-newspaper": "Label_1"}, "ai-newsPaper") == "Label_1"
 
 
+def test_backfill_query_includes_filter_query_for_shared_sender() -> None:
+    source = Source.model_validate(
+        {
+            "id": "tldr-ai",
+            "name": "TLDR AI",
+            "gmail_query": 'label:ai-newsPaper from:dan@example.com from:"TLDR AI"',
+            "gmail_filter": {
+                "label": "ai-newsPaper",
+                "criteria": {"from": "dan@example.com", "query": 'from:"TLDR AI"'},
+            },
+        }
+    )
+
+    assert source_backfill_query(source) == 'from:dan@example.com from:"TLDR AI" -label:"ai-newsPaper"'
+
+
 def test_old_token_missing_scope_reauthorizes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     credentials_path = tmp_path / "client.json"
     token_path = tmp_path / "token.json"

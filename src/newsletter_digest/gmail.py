@@ -38,7 +38,11 @@ def source_backfill_query(source: Source) -> str:
     sender = source.gmail_filter.criteria.get("from")
     if not isinstance(sender, str) or not sender.strip():
         raise ValueError(f"source {source.id!r} has no string gmail_filter.criteria.from")
-    return f'from:{sender} -label:"{source.gmail_filter.label}"'
+    extra = source.gmail_filter.criteria.get("query")
+    query = f"from:{sender}"
+    if isinstance(extra, str) and extra.strip():
+        query += f" {extra}"
+    return f'{query} -label:"{source.gmail_filter.label}"'
 
 
 def credentials(credentials_path: Path, token_path: Path, port: int = 8765) -> Credentials:
