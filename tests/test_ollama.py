@@ -1,6 +1,7 @@
 import json
 
 import httpx
+import pytest
 import respx
 
 from newsletter_digest.ollama import OllamaClient
@@ -43,6 +44,26 @@ def test_repairs_invalid_schema_once() -> None:
     assert "maxLength" not in json.dumps(request_payload["format"])
     repair_payload = json.loads(route.calls[1].request.content)
     assert repair_payload["messages"][-2] == {"role": "assistant", "content": "not json"}
+
+
+@respx.mock
+def test_schema_error_includes_source_validation_and_preview() -> None:
+    respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[
+            httpx.Response(200, json={"message": {"content": "not json"}}),
+            httpx.Response(200, json={"message": {"content": '{"items": []}'}}),
+        ]
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        OllamaClient().extract("alphasignal", "News https://example.com/a")
+
+    message = str(exc_info.value)
+    assert "OLLAMA_SCHEMA_INVALID" in message
+    assert "source='alphasignal'" in message
+    assert "attempt=2" in message
+    assert "error=" in message
+    assert "response_preview='{\"items\": []}'" in message
 
 
 @respx.mock

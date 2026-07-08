@@ -35,6 +35,11 @@ def _ollama_schema(value: Any) -> Any:
     return value
 
 
+def _preview(value: str, limit: int = 800) -> str:
+    value = value.replace("\n", "\\n")
+    return value[:limit] + ("…" if len(value) > limit else "")
+
+
 class OllamaClient:
     def __init__(
         self,
@@ -96,9 +101,13 @@ class OllamaClient:
                 if any(_normalized_url(str(item.source_url)) not in supplied_urls for item in result.items if item.source_url):
                     raise ValueError("model returned a URL absent from input")
                 return result
-            except (ValidationError, ValueError, KeyError, TypeError):
+            except (ValidationError, ValueError, KeyError, TypeError) as error:
                 if attempt:
-                    raise ValueError("OLLAMA_SCHEMA_INVALID") from None
+                    raise ValueError(
+                        "OLLAMA_SCHEMA_INVALID "
+                        f"source={source_id!r} attempt={attempt + 1} "
+                        f"error={str(error)!r} response_preview={_preview(raw)!r}"
+                    ) from None
                 messages.extend(
                     [
                         {"role": "assistant", "content": raw},
