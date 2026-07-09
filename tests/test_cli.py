@@ -37,6 +37,20 @@ def test_run_help_uses_clear_delivery_flags_without_resend() -> None:
     assert "--resend" not in result.stdout
 
 
+def test_run_outputs_elapsed_time_without_polluting_json(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fake_run_pipeline(*args: object) -> dict[str, int | str]:
+        return {"status": "ok", "discovered": 1, "processed": 1, "delivered": 0}
+
+    monkeypatch.setattr(cli, "run_pipeline", fake_run_pipeline)
+
+    result = CliRunner().invoke(cli.app, ["run", "--source", "news", "--max-messages", "1"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {"status": "ok", "discovered": 1, "processed": 1, "delivered": 0}
+    assert "newsletter-digest run elapsed" in result.stderr
+    assert "newsletter-digest run finished in" in result.stderr
+
+
 @pytest.mark.parametrize(
     "arguments",
     [[], ["--source", "one", "--query", "from:two"], ["--source", "one", "--subscription", "two"]],
