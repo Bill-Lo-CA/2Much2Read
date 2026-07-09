@@ -3,7 +3,7 @@ from __future__ import annotations
 import json
 import os
 from collections.abc import Mapping
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated
 
 import typer
@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from .config import Settings, load_reminders
 from .google_calendar import credentials
-from .pipeline import calendar_client, discord_deliver, discover, retry_delivery, run, test_rules
+from .pipeline import agenda, calendar_client, discord_deliver, discover, retry_delivery, run, test_rules
 
 app = typer.Typer(no_args_is_help=True)
 auth_app = typer.Typer(no_args_is_help=True)
@@ -84,6 +84,18 @@ def rules_test(days: Annotated[int, typer.Option("--days", min=1, max=30)] = 7) 
 @app.command("run")
 def run_command(dry_run: Annotated[bool, typer.Option()] = False) -> None:
     emit(run(Settings(), dry_run))
+
+
+@app.command("agenda")
+def agenda_command(
+    day: Annotated[str, typer.Argument()],
+    dry_run: Annotated[bool, typer.Option()] = False,
+) -> None:
+    try:
+        parsed = date.fromisoformat(day)
+    except ValueError as error:
+        raise typer.BadParameter("date must use YYYY-MM-DD") from error
+    emit(agenda(Settings(), parsed, dry_run))
 
 
 @app.command("retry-delivery")

@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import os
-import time
-from datetime import datetime, timedelta
+import time as time_module
+from datetime import date, datetime, time, timedelta
 from pathlib import Path
 from types import TracebackType
 from zoneinfo import ZoneInfo
@@ -11,7 +11,7 @@ import httpx
 
 from .config import RemindersConfig, Settings, load_reminders
 from .google_calendar import CalendarClient, CalendarEvent, credentials
-from .renderer import chunk_text, render_reminder
+from .renderer import chunk_text, render_agenda, render_reminder
 from .rules import ReminderCandidate, due_reminders, schedule_reminders
 from .storage import Database
 
@@ -54,10 +54,10 @@ def discord_deliver(webhook_url: str, content: str, username: str) -> list[str]:
                 timeout=30,
             )
             if response.status_code == 429:
-                time.sleep(float(response.headers.get("Retry-After", "1")))
+                time_module.sleep(float(response.headers.get("Retry-After", "1")))
                 continue
             if response.status_code >= 500 and attempt < 3:
-                time.sleep(2**attempt)
+                time_module.sleep(2**attempt)
                 continue
             response.raise_for_status()
             message_ids.append(str(response.json()["id"]))
@@ -81,10 +81,16 @@ def calendar_client(settings: Settings, config: RemindersConfig) -> CalendarClie
 def list_events(settings: Settings, config: RemindersConfig, days: int) -> list[CalendarEvent]:
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
     now = datetime.now(timezone)
+    return list_events_between(settings, config, now, now + timedelta(days=days))
+
+
+def list_events_between(
+    settings: Settings, config: RemindersConfig, time_min: datetime, time_max: datetime
+) -> list[CalendarEvent]:
     client = calendar_client(settings, config)
     events: list[CalendarEvent] = []
     for calendar in config.enabled_calendars:
-        events.extend(client.list_events(calendar.id, calendar.name, now, now + timedelta(days=days)))
+        events.extend(client.list_events(calendar.id, calendar.name, time_min, time_max))
     return sorted(events, key=lambda event: (event.start, event.calendar_id, event.instance_id))
 
 
@@ -121,6 +127,19 @@ def test_rules(settings: Settings, days: int) -> dict[str, object]:
     config = load_reminders(settings.reminders_config_path)
     candidates = schedule_reminders(config, list_events(settings, config, days))
     return {"status": "ok", "reminders": [reminder_view(candidate) for candidate in candidates]}
+
+
+def agenda(settings: Settings, day: date, dry_run: bool) -> dict[str, object]:
+    config = load_reminders(settings.reminders_config_path)
+    timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
+    start = datetime.combine(day, time.min, timezone)
+    end = start + timedelta(days=1)
+    events = list_events_between(settings, config, start, end)
+    content = render_agenda(day, events)
+    if dry_run:
+        return {"status": "ok", "content": content, "events": [event_view(event) for event in events]}
+    message_ids = discord_deliver(settings.discord_webhook_url, content, settings.discord_username)
+    return {"status": "ok", "sent": 1, "discord_message_ids": message_ids, "events": len(events)}
 
 
 def run(settings: Settings, dry_run: bool) -> dict[str, object]:
