@@ -1,0 +1,49 @@
+from datetime import datetime, timedelta
+from pathlib import Path
+from zoneinfo import ZoneInfo
+
+from two_busy_one_miss.google_calendar import CalendarEvent
+from two_busy_one_miss.rules import ReminderCandidate
+from two_busy_one_miss.storage import Database
+
+
+def candidate() -> ReminderCandidate:
+    timezone = ZoneInfo("America/Montreal")
+    start = datetime(2026, 7, 8, 10, 0, tzinfo=timezone)
+    event = CalendarEvent(
+        calendar_id="primary",
+        calendar_name="Main",
+        event_id="event-1",
+        instance_id="event-1",
+        title="French class",
+        location="Room 1",
+        start=start,
+        end=start + timedelta(hours=1),
+        all_day=False,
+    )
+    return ReminderCandidate(event=event, rule_id="default-5m", before="5m", reminder_time=start - timedelta(minutes=5))
+
+
+def test_attempt_idempotency_and_delivery_state(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    item = candidate()
+
+    attempt_id = database.create_attempt(item, "message")
+    assert attempt_id is not None
+    assert database.create_attempt(item, "message") is None
+    assert database.counts() == {"events": 1, "reminder_attempts": 1}
+
+    database.finish_delivery(attempt_id, ["123"])
+    assert database.attempt_state(attempt_id) == "delivered"
+    database.close()
+
+
+def test_failed_attempt_is_retryable(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    attempt_id = database.create_attempt(candidate(), "message")
+    assert attempt_id is not None
+
+    database.fail_delivery(attempt_id)
+
+    assert [int(row["id"]) for row in database.pending_attempts()] == [attempt_id]
+    database.close()

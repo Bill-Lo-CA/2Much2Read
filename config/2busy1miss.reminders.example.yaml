@@ -1,0 +1,31 @@
+timezone: America/Montreal
+
+calendars:
+  - id: primary
+    name: Main
+    enabled: true
+
+default_rules:
+  - id: default-30m
+    before: 30m
+  - id: default-5m
+    before: 5m
+
+rules:
+  - id: french-class
+    match:
+      title_contains:
+        - 法文
+        - French
+    reminders:
+      - before: 2h
+      - before: 30m
+
+  - id: go-club
+    match:
+      title_contains:
+        - 圍棋
+        - Go
+    reminders:
+      - before: 1d
+      - before: 2h

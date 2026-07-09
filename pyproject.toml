@@ -31,9 +31,10 @@ dev = [
 
 [project.scripts]
 newsletter-digest = "newsletter_digest.cli:app"
+2busy1miss = "two_busy_one_miss.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/newsletter_digest"]
+packages = ["src/newsletter_digest", "src/two_busy_one_miss"]
 
 [tool.ruff]
 line-length = 130
@@ -45,7 +46,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["newsletter_digest"]
+packages = ["newsletter_digest", "two_busy_one_miss"]
 mypy_path = "src"
 
 [tool.pytest.ini_options]
