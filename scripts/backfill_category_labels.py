@@ -37,7 +37,7 @@ def main() -> None:
         label_name = source.gmail_filter.label
         label_id = find_label_id(gmail.labels, label_name)
         if label_id is None:
-            raise ValueError(f"Gmail label {label_name!r} does not exist; run 'newsletter-digest labels ensure' first")
+            raise ValueError(f"Gmail label {label_name!r} does not exist; run '2much2read labels ensure' first")
         jobs.append((source.id, label_name, label_id, query))
 
     messages_by_topic: dict[tuple[str, str], set[str]] = {}

@@ -72,13 +72,13 @@ calendars:
 
 def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
-    app_config = home / ".config" / "2busy1miss"
+    app_config = home / ".config" / "2much2read"
     app_config.mkdir(parents=True)
     (tmp_path / ".env").write_text(
         "DISCORD_WEBHOOK_URL=https://newsletter.example/webhook\nDATABASE_PATH=newsletter.sqlite3\n",
         encoding="utf-8",
     )
-    (app_config / "2busy1miss.env").write_text(
+    (app_config / ".2busy1miss.env").write_text(
         "DISCORD_WEBHOOK_URL=https://busy.example/webhook\nDATABASE_PATH=/tmp/2busy1miss.sqlite3\n",
         encoding="utf-8",
     )

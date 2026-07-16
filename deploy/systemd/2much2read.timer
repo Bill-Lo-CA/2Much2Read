@@ -1,5 +1,5 @@
 [Unit]
-Description=Daily Newsletter Digest
+Description=Daily 2much2read Digest
 
 [Timer]
 OnCalendar=*-*-* 08:00:00 America/Montreal

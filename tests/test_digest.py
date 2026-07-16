@@ -2,8 +2,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from newsletter_digest.digest import canonical_url, chunk_text, dedupe, render_digest
+from newsletter_digest.digest import canonical_url, dedupe, render_digest
 from newsletter_digest.schemas import DigestItem
+from two_much_two_read.discord import chunk_text
 
 
 def item(title: str, url: str | None, confidence: float = 0.8) -> DigestItem:
@@ -46,6 +47,6 @@ def test_renderer_and_chunks_disable_mentions() -> None:
 def test_renderer_uses_actual_topic_and_sources(topic: str) -> None:
     text = render_digest([item("Update", None)], datetime(2026, 6, 22, tzinfo=UTC), topic, "Source One, Source Two")
 
-    assert text.startswith(f"📰 {topic} Newsletter Digest — 2026-06-22")
+    assert text.startswith(f"📰 {topic} 2much2read — 2026-06-22")
     assert f"主題：{topic}" in text
     assert "來源：Source One, Source Two · 1 則有效項目" in text

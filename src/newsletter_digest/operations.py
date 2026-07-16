@@ -491,7 +491,7 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
         response = httpx.post(
             settings.discord_webhook_url,
             params={"wait": "true"},
-            json={"content": "Newsletter Digest connectivity test", "allowed_mentions": {"parse": []}},
+            json={"content": "2much2read connectivity test", "allowed_mentions": {"parse": []}},
             timeout=30,
         )
         checks["discord_test"] = "ok" if response.is_success else "failed"

@@ -1,70 +1,16 @@
 from __future__ import annotations
 
-import os
-import time as time_module
 from datetime import date, datetime, time, timedelta
-from pathlib import Path
-from types import TracebackType
 from zoneinfo import ZoneInfo
 
-import httpx
+from two_much_two_read.discord import deliver
+from two_much_two_read.locking import ProcessLock
 
 from .config import RemindersConfig, Settings, load_reminders
 from .google_calendar import CalendarClient, CalendarEvent, credentials
-from .renderer import chunk_text, render_agenda, render_reminder
+from .renderer import render_agenda, render_reminder
 from .rules import ReminderCandidate, due_reminders, parse_offset, schedule_reminders
 from .storage import Database
-
-
-class ProcessLock:
-    def __init__(self, path: Path) -> None:
-        self.path = path
-        self.fd: int | None = None
-
-    def __enter__(self) -> ProcessLock:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            self.fd = os.open(self.path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
-            os.write(self.fd, str(os.getpid()).encode())
-        except FileExistsError:
-            raise RuntimeError("LOCK_CONTENDED") from None
-        return self
-
-    def __exit__(
-        self,
-        exc_type: type[BaseException] | None,
-        exc: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        if self.fd is not None:
-            os.close(self.fd)
-        self.path.unlink(missing_ok=True)
-
-
-def discord_deliver(webhook_url: str, content: str, username: str) -> list[str]:
-    if not webhook_url:
-        raise ValueError("DISCORD_WEBHOOK_URL is required")
-    message_ids: list[str] = []
-    for chunk in chunk_text(content):
-        for attempt in range(4):
-            response = httpx.post(
-                webhook_url,
-                params={"wait": "true"},
-                json={"content": chunk, "username": username, "allowed_mentions": {"parse": []}},
-                timeout=30,
-            )
-            if response.status_code == 429:
-                time_module.sleep(float(response.headers.get("Retry-After", "1")))
-                continue
-            if response.status_code >= 500 and attempt < 3:
-                time_module.sleep(2**attempt)
-                continue
-            response.raise_for_status()
-            message_ids.append(str(response.json()["id"]))
-            break
-        else:
-            raise RuntimeError("DISCORD_DELIVERY_FAILED")
-    return message_ids
 
 
 def calendar_client(settings: Settings, config: RemindersConfig) -> CalendarClient:
@@ -144,7 +90,7 @@ def agenda(settings: Settings, day: date, dry_run: bool) -> dict[str, object]:
     content = render_agenda(day, events)
     if dry_run:
         return {"status": "ok", "content": content, "events": [event_view(event) for event in events]}
-    message_ids = discord_deliver(settings.discord_webhook_url, content, settings.discord_username)
+    message_ids = deliver(settings.discord_webhook_url, content, settings.discord_username)
     return {"status": "ok", "sent": 1, "discord_message_ids": message_ids, "events": len(events)}
 
 
@@ -175,7 +121,7 @@ def run(settings: Settings, dry_run: bool) -> dict[str, object]:
                     continue
                 try:
                     database.finish_delivery(
-                        attempt_id, discord_deliver(settings.discord_webhook_url, content, settings.discord_username)
+                        attempt_id, deliver(settings.discord_webhook_url, content, settings.discord_username)
                     )
                     sent += 1
                 except Exception:
@@ -193,7 +139,7 @@ def retry_delivery(settings: Settings) -> dict[str, object]:
         for attempt in database.pending_attempts():
             attempt_id = int(attempt["id"])
             try:
-                message_ids = discord_deliver(settings.discord_webhook_url, str(attempt["content"]), settings.discord_username)
+                message_ids = deliver(settings.discord_webhook_url, str(attempt["content"]), settings.discord_username)
                 database.finish_delivery(attempt_id, message_ids)
                 delivered += 1
             except Exception:

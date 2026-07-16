@@ -5,11 +5,12 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from two_much_two_read.discord import deliver
+from two_much_two_read.locking import ProcessLock
+
 from .config import Settings, load_sources
 from .digest import render_digest
-from .discord import deliver
 from .gmail import GmailClient, credentials
-from .locking import ProcessLock
 from .mime import extract_gmail_payload
 from .ollama import OllamaClient
 from .schemas import DigestItem

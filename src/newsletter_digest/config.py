@@ -5,10 +5,13 @@ import re
 import stat
 import tempfile
 from pathlib import Path
+from typing import Any
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+from two_much_two_read.paths import config_dir, data_dir, env_file
 
 
 class GmailFilter(BaseModel):
@@ -84,29 +87,32 @@ class ExcludedSubscriptions(BaseModel):
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(extra="ignore")
 
     app_env: str = "development"
     log_level: str = "INFO"
-    gmail_credentials_path: Path = Path("google-client-secret.json")
-    gmail_token_path: Path = Path("google-token.json")
+    gmail_credentials_path: Path = Field(default_factory=lambda: config_dir() / "gmail-client-secret.json")
+    gmail_token_path: Path = Field(default_factory=lambda: config_dir() / "gmail-token.json")
     gmail_max_messages_per_run: int = Field(default=50, ge=1)
     gmail_lookback_days: int = Field(default=7, ge=1, le=30)
     gmail_oauth_callback_port: int = Field(default=8765, ge=1024, le=65535)
-    sources_config_path: Path = Path("config/sources.yaml")
-    database_path: Path = Path("newsletter-digest.sqlite3")
-    lock_path: Path = Path("newsletter-digest.lock")
+    sources_config_path: Path = Field(default_factory=lambda: config_dir() / "sources.yaml")
+    database_path: Path = Field(default_factory=lambda: data_dir() / "2much2read.sqlite3")
+    lock_path: Path = Field(default_factory=lambda: data_dir() / "2much2read.lock")
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "qwen3:8b"
     ollama_num_ctx: int = 16384
     ollama_timeout_seconds: float = 300
     ollama_keep_alive: str = "10m"
     discord_webhook_url: str = ""
-    discord_username: str = "Newsletter Digest"
+    discord_username: str = "2much2read"
     digest_language: str = "zh-TW"
     digest_timezone: str = "America/Montreal"
     digest_max_items: int = Field(default=10, ge=1)
     digest_top_items: int = Field(default=5, ge=0)
+
+    def __init__(self, **data: Any) -> None:
+        super().__init__(_env_file=env_file("2much2read"), **data)
 
 
 def load_sources(path: Path) -> Sources:

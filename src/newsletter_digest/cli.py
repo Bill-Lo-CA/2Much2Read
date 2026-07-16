@@ -75,9 +75,9 @@ def run_with_elapsed(
         typer.echo(f"\r\033[K{message}", err=True, nl=final)
 
     def tick() -> None:
-        show(f"newsletter-digest run elapsed {elapsed()}")
+        show(f"2much2read run elapsed {elapsed()}")
         while not stop.wait(interval):
-            show(f"newsletter-digest run elapsed {elapsed()}")
+            show(f"2much2read run elapsed {elapsed()}")
 
     thread = Thread(target=tick, daemon=True)
     thread.start()
@@ -86,7 +86,7 @@ def run_with_elapsed(
     finally:
         stop.set()
         thread.join(timeout=max(interval, 0.1))
-        show(f"newsletter-digest run finished in {elapsed()}", final=True)
+        show(f"2much2read run finished in {elapsed()}", final=True)
 
 
 def selector(source: str | None, query: str | None, subscription: str | None) -> MailSelector:

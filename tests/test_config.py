@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from newsletter_digest.config import load_sources
+from newsletter_digest.config import Settings, load_sources
 
 
 def test_rejects_duplicate_source_ids(tmp_path: Path) -> None:
@@ -61,3 +61,26 @@ def test_rejects_unknown_gmail_filter_criteria(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="unsupported gmail filter criteria"):
         load_sources(config)
+
+
+def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    app_config = home / ".config" / "2much2read"
+    app_config.mkdir(parents=True)
+    (tmp_path / ".env").write_text(
+        "DISCORD_WEBHOOK_URL=https://legacy.example/webhook\nDATABASE_PATH=legacy.sqlite3\n",
+        encoding="utf-8",
+    )
+    (app_config / ".2much2read.env").write_text(
+        "DISCORD_WEBHOOK_URL=https://digest.example/webhook\nDATABASE_PATH=/tmp/2much2read.sqlite3\n",
+        encoding="utf-8",
+    )
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
+    monkeypatch.delenv("DATABASE_PATH", raising=False)
+
+    settings = Settings()
+
+    assert settings.discord_webhook_url == "https://digest.example/webhook"
+    assert settings.database_path == Path("/tmp/2much2read.sqlite3")

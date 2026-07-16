@@ -47,8 +47,8 @@ def test_run_outputs_elapsed_time_without_polluting_json(monkeypatch: pytest.Mon
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {"status": "ok", "discovered": 1, "processed": 1, "delivered": 0}
-    assert "newsletter-digest run elapsed" in result.stderr
-    assert "newsletter-digest run finished in" in result.stderr
+    assert "2much2read run elapsed" in result.stderr
+    assert "2much2read run finished in" in result.stderr
 
 
 @pytest.mark.parametrize(

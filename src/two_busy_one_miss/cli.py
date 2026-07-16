@@ -9,9 +9,11 @@ from typing import Annotated
 import typer
 from pydantic import BaseModel
 
+from two_much_two_read.discord import deliver
+
 from .config import Settings, load_reminders
 from .google_calendar import credentials
-from .pipeline import agenda, calendar_client, discord_deliver, discover, retry_delivery, run, test_rules
+from .pipeline import agenda, calendar_client, discover, retry_delivery, run, test_rules
 
 app = typer.Typer(no_args_is_help=True)
 auth_app = typer.Typer(no_args_is_help=True)
@@ -65,7 +67,7 @@ def doctor(send_test: Annotated[bool, typer.Option()] = False) -> None:
     checks["database_directory"] = "ok" if parent.exists() and os.access(parent, os.W_OK) else "not_writable"
     checks["discord"] = "configured" if settings.discord_webhook_url else "missing"
     if send_test and settings.discord_webhook_url:
-        discord_deliver(settings.discord_webhook_url, "2busy1miss connectivity test", settings.discord_username)
+        deliver(settings.discord_webhook_url, "2busy1miss connectivity test", settings.discord_username)
         checks["discord_test"] = "ok"
     status = "ok" if all(value in {"ok", "configured"} for value in checks.values()) else "warning"
     emit({"status": status, "checks": checks})

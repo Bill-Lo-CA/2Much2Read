@@ -1,243 +1,94 @@
-# Newsletter Digest
+# 2Much2Read
 
-Local-first pipeline that reads configured Gmail newsletters, sends sanitized text to local
-Ollama `qwen3:8b`, stores validated Traditional Chinese summaries in SQLite, and posts a daily
-digest to a private Discord webhook. Email bodies, OAuth tokens, webhook URLs, and model
-reasoning are not stored or logged.
+Two local-first tools that post only their final output to a private Discord webhook:
+
+- `2much2read` reads configured Gmail newsletters, summarizes them with local Ollama, and records digests in SQLite.
+- `2busy1miss` reads Google Calendar events, applies local YAML rules, and sends due reminders.
+
+They are separate commands, OAuth clients, OAuth tokens, YAML files, SQLite databases, and environment files. They share only Discord delivery and a process lock implementation.
+
+## Runtime files
+
+Both tools use one private root, not the repository `.env`:
 
 ```text
-Gmail API → MIME sanitizer → local Ollama → Pydantic validation → SQLite → Discord webhook
+~/.config/2much2read/
+  .2much2read.env
+  .2busy1miss.env
+  gmail-client-secret.json
+  gmail-token.json
+  calendar-client-secret.json
+  calendar-token.json
+  sources.yaml
+  reminders.yaml
+
+~/.local/share/2much2read/
+  2much2read.sqlite3
+  2busy1miss.sqlite3
+```
+
+The two environment files may contain duplicate variable names because each command and systemd unit loads only its own file. Do not source both files in one shell. All runtime directories are mode `0700`; environment, OAuth, YAML, SQLite, and lock files are mode `0600`.
+
+## 2much2read
+
+Requirements: Gmail API desktop OAuth credentials, a Discord webhook, and local Ollama.
+
+```bash
+uv sync --all-groups
+sh scripts/install-2much2read-user-service.sh \
+  --gmail-client-secret ~/Downloads/gmail-client.json
+
+uv run 2much2read auth gmail
+uv run 2much2read doctor
+uv run 2much2read run --dry-run
+uv run 2much2read run
+```
+
+The installer moves the supplied client credential to `gmail-client-secret.json`, creates `sources.yaml` from its example when necessary, migrates the existing local state, and enables `2much2read.timer`.
+
+Useful commands:
+
+```bash
+uv run 2much2read labels ensure
+uv run 2much2read filters ensure
+uv run 2much2read mails list --source SOURCE_ID
+uv run 2much2read delivery retry
 ```
 
 ## 2busy1miss
 
-This repository also includes `2busy1miss`, a local-first Google Calendar reminder tool that reads
-upcoming Calendar events, applies local YAML reminder rules, stores reminder delivery state in
-SQLite, and posts due reminders to a Discord webhook. It uses Calendar read-only access and does
-not create or edit Google Calendar native reminders.
-
-Non-code setup requires Google Calendar API enabled, Desktop OAuth credentials, a local
-read-only Calendar token, a Discord webhook, and a local reminders YAML file. Copy
-`config/2busy1miss.reminders.example.yaml` to your private config directory, set the
-`GOOGLE_CALENDAR_*`, `REMINDERS_CONFIG_PATH`, `DATABASE_PATH`, `LOCK_PATH`, and Discord environment
-variables in `~/.config/2busy1miss/2busy1miss.env`, then authorize and run:
+Requirements: Google Calendar API desktop OAuth credentials, a Discord webhook, and local reminder rules.
 
 ```bash
+uv sync --all-groups
+sh scripts/install-2busy1miss-user-service.sh \
+  --calendar-client-secret ~/Downloads/calendar-client.json
+
 uv run 2busy1miss auth calendar
 uv run 2busy1miss doctor
-uv run 2busy1miss calendars list
-uv run 2busy1miss discover --days 7
 uv run 2busy1miss rules test --days 7
 uv run 2busy1miss run --dry-run
 uv run 2busy1miss run
+```
+
+The installer moves the supplied client credential to `calendar-client-secret.json`, creates `reminders.yaml` from its example when necessary, migrates existing local state, and enables `2busy1miss.timer`.
+
+Useful commands:
+
+```bash
+uv run 2busy1miss calendars list
+uv run 2busy1miss discover --days 7
+uv run 2busy1miss agenda 2026-07-16 --dry-run
 uv run 2busy1miss retry-delivery
 ```
 
-An optional systemd user timer is provided under `deploy/systemd/2busy1miss.*`:
+## Migration and OAuth safety
 
-```bash
-sh scripts/install-2busy1miss-user-service.sh --client-secret ~/Downloads/client_secret.json
-```
+Run the matching installer once after updating. It moves the old tool's environment file, YAML, client secret, token, SQLite database, and lock file to the paths above. It reads legacy environment paths without sourcing them, preserves non-path settings, and refuses to overwrite an existing target file.
 
-## Prerequisites
+Gmail and Calendar client secrets and user tokens are intentionally distinct. Give each installer its matching `--*-client-secret` path if the credentials came from different Google Cloud projects. If a legacy service is currently running, stop it first; the installer replaces its user timer only after migration succeeds.
 
-- Linux with Python 3.11–3.13 and `uv`
-- Ollama running at `http://127.0.0.1:11434`
-- A Google Cloud desktop OAuth client with Gmail API enabled
-- A private Discord channel incoming webhook
-
-```bash
-ollama pull qwen3:8b
-ollama list
-uv sync --all-groups
-cp .env.example .env
-mkdir ~/.config/newsletter-digest
-cp config/sources.example.yaml ~/.config/newsletter-digest/sources.yaml
-chmod 600 .env ~/.config/newsletter-digest/sources.yaml
-```
-
-The paths in `.env.example` use `${HOME}`, which dotenv expands to the deployment user's home
-directory. Keep the runtime directory at mode `0700` and all
-credential, token, and environment files at `0600`. Never commit `.env`, Google JSON files, the
-SQLite database, or real newsletter fixtures.
-
-## Gmail OAuth
-
-In Google Cloud, enable Gmail API, configure the OAuth consent screen, and create **Desktop app**
-credentials. Save the downloaded JSON at `GMAIL_CREDENTIALS_PATH`. Projects left in Testing mode
-may issue refresh tokens that expire after seven days; use the appropriate production publishing
-status for persistent personal use.
-
-Google normally downloads the desktop OAuth credential with a name similar to
-`client_secret_123.apps.googleusercontent.com.json`. This is the OAuth client credential, not the
-user token. Keep its original name if preferred and set the full path in `.env`:
-
-```dotenv
-GMAIL_CREDENTIALS_PATH=${HOME}/.config/newsletter-digest/client_secret_123.apps.googleusercontent.com.json
-GMAIL_TOKEN_PATH=${HOME}/.config/newsletter-digest/google-token.json
-```
-
-Neither file belongs in Git. Transfer the client credential directly to Linux, then let the auth
-command create `google-token.json` there:
-
-```bash
-scp client_secret_*.apps.googleusercontent.com.json USER@SERVER:~/.config/newsletter-digest/
-chmod 600 ~/.config/newsletter-digest/client_secret_*.apps.googleusercontent.com.json
-```
-
-To let the application create a Gmail label and incoming-message filter, use a criteria dictionary
-in the local `sources.yaml`:
-
-```yaml
-sources:
-  - id: alphasignal
-    name: AlphaSignal
-    enabled: true
-    category: AI
-    gmail_query: 'label:ai-newsPaper from:news@alphasignal.ai'
-    gmail_filter:
-      label: ai-newsPaper
-      criteria:
-        from: news@alphasignal.ai
-    max_items_per_email: 10
-```
-
-Filter criteria support `from`, `to`, `subject`, `query`, `negatedQuery`, `hasAttachment`,
-`excludeChats`, `size`, and `sizeComparison`. Actions are intentionally fixed to adding the one
-configured label; the application cannot configure archive, delete, or forwarding actions.
-The shared category labels are `ai-newsPaper`, `cloud-data-newspaper`, `cyber-newspaper`,
-`dev-newspaper`, and `product-business-newspaper`. Keep `from:` in each source query so newsletters
-sharing a category remain distinguishable.
-
-```bash
-# When authorizing a remote Linux machine, run this locally first:
-ssh -L 8765:localhost:8765 USER@SERVER
-
-uv run newsletter-digest auth gmail
-uv run newsletter-digest labels ensure
-uv run newsletter-digest filters ensure
-uv run newsletter-digest filters audit
-# Preview totals by topic, then apply category labels to existing messages matched by each source's sender.
-uv run python scripts/backfill_category_labels.py
-uv run python scripts/backfill_category_labels.py --apply
-# Limit a backfill to selected sources; repeat --source as needed.
-uv run python scripts/backfill_category_labels.py --source tldr-ai --source tldr-dev --apply
-# Preview, then reset all local database state and Gmail processing labels for testing.
-uv run python scripts/cleanup_test_environment.py
-uv run python scripts/cleanup_test_environment.py --apply
-uv run newsletter-digest mails list --source alphasignal
-uv run newsletter-digest mails list --query 'label:ai-newsPaper from:news@alphasignal.ai'
-uv run newsletter-digest subscriptions list
-uv run newsletter-digest subscriptions sync
-uv run newsletter-digest subscriptions sync --apply
-
-# Inspect the sanitized text for one mails list result without writing state or applying labels.
-uv run newsletter-digest mails inspect --source alphasignal --id DISPLAY_ID
-
-# Also send that sanitized text to Ollama and print the structured extraction.
-uv run newsletter-digest mails inspect --source alphasignal --id DISPLAY_ID --extract
-```
-
-The application requests both `gmail.modify` and `gmail.settings.basic`. Running `auth gmail` with
-an older token automatically opens the consent flow again when the settings scope is missing. A
-successful flow replaces the token; the old token is not overwritten if authorization fails.
-`labels ensure` creates only the two processing labels and configured category labels. `filters ensure`
-idempotently creates missing configured filters; `filters audit` reports `exists`, `label_missing`, or
-`filter_missing` without modifying Gmail. Sender-specific queries combine `label:` with `from:` so
-sources sharing a category remain distinct. Label lookup is case-insensitive to match Gmail's conflict
-behavior. Gmail filters affect new matching messages and do not retroactively classify existing mail.
-
-`backfill_category_labels.py` finds existing messages using each enabled source's sender and optional
-filter query. Its default mode reports totals by category; repeatable `--source` limits the operation,
-and `--apply` adds only the configured category labels.
-`cleanup_test_environment.py` defaults to a preview. Its `--apply` mode acquires the process lock,
-creates a mode-`0600` timestamped SQLite backup beside the database, clears local test state, and
-removes only `NewsletterBot/Processed` and `NewsletterBot/Failed` from configured newsletter mail.
-It preserves category labels, Gmail filters, OAuth credentials, and existing Discord messages.
-
-`mails list --query` runs an explicit Gmail query; `--source <id>` uses that source's configured query,
-and `--subscription <id>` uses a detected subscription query. Exactly one selector is required.
-`subscriptions list` groups recent mail carrying `List-ID` or `List-Unsubscribe` headers and marks
-sources already configured. `subscriptions sync`
-previews missing enabled YAML entries. Adding `--apply` prompts for one of five uppercase categories
-or `EXCLUDED` for every candidate. Categorized entries are appended to `sources.yaml`; excluded entries
-are stored in mode-`0600` `excluded-subscriptions.yaml` beside it and skipped by future list and sync runs.
-Both files are validated before replacement. Subscription discovery reads message metadata only. The source ID `list` remains
-reserved. `mails list` prints metadata only.
-Subscription identity prefers standard `List-ID`, then a hashed provider list ID, then the complete
-`From` mailbox. When one address sends multiple newsletters, sync builds a display-name query and
-checks its Gmail results before prompting. Queries that return another sender identity, no messages,
-or non-subscription mail are reported as `ambiguous` and are not written.
-After observing the real sender, optionally strengthen the local
-`sources.yaml` query with `from:`. The application never fetches links. Runtime processing modifies
-only `NewsletterBot/Processed` and `NewsletterBot/Failed`; maintenance commands may add the category
-labels explicitly configured in `sources.yaml`.
-
-`mails inspect` accepts the same exactly-one selector rule as `mails list`, searches up to 100 matching
-messages, and compares the privacy-safe display ID printed by `mails list`. It prints message headers,
-Gmail label IDs, MIME type, and the
-sanitized text that would be sent to Ollama. `--extract` additionally calls Ollama and prints its
-structured result. Inspect never writes SQLite state, applies Gmail labels, or sends Discord. Its
-terminal output can contain private email text, so do not run it from systemd or save the output in
-logs.
-
-## Run
-
-```bash
-# Configuration and Ollama checks. Add --send-test only when a Discord test post is wanted.
-uv run newsletter-digest doctor
-
-# Gmail metadata-only connectivity check.
-uv run newsletter-digest mails list --source alphasignal --limit 1
-
-# Gmail → MIME → Ollama without persistent database state, processed labels, or Discord delivery.
-uv run newsletter-digest run --dry-run --source alphasignal --max-messages 1
-
-# Persist one result and apply Gmail labels, but hold Discord delivery.
-uv run newsletter-digest run --no-deliver --source alphasignal --max-messages 1
-
-# Deliver the already stored digest without calling Gmail or Ollama again.
-uv run newsletter-digest delivery retry
-
-uv run newsletter-digest backfill --days 7 --source alphasignal
-
-# Reprocess a bounded number of messages even if they already have processed labels, then send a new digest.
-uv run newsletter-digest run --force --source alphasignal --max-messages 1
-
-# Reprocess and persist a new pending digest without sending it.
-uv run newsletter-digest run --force --no-deliver --source alphasignal --max-messages 1
-
-```
-
-Replace `alphasignal` with an enabled `id` from your local `sources.yaml`. If `--source` is
-omitted, the command processes every enabled source.
-`--force` requires both `--source` and `--max-messages`; it replaces stored items for matching
-messages and creates a new digest record. With `--no-deliver`, that record remains pending for
-`delivery retry`. A normal run delivers only the digest record created by that run; older pending or
-failed records wait for an explicit retry. `--max-messages` applies per source when multiple sources run; the rendered digest
-still contains at most `DIGEST_MAX_ITEMS` items. Topic-based runs are not currently supported.
-
-`labels ensure`, `filters audit`, and `mails list` are the current live Gmail API checks. `doctor` only
-checks whether the Gmail token file exists; it does not make a Gmail API request. Dry run uses an in-memory
-database and does not apply processing labels or send Discord messages. It may create missing
-app-owned labels during startup, so run `labels ensure` first when that distinction matters.
-Backfill does not deliver unless `--deliver` is supplied. Discord mentions are disabled on every
-request.
-
-## systemd user timer
-
-Run the installer from an activated project environment so it can resolve the executable:
-
-```bash
-sh scripts/install-user-service.sh
-systemctl --user status newsletter-digest.timer
-journalctl --user -u newsletter-digest.service
-```
-
-To run while logged out, an administrator may explicitly enable lingering with
-`loginctl enable-linger "$USER"`. The installer does not do this automatically.
-
-## Development and validation
+## Development
 
 ```bash
 uv sync --all-groups
@@ -246,35 +97,6 @@ uv run ruff check .
 uv run mypy src scripts
 uv run pytest -q
 uv build
-uv run pip audit
 ```
 
-The audit command requires network access and is intentionally not part of offline tests. Live
-Gmail, Ollama, and Discord checks are opt-in and require local secrets.
-
-## Recovery and troubleshooting
-
-To isolate Ollama from the Gmail pipeline, test `/api/chat` directly. `think: false` prevents
-Qwen from returning a separate reasoning trace:
-
-```bash
-curl -i http://127.0.0.1:11434/api/chat \
-  -H 'Content-Type: application/json' \
-  -d '{
-    "model": "qwen3:8b",
-    "messages": [{"role": "user", "content": "Reply only with: test successful"}],
-    "stream": false,
-    "think": false
-  }'
-```
-
-- OAuth expired: rerun `newsletter-digest auth gmail`; check the consent-screen publishing status.
-- Model missing or GPU fallback: run `ollama list`, `ollama pull qwen3:8b`, and inspect Ollama logs.
-- Ollama grammar errors: the application removes `maxLength` from the generation schema because
-  Ollama rejects large repetition limits; Pydantic still validates those limits after generation.
-- Invalid model JSON: one repair is automatic; repeated failure returns `OLLAMA_SCHEMA_INVALID`.
-  Source URLs are checked against both plain and Markdown-formatted links after URL normalization.
-- Gmail query mismatch: use `mails list`, then update only the local `sources.yaml` query.
-- Discord rate limit/outage: run `delivery retry`; Gmail and Ollama are not called again.
-- Back up the SQLite database and OAuth token together while the service is stopped; restore with
-  mode `0600`. Keep encrypted backups outside the repository.
+Live Gmail, Calendar, Ollama, and Discord checks require local secrets and are opt-in.

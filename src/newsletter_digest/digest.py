@@ -57,26 +57,10 @@ def render_digest(
     top = eligible[:top_items]
     rest = eligible[top_items:]
     sections = [
-        f"📰 {topic} Newsletter Digest — {when:%Y-%m-%d}",
+        f"📰 {topic} 2much2read — {when:%Y-%m-%d}",
         "🔥 今日重點\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)),
     ]
     if rest:
         sections.append("🧰 其他值得注意\n" + "\n\n".join(entry(item, "•") for item in rest))
     sections.append(f"📊 本次處理\n主題：{topic}\n來源：{source_names} · {len(eligible)} 則有效項目")
     return "\n\n".join(sections).replace("@", "@\u200b")
-
-
-def chunk_text(text: str, limit: int = 2000) -> list[str]:
-    if len(text) <= limit:
-        return [text]
-    chunks: list[str] = []
-    remaining = text
-    while remaining:
-        cut = min(limit - 12, len(remaining))
-        if cut < len(remaining):
-            boundary = max(remaining.rfind("\n\n", 0, cut), remaining.rfind("\n", 0, cut))
-            cut = boundary if boundary > limit // 2 else cut
-        chunks.append(remaining[:cut].rstrip())
-        remaining = remaining[cut:].lstrip()
-    total = len(chunks)
-    return [f"({index}/{total}) {chunk}" for index, chunk in enumerate(chunks, 1)]

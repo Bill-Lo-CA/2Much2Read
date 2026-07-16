@@ -2,8 +2,9 @@ from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 from two_busy_one_miss.google_calendar import CalendarEvent
-from two_busy_one_miss.renderer import chunk_text, render_agenda, render_reminder
+from two_busy_one_miss.renderer import render_agenda, render_reminder
 from two_busy_one_miss.rules import ReminderCandidate
+from two_much_two_read.discord import chunk_text
 
 
 def test_render_reminder_disables_mentions() -> None:
