@@ -44,7 +44,7 @@ uv run 2much2read run --dry-run
 uv run 2much2read run
 ```
 
-The installer moves the supplied client credential to `gmail-client-secret.json`, creates `sources.yaml` from its example when necessary, migrates the existing local state, and enables `2much2read.timer`.
+The installer moves the supplied client credential to `gmail-client-secret.json`, creates `sources.yaml` from its example when necessary, and enables `2much2read.timer`.
 
 Useful commands:
 
@@ -71,7 +71,7 @@ uv run 2busy1miss run --dry-run
 uv run 2busy1miss run
 ```
 
-The installer moves the supplied client credential to `calendar-client-secret.json`, creates `reminders.yaml` from its example when necessary, migrates existing local state, and enables `2busy1miss.timer`.
+The installer moves the supplied client credential to `calendar-client-secret.json`, creates `reminders.yaml` from its example when necessary, and enables `2busy1miss.timer`.
 
 Useful commands:
 
@@ -82,11 +82,9 @@ uv run 2busy1miss agenda 2026-07-16 --dry-run
 uv run 2busy1miss retry-delivery
 ```
 
-## Migration and OAuth safety
+## OAuth safety
 
-Run the matching installer once after updating. It moves the old tool's environment file, YAML, client secret, token, SQLite database, and lock file to the paths above. It reads legacy environment paths without sourcing them, preserves non-path settings, and refuses to overwrite an existing target file.
-
-Gmail and Calendar client secrets and user tokens are intentionally distinct. Give each installer its matching `--*-client-secret` path if the credentials came from different Google Cloud projects. If a legacy service is currently running, stop it first; the installer replaces its user timer only after migration succeeds.
+Gmail and Calendar client secrets and user tokens are intentionally distinct. Give each installer its matching `--*-client-secret` path if the credentials came from different Google Cloud projects.
 
 ## Development
 
