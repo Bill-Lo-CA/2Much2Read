@@ -1,4 +1,5 @@
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -55,6 +56,26 @@ def test_deliver_digest_only_sends_selected_digest(tmp_path: Path, monkeypatch: 
     assert database.pending_digest(first_id) is not None
     assert database.pending_digest(current_id) is None
     database.close()
+
+
+def test_retry_delivery_holds_process_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
+    database = MagicMock()
+    database.pending_digests.return_value = [{"id": 1, "rendered_content": "content"}]
+    lock = MagicMock()
+    process_lock = MagicMock(return_value=lock)
+    monkeypatch.setattr(pipeline, "Database", MagicMock(return_value=database))
+    monkeypatch.setattr(pipeline, "ProcessLock", process_lock)
+
+    def fake_deliver(*args: object) -> list[str]:
+        assert lock.__enter__.called
+        return ["discord-id"]
+
+    monkeypatch.setattr(pipeline, "deliver", fake_deliver)
+
+    assert pipeline.retry_delivery(settings) == 1
+    process_lock.assert_called_once_with(settings.lock_path)
+    database.finish_delivery.assert_called_once_with(1, ["discord-id"])
 
 
 def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

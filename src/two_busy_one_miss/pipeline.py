@@ -136,15 +136,16 @@ def retry_delivery(settings: Settings) -> dict[str, object]:
     database = Database(settings.database_path)
     delivered = 0
     try:
-        for attempt in database.pending_attempts():
-            attempt_id = int(attempt["id"])
-            try:
-                message_ids = deliver(settings.discord_webhook_url, str(attempt["content"]), settings.discord_username)
-                database.finish_delivery(attempt_id, message_ids)
-                delivered += 1
-            except Exception:
-                database.fail_delivery(attempt_id)
-                raise
+        with ProcessLock(settings.lock_path):
+            for attempt in database.pending_attempts():
+                attempt_id = int(attempt["id"])
+                try:
+                    message_ids = deliver(settings.discord_webhook_url, str(attempt["content"]), settings.discord_username)
+                    database.finish_delivery(attempt_id, message_ids)
+                    delivered += 1
+                except Exception:
+                    database.fail_delivery(attempt_id)
+                    raise
     finally:
         database.close()
     return {"status": "ok", "delivered": delivered}

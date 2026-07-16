@@ -11,5 +11,9 @@ dist/
 google-client-secret*.json
 client_secret*.json
 google-token*.json
+gmail-client-secret.json
+gmail-token.json
+calendar-client-secret.json
+calendar-token.json
 NEWSLETTER_CATALOG.md
 /2Much2Read-Spec/

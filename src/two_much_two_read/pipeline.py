@@ -164,18 +164,19 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> int:
     database = database or Database(settings.database_path)
     delivered = 0
     try:
-        for digest in database.pending_digests():
-            try:
-                ids = deliver(
-                    settings.discord_webhook_url,
-                    str(digest["rendered_content"]),
-                    settings.discord_username,
-                )
-                database.finish_delivery(int(digest["id"]), ids)
-                delivered += 1
-            except Exception:
-                database.fail_delivery(int(digest["id"]))
-                raise
+        with ProcessLock(settings.lock_path):
+            for digest in database.pending_digests():
+                try:
+                    ids = deliver(
+                        settings.discord_webhook_url,
+                        str(digest["rendered_content"]),
+                        settings.discord_username,
+                    )
+                    database.finish_delivery(int(digest["id"]), ids)
+                    delivered += 1
+                except Exception:
+                    database.fail_delivery(int(digest["id"]))
+                    raise
     finally:
         if owned:
             database.close()

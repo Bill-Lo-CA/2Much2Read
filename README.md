@@ -27,7 +27,7 @@ Both tools use one private root, not the repository `.env`:
   2busy1miss.sqlite3
 ```
 
-The two environment files may contain duplicate variable names because each command and systemd unit loads only its own file. Do not source both files in one shell. All runtime directories are mode `0700`; environment, OAuth, YAML, SQLite, and lock files are mode `0600`.
+The two environment files may contain duplicate variable names because each command and systemd unit loads only its own file. Do not source both files in one shell. The installers set both runtime directories to mode `0700`, set copied environment/YAML files, OAuth credentials/tokens, and lock files to `0600`, and keep SQLite databases inside the protected data directory.
 
 ## 2much2read
 
@@ -35,6 +35,7 @@ Requirements: Gmail API desktop OAuth credentials, a Discord webhook, and local 
 
 ```bash
 uv sync --all-groups
+ollama pull qwen3:8b
 sh scripts/install-2much2read-user-service.sh \
   --gmail-client-secret ~/Downloads/gmail-client.json
 
@@ -44,7 +45,7 @@ uv run 2much2read run --dry-run
 uv run 2much2read run
 ```
 
-The installer moves the supplied client credential to `gmail-client-secret.json`, copies `config/2much2read.env.example` and `sources.yaml` on first install, and enables `2much2read.timer`.
+The installer moves the supplied client credential to `gmail-client-secret.json`, copies `config/2much2read.env.example` and `sources.yaml` on first install, and enables `2much2read.timer`. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read/.2much2read.env` before running it.
 
 Useful commands:
 
@@ -71,7 +72,7 @@ uv run 2busy1miss run --dry-run
 uv run 2busy1miss run
 ```
 
-The installer moves the supplied client credential to `calendar-client-secret.json`, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, and enables `2busy1miss.timer`.
+The installer moves the supplied client credential to `calendar-client-secret.json`, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, and enables `2busy1miss.timer`. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read/.2busy1miss.env` before running it.
 
 Useful commands:
 
