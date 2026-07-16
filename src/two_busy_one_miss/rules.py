@@ -47,18 +47,20 @@ def matches(event: CalendarEvent, rule: EventMatch) -> bool:
 
 
 def schedule_reminders(config: RemindersConfig, events: list[CalendarEvent]) -> list[ReminderCandidate]:
-    scheduled: list[ReminderCandidate] = []
+    scheduled: dict[tuple[str, str, datetime], ReminderCandidate] = {}
     for event in events:
         for reminder in config.default_rules:
             rule_id = reminder.id or f"default:{reminder.before}"
-            scheduled.append(ReminderCandidate(event, rule_id, reminder.before, event.start - parse_offset(reminder.before)))
+            candidate = ReminderCandidate(event, rule_id, reminder.before, event.start - parse_offset(reminder.before))
+            scheduled[event.calendar_id, event.instance_id, candidate.reminder_time] = candidate
         for rule in config.rules:
             if not matches(event, rule.match):
                 continue
             for reminder in rule.reminders:
                 rule_id = reminder.id or f"{rule.id}:{reminder.before}"
-                scheduled.append(ReminderCandidate(event, rule_id, reminder.before, event.start - parse_offset(reminder.before)))
-    return sorted(scheduled, key=lambda item: (item.reminder_time, item.event.start, item.rule_id))
+                candidate = ReminderCandidate(event, rule_id, reminder.before, event.start - parse_offset(reminder.before))
+                scheduled[event.calendar_id, event.instance_id, candidate.reminder_time] = candidate
+    return sorted(scheduled.values(), key=lambda item: (item.reminder_time, item.event.start, item.rule_id))
 
 
 def due_reminders(candidates: list[ReminderCandidate], now: datetime) -> list[ReminderCandidate]:

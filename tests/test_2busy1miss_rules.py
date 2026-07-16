@@ -38,19 +38,19 @@ def test_matches_supported_fields() -> None:
 def test_schedules_defaults_and_matching_rules() -> None:
     config = RemindersConfig(
         calendars=[{"id": "primary"}],
-        default_rules=[ReminderSpec(id="default-5m", before="5m")],
+        default_rules=[ReminderSpec(id="default-30m", before="30m"), ReminderSpec(id="default-5m", before="5m")],
         rules=[
             RuleConfig(
                 id="french-class",
                 match=EventMatch(title_contains=["French"]),
-                reminders=[ReminderSpec(before="2h")],
+                reminders=[ReminderSpec(before="2h"), ReminderSpec(before="30m")],
             )
         ],
     )
 
     scheduled = schedule_reminders(config, [event()])
 
-    assert [item.rule_id for item in scheduled] == ["french-class:2h", "default-5m"]
+    assert [item.rule_id for item in scheduled] == ["french-class:2h", "french-class:30m", "default-5m"]
 
 
 def test_due_reminders_skip_started_events() -> None:
