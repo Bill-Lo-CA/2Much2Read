@@ -32,17 +32,30 @@ if [ -n "$calendar_client_secret" ] && [ ! -f "$calendar_client_secret" ]; then
 fi
 
 exe="$repo_dir/.venv/bin/2busy1miss"
-[ -x "$exe" ] || {
+python="$repo_dir/.venv/bin/python"
+[ -x "$exe" ] && [ -x "$python" ] || {
   printf '%s\n' "2busy1miss executable not found; run uv sync first" >&2
   exit 1
 }
+
+systemctl --user disable --now 2busy1miss.timer 2>/dev/null || true
+if systemctl --user is-active --quiet 2busy1miss.service; then
+  printf '%s\n' "stop 2busy1miss.service before migrating its files" >&2
+  exit 1
+fi
+if [ -n "$calendar_client_secret" ]; then
+  "$python" -m two_much_two_read.migrate calendar \
+    --legacy-env "$HOME/.config/2busy1miss/2busy1miss.env" \
+    --calendar-client-secret "$calendar_client_secret"
+else
+  "$python" -m two_much_two_read.migrate calendar --legacy-env "$HOME/.config/2busy1miss/2busy1miss.env"
+fi
 
 config_dir="$HOME/.config/2much2read"
 data_dir="$HOME/.local/share/2much2read"
 systemd_dir="$HOME/.config/systemd/user"
 env_file="$config_dir/.2busy1miss.env"
 reminders_file="$config_dir/reminders.yaml"
-target_secret="$config_dir/calendar-client-secret.json"
 
 mkdir -p "$config_dir" "$data_dir" "$systemd_dir"
 chmod 700 "$config_dir" "$data_dir"
@@ -50,14 +63,6 @@ chmod 700 "$config_dir" "$data_dir"
 if [ ! -f "$env_file" ]; then
   cp config/2busy1miss.env.example "$env_file"
   chmod 600 "$env_file"
-fi
-if [ -n "$calendar_client_secret" ]; then
-  [ ! -e "$target_secret" ] || {
-    printf '%s\n' "Calendar client secret already exists: $target_secret" >&2
-    exit 1
-  }
-  mv "$calendar_client_secret" "$target_secret"
-  chmod 600 "$target_secret"
 fi
 
 if [ ! -f "$reminders_file" ]; then

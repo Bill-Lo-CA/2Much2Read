@@ -32,31 +32,39 @@ if [ -n "$gmail_client_secret" ] && [ ! -f "$gmail_client_secret" ]; then
 fi
 
 exe="$repo_dir/.venv/bin/2much2read"
-[ -x "$exe" ] || {
+python="$repo_dir/.venv/bin/python"
+[ -x "$exe" ] && [ -x "$python" ] || {
   printf '%s\n' "2much2read executable not found; run uv sync first" >&2
   exit 1
 }
+
+systemctl --user disable --now newsletter-digest.timer 2>/dev/null || true
+if systemctl --user is-active --quiet newsletter-digest.service; then
+  printf '%s\n' "stop newsletter-digest.service before migrating its files" >&2
+  exit 1
+fi
+if [ -n "$gmail_client_secret" ]; then
+  "$python" -m two_much_two_read.migrate newsletter \
+    --legacy-env "$HOME/.config/newsletter-digest/newsletter-digest.env" \
+    --legacy-env "$repo_dir/.env" \
+    --gmail-client-secret "$gmail_client_secret"
+else
+  "$python" -m two_much_two_read.migrate newsletter \
+    --legacy-env "$HOME/.config/newsletter-digest/newsletter-digest.env" \
+    --legacy-env "$repo_dir/.env"
+fi
 
 config_dir="$HOME/.config/2much2read"
 data_dir="$HOME/.local/share/2much2read"
 systemd_dir="$HOME/.config/systemd/user"
 env_file="$config_dir/.2much2read.env"
 sources_file="$config_dir/sources.yaml"
-target_secret="$config_dir/gmail-client-secret.json"
 
 mkdir -p "$config_dir" "$data_dir" "$systemd_dir"
 chmod 700 "$config_dir" "$data_dir"
 if [ ! -f "$env_file" ]; then
   cp config/2much2read.env.example "$env_file"
   chmod 600 "$env_file"
-fi
-if [ -n "$gmail_client_secret" ]; then
-  [ ! -e "$target_secret" ] || {
-    printf '%s\n' "Gmail client secret already exists: $target_secret" >&2
-    exit 1
-  }
-  mv "$gmail_client_secret" "$target_secret"
-  chmod 600 "$target_secret"
 fi
 if [ ! -f "$sources_file" ]; then
   cp config/sources.example.yaml "$sources_file"
@@ -65,7 +73,6 @@ fi
 
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2much2read.service > "$systemd_dir/2much2read.service"
 cp deploy/systemd/2much2read.timer "$systemd_dir/2much2read.timer"
-systemctl --user disable --now newsletter-digest.timer 2>/dev/null || true
 rm -f "$systemd_dir/newsletter-digest.service" "$systemd_dir/newsletter-digest.timer"
 systemctl --user daemon-reload
 systemctl --user enable --now 2much2read.timer
