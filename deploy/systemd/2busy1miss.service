@@ -1,0 +1,11 @@
+[Unit]
+Description=2busy1miss Calendar Reminders
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/2busy1miss/2busy1miss.env
+ExecStart=__EXECUTABLE__ run
+TimeoutStartSec=5min
+NoNewPrivileges=true
+PrivateTmp=true

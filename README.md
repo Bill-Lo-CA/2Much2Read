@@ -9,6 +9,36 @@ reasoning are not stored or logged.
 Gmail API → MIME sanitizer → local Ollama → Pydantic validation → SQLite → Discord webhook
 ```
 
+## 2busy1miss
+
+This repository also includes `2busy1miss`, a local-first Google Calendar reminder tool that reads
+upcoming Calendar events, applies local YAML reminder rules, stores reminder delivery state in
+SQLite, and posts due reminders to a Discord webhook. It uses Calendar read-only access and does
+not create or edit Google Calendar native reminders.
+
+Non-code setup requires Google Calendar API enabled, Desktop OAuth credentials, a local
+read-only Calendar token, a Discord webhook, and a local reminders YAML file. Copy
+`config/2busy1miss.reminders.example.yaml` to your private config directory, set the
+`GOOGLE_CALENDAR_*`, `REMINDERS_CONFIG_PATH`, `DATABASE_PATH`, `LOCK_PATH`, and Discord environment
+variables in `~/.config/2busy1miss/2busy1miss.env`, then authorize and run:
+
+```bash
+uv run 2busy1miss auth calendar
+uv run 2busy1miss doctor
+uv run 2busy1miss calendars list
+uv run 2busy1miss discover --days 7
+uv run 2busy1miss rules test --days 7
+uv run 2busy1miss run --dry-run
+uv run 2busy1miss run
+uv run 2busy1miss retry-delivery
+```
+
+An optional systemd user timer is provided under `deploy/systemd/2busy1miss.*`:
+
+```bash
+sh scripts/install-2busy1miss-user-service.sh --client-secret ~/Downloads/client_secret.json
+```
+
 ## Prerequisites
 
 - Linux with Python 3.11–3.13 and `uv`
