@@ -11,7 +11,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from two_much_two_read.paths import config_dir, data_dir, env_file
+from common.paths import config_dir, data_dir, env_file
 
 
 class GmailFilter(BaseModel):

@@ -1,1 +1,3 @@
-"""Shared runtime helpers for the two 2Much2Read applications."""
+"""Local-first newsletter digest."""
+
+__version__ = "0.1.0"

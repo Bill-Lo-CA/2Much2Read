@@ -48,7 +48,7 @@ mkdir -p "$config_dir" "$data_dir" "$systemd_dir"
 chmod 700 "$config_dir" "$data_dir"
 
 if [ ! -f "$env_file" ]; then
-  printf '%s\n' '# 2busy1miss runtime settings' 'DISCORD_WEBHOOK_URL=' > "$env_file"
+  cp config/2busy1miss.env.example "$env_file"
   chmod 600 "$env_file"
 fi
 if [ -n "$calendar_client_secret" ]; then

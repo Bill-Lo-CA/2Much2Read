@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from newsletter_digest.schemas import DigestItem, EmailExtraction
-from newsletter_digest.storage import Database
+from two_much_two_read.schemas import DigestItem, EmailExtraction
+from two_much_two_read.storage import Database
 
 
 def test_message_and_digest_idempotency(tmp_path: Path) -> None:

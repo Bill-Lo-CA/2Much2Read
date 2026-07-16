@@ -3,9 +3,9 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from newsletter_digest import gmail
-from newsletter_digest.config import Source
-from newsletter_digest.gmail import SCOPES, FilterStatus, GmailClient, find_label_id, source_backfill_query
+from two_much_two_read import gmail
+from two_much_two_read.config import Source
+from two_much_two_read.gmail import SCOPES, FilterStatus, GmailClient, find_label_id, source_backfill_query
 
 
 def test_backfill_query_uses_sender_and_missing_category_label() -> None:

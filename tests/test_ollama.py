@@ -4,7 +4,7 @@ import httpx
 import pytest
 import respx
 
-from newsletter_digest.ollama import OllamaClient
+from two_much_two_read.ollama import OllamaClient
 
 
 def valid_result() -> dict[str, object]:

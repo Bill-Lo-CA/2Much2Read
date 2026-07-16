@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import argparse
 
-from newsletter_digest.config import Settings, load_sources
-from newsletter_digest.gmail import GmailClient, credentials, find_label_id, source_backfill_query
+from two_much_two_read.config import Settings, load_sources
+from two_much_two_read.gmail import GmailClient, credentials, find_label_id, source_backfill_query
 
 
 def main() -> None:

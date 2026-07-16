@@ -47,7 +47,7 @@ target_secret="$config_dir/gmail-client-secret.json"
 mkdir -p "$config_dir" "$data_dir" "$systemd_dir"
 chmod 700 "$config_dir" "$data_dir"
 if [ ! -f "$env_file" ]; then
-  printf '%s\n' '# 2much2read runtime settings' 'DISCORD_WEBHOOK_URL=' > "$env_file"
+  cp config/2much2read.env.example "$env_file"
   chmod 600 "$env_file"
 fi
 if [ -n "$gmail_client_secret" ]; then

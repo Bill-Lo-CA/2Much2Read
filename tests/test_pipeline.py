@@ -2,11 +2,11 @@ from pathlib import Path
 
 import pytest
 
-from newsletter_digest import pipeline
-from newsletter_digest.config import Settings
-from newsletter_digest.pipeline import deliver_digest, run_pipeline
-from newsletter_digest.schemas import EmailExtraction
-from newsletter_digest.storage import Database
+from two_much_two_read import pipeline
+from two_much_two_read.config import Settings
+from two_much_two_read.pipeline import deliver_digest, run_pipeline
+from two_much_two_read.schemas import EmailExtraction
+from two_much_two_read.storage import Database
 
 
 def write_sources(path: Path, *, enabled: bool = True) -> None:

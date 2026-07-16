@@ -1,7 +1,7 @@
 import httpx
 import respx
 
-from two_much_two_read.discord import deliver
+from common.discord import deliver
 
 
 @respx.mock

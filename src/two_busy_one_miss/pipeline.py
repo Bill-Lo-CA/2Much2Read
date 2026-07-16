@@ -3,8 +3,8 @@ from __future__ import annotations
 from datetime import date, datetime, time, timedelta
 from zoneinfo import ZoneInfo
 
-from two_much_two_read.discord import deliver
-from two_much_two_read.locking import ProcessLock
+from common.discord import deliver
+from common.locking import ProcessLock
 
 from .config import RemindersConfig, Settings, load_reminders
 from .google_calendar import CalendarClient, CalendarEvent, credentials

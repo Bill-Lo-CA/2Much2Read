@@ -5,10 +5,10 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from newsletter_digest.config import Settings, load_sources
-from newsletter_digest.gmail import GmailClient, credentials, find_label_id
-from newsletter_digest.storage import Database
-from two_much_two_read.locking import ProcessLock
+from common.locking import ProcessLock
+from two_much_two_read.config import Settings, load_sources
+from two_much_two_read.gmail import GmailClient, credentials, find_label_id
+from two_much_two_read.storage import Database
 
 PROCESSING_LABELS = ["NewsletterBot/Processed", "NewsletterBot/Failed"]
 

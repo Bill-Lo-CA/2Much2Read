@@ -5,8 +5,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from two_much_two_read.discord import deliver
-from two_much_two_read.locking import ProcessLock
+from common.discord import deliver
+from common.locking import ProcessLock
 
 from .config import Settings, load_sources
 from .digest import render_digest

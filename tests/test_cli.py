@@ -6,10 +6,10 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from newsletter_digest import cli, operations
-from newsletter_digest.config import Settings
-from newsletter_digest.operations import FiltersResult
-from newsletter_digest.schemas import EmailExtraction
+from two_much_two_read import cli, operations
+from two_much_two_read.config import Settings
+from two_much_two_read.operations import FiltersResult
+from two_much_two_read.schemas import EmailExtraction
 
 
 def test_cli_has_only_target_command_tree() -> None:

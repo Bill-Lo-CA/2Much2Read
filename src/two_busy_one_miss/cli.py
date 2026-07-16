@@ -9,7 +9,7 @@ from typing import Annotated
 import typer
 from pydantic import BaseModel
 
-from two_much_two_read.discord import deliver
+from common.discord import deliver
 
 from .config import Settings, load_reminders
 from .google_calendar import credentials

@@ -5,7 +5,7 @@ Two local-first tools that post only their final output to a private Discord web
 - `2much2read` reads configured Gmail newsletters, summarizes them with local Ollama, and records digests in SQLite.
 - `2busy1miss` reads Google Calendar events, applies local YAML rules, and sends due reminders.
 
-They are separate commands, OAuth clients, OAuth tokens, YAML files, SQLite databases, and environment files. They share only Discord delivery and a process lock implementation.
+They are separate commands, OAuth clients, OAuth tokens, YAML files, SQLite databases, and environment files. They share only configuration-path resolution, Discord delivery, and a process lock implementation.
 
 ## Runtime files
 
@@ -44,7 +44,7 @@ uv run 2much2read run --dry-run
 uv run 2much2read run
 ```
 
-The installer moves the supplied client credential to `gmail-client-secret.json`, creates `sources.yaml` from its example when necessary, and enables `2much2read.timer`.
+The installer moves the supplied client credential to `gmail-client-secret.json`, copies `config/2much2read.env.example` and `sources.yaml` on first install, and enables `2much2read.timer`.
 
 Useful commands:
 
@@ -71,7 +71,7 @@ uv run 2busy1miss run --dry-run
 uv run 2busy1miss run
 ```
 
-The installer moves the supplied client credential to `calendar-client-secret.json`, creates `reminders.yaml` from its example when necessary, and enables `2busy1miss.timer`.
+The installer moves the supplied client credential to `calendar-client-secret.json`, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, and enables `2busy1miss.timer`.
 
 Useful commands:
 

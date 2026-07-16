@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from newsletter_digest.config import Settings, load_sources
+from two_much_two_read.config import Settings, load_sources
 
 
 def test_rejects_duplicate_source_ids(tmp_path: Path) -> None:
