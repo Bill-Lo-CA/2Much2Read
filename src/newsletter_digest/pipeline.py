@@ -78,6 +78,7 @@ def run_pipeline(
     database = Database(Path(":memory:") if dry_run else settings.database_path)
     processed = 0
     discovered = 0
+    failed = 0
     try:
         with ProcessLock(settings.lock_path):
             for source in sources:
@@ -110,7 +111,14 @@ def run_pipeline(
                     if message_id is None:
                         continue
                     discovered += 1
-                    extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
+                    try:
+                        extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
+                    except Exception:
+                        database.fail_message(message_id, "OLLAMA_EXTRACTION_FAILED")
+                        failed += 1
+                        if not dry_run:
+                            gmail.add_labels(gmail_id, [failed_label])
+                        continue
                     database.store_extraction(message_id, extraction, replace=force)
                     processed += 1
                     if not dry_run:
@@ -141,9 +149,10 @@ def run_pipeline(
                     deliver_digest(settings, database, digest_id)
                     delivered = 1
             return {
-                "status": "ok" if content else "no_content",
+                "status": "partial" if failed else "ok" if content else "no_content",
                 "discovered": discovered,
                 "processed": processed,
+                "failed": failed,
                 "delivered": delivered,
             }
     finally:

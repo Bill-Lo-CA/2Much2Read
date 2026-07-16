@@ -123,6 +123,15 @@ class Database:
                 )
             connection.execute("UPDATE messages SET state='processed', updated_at=? WHERE id=?", (now, message_id))
 
+    def fail_message(self, message_id: int, error_code: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """UPDATE messages SET state='failed', attempt_count=attempt_count+1,
+            last_error_code=?, updated_at=? WHERE id=?""",
+            (error_code, now, message_id),
+        )
+        self.connection.commit()
+
     def recent_items(self, limit: int = 100) -> list[dict[str, object]]:
         rows = self.connection.execute(
             """SELECT i.*, m.received_at FROM items i JOIN messages m ON m.id=i.message_id

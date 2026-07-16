@@ -5,6 +5,7 @@ import pytest
 from newsletter_digest import pipeline
 from newsletter_digest.config import Settings
 from newsletter_digest.pipeline import deliver_digest, run_pipeline
+from newsletter_digest.schemas import EmailExtraction
 from newsletter_digest.storage import Database
 
 
@@ -53,4 +54,75 @@ def test_deliver_digest_only_sends_selected_digest(tmp_path: Path, monkeypatch: 
     assert delivered == ["current digest"]
     assert database.pending_digest(first_id) is not None
     assert database.pending_digest(current_id) is None
+    database.close()
+
+
+def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+
+    class FakeGmailClient:
+        def __init__(self) -> None:
+            self.applied_labels: list[tuple[str, list[str]]] = []
+
+        def ensure_labels(self) -> None:
+            pass
+
+        def list_messages(self, query: str, limit: int) -> list[str]:
+            return ["bad", "good"]
+
+        def get_message(self, message_id: str) -> dict[str, object]:
+            return {"internalDate": "0", "threadId": message_id, "payload": {"body": message_id}}
+
+        def add_labels(self, message_id: str, labels: list[str]) -> None:
+            self.applied_labels.append((message_id, labels))
+
+    class FakeOllamaClient:
+        def __init__(self, *args: object) -> None:
+            pass
+
+        def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
+            if content == "bad":
+                raise ValueError("OLLAMA_SCHEMA_INVALID")
+            return EmailExtraction(
+                source_id=source_id,
+                newsletter_title="Good news",
+                newsletter_date=None,
+                overview_zh_tw="摘要",
+                items=[
+                    {
+                        "title": "Good item",
+                        "category": "AI_MODEL",
+                        "summary_zh_tw": "內容",
+                        "why_it_matters_zh_tw": "原因",
+                        "importance": 8,
+                        "confidence": 0.9,
+                    }
+                ],
+            )
+
+    gmail = FakeGmailClient()
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda credentials: gmail)
+    monkeypatch.setattr(pipeline, "OllamaClient", FakeOllamaClient)
+    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+
+    result = run_pipeline(settings, no_deliver=True)
+
+    assert result == {"status": "partial", "discovered": 2, "processed": 1, "failed": 1, "delivered": 0}
+    assert gmail.applied_labels == [
+        ("bad", ["NewsletterBot/Failed"]),
+        ("good", ["NewsletterBot/Processed"]),
+    ]
+    database = Database(settings.database_path)
+    rows = database.connection.execute("SELECT gmail_message_id, state, last_error_code FROM messages ORDER BY id").fetchall()
+    assert [tuple(row) for row in rows] == [
+        ("bad", "failed", "OLLAMA_EXTRACTION_FAILED"),
+        ("good", "processed", None),
+    ]
     database.close()
