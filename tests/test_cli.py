@@ -1,5 +1,6 @@
 import base64
 import json
+import re
 from pathlib import Path
 from typing import Any
 
@@ -30,11 +31,12 @@ def test_cli_has_only_target_command_tree() -> None:
 
 def test_run_help_uses_clear_delivery_flags_without_resend() -> None:
     result = CliRunner().invoke(cli.app, ["run", "--help"])
+    help_text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", result.stdout)
 
     assert result.exit_code == 0
-    assert "--deliver" in result.stdout
-    assert "--no-deliver" in result.stdout
-    assert "--resend" not in result.stdout
+    assert "--deliver" in help_text
+    assert "--no-deliver" in help_text
+    assert "--resend" not in help_text
 
 
 def test_run_outputs_elapsed_time_without_polluting_json(monkeypatch: pytest.MonkeyPatch) -> None:
