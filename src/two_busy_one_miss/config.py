@@ -64,7 +64,7 @@ class RuleConfig(BaseModel):
 class RemindersConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    timezone: str = "America/Montreal"
+    timezone: str | None = None
     calendars: list[CalendarConfig] = Field(min_length=1)
     default_rules: list[ReminderSpec] = Field(default_factory=list)
     rules: list[RuleConfig] = Field(default_factory=list)

@@ -26,6 +26,19 @@ rules: []
     assert config.enabled_calendars[0].id == "primary"
 
 
+def test_omitted_timezone_allows_settings_fallback(tmp_path: Path) -> None:
+    path = tmp_path / "reminders.yaml"
+    path.write_text(
+        """
+calendars:
+  - id: primary
+""",
+        encoding="utf-8",
+    )
+
+    assert load_reminders(path).timezone is None
+
+
 def test_rejects_invalid_offset(tmp_path: Path) -> None:
     path = tmp_path / "reminders.yaml"
     path.write_text(
