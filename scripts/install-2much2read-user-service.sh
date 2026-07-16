@@ -65,6 +65,8 @@ fi
 
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2much2read.service > "$systemd_dir/2much2read.service"
 cp deploy/systemd/2much2read.timer "$systemd_dir/2much2read.timer"
+systemctl --user disable --now newsletter-digest.timer 2>/dev/null || true
+rm -f "$systemd_dir/newsletter-digest.service" "$systemd_dir/newsletter-digest.timer"
 systemctl --user daemon-reload
 systemctl --user enable --now 2much2read.timer
 
