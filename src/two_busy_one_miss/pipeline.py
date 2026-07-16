@@ -12,7 +12,7 @@ import httpx
 from .config import RemindersConfig, Settings, load_reminders
 from .google_calendar import CalendarClient, CalendarEvent, credentials
 from .renderer import chunk_text, render_agenda, render_reminder
-from .rules import ReminderCandidate, due_reminders, schedule_reminders
+from .rules import ReminderCandidate, due_reminders, parse_offset, schedule_reminders
 from .storage import Database
 
 
@@ -94,6 +94,12 @@ def list_events_between(
     return sorted(events, key=lambda event: (event.start, event.calendar_id, event.instance_id))
 
 
+def event_query_lookahead(config: RemindersConfig, days: int) -> timedelta:
+    offsets = [parse_offset(reminder.before) for reminder in config.default_rules]
+    offsets.extend(parse_offset(reminder.before) for rule in config.rules for reminder in rule.reminders)
+    return max(timedelta(days=days), *offsets)
+
+
 def event_view(event: CalendarEvent) -> dict[str, object]:
     return {
         "calendar_id": event.calendar_id,
@@ -145,8 +151,13 @@ def agenda(settings: Settings, day: date, dry_run: bool) -> dict[str, object]:
 def run(settings: Settings, dry_run: bool) -> dict[str, object]:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
+    now = datetime.now(timezone)
     candidates = due_reminders(
-        schedule_reminders(config, list_events(settings, config, settings.reminder_lookahead_days)), datetime.now(timezone)
+        schedule_reminders(
+            config,
+            list_events_between(settings, config, now, now + event_query_lookahead(config, settings.reminder_lookahead_days)),
+        ),
+        now,
     )
     if dry_run:
         return {"status": "ok", "due": [render_reminder(candidate) for candidate in candidates]}
