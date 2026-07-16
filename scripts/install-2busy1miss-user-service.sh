@@ -1,6 +1,9 @@
 #!/bin/sh
 set -eu
 
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+cd "$repo_dir"
+
 client_secret=""
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -63,7 +66,11 @@ if [ -n "$client_secret" ]; then
   chmod 600 "$target_secret"
 fi
 
-exe="$(command -v 2busy1miss)"
+exe="$repo_dir/.venv/bin/2busy1miss"
+[ -x "$exe" ] || {
+  printf '%s\n' "2busy1miss executable not found; run uv sync first" >&2
+  exit 1
+}
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss.service > "$systemd_dir/2busy1miss.service"
 cp deploy/systemd/2busy1miss.timer "$systemd_dir/2busy1miss.timer"
 
@@ -73,6 +80,6 @@ systemctl --user enable --now 2busy1miss.timer
 printf '%s\n' \
   "Config: $config_dir" \
   "Edit Discord webhook: $env_file" \
-  "Authorize calendar: 2busy1miss auth calendar" \
+  "Authorize calendar: cd $repo_dir && uv run 2busy1miss auth calendar" \
   "Check timer: systemctl --user status 2busy1miss.timer" \
   "Logs: journalctl --user -u 2busy1miss.service"
