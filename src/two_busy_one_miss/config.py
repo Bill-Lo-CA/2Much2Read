@@ -15,6 +15,14 @@ def settings_env_file() -> Path:
     return env_file("2busy1miss")
 
 
+def reminder_data_dir() -> Path:
+    target = data_dir()
+    legacy = Path.home() / ".local" / "share" / "2busy1miss"
+    if (legacy / "2busy1miss.sqlite3").is_file() and not (target / "2busy1miss.sqlite3").exists():
+        return legacy
+    return target
+
+
 class CalendarConfig(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -85,8 +93,8 @@ class Settings(BaseSettings):
     google_calendar_token_path: Path = Field(default_factory=lambda: config_dir() / "calendar-token.json")
     google_calendar_oauth_callback_port: int = Field(default=8765, ge=1024, le=65535)
     reminders_config_path: Path = Field(default_factory=lambda: config_dir() / "reminders.yaml")
-    database_path: Path = Field(default_factory=lambda: data_dir() / "2busy1miss.sqlite3")
-    lock_path: Path = Field(default_factory=lambda: data_dir() / "2busy1miss.lock")
+    database_path: Path = Field(default_factory=lambda: reminder_data_dir() / "2busy1miss.sqlite3")
+    lock_path: Path = Field(default_factory=lambda: reminder_data_dir() / "2busy1miss.lock")
     discord_webhook_url: str = ""
     discord_username: str = "2busy1miss"
     reminder_timezone: str = "America/Montreal"
