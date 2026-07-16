@@ -12,7 +12,7 @@ from .config import Settings, load_sources
 from .digest import render_digest
 from .gmail import GmailClient, credentials
 from .mime import extract_gmail_payload
-from .ollama import OllamaClient
+from .ollama import OllamaClient, OllamaSchemaError
 from .schemas import DigestItem
 from .storage import Database
 
@@ -113,7 +113,7 @@ def run_pipeline(
                     discovered += 1
                     try:
                         extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
-                    except Exception:
+                    except OllamaSchemaError:
                         database.fail_message(message_id, "OLLAMA_EXTRACTION_FAILED")
                         failed += 1
                         if not dry_run:

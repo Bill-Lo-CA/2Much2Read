@@ -71,10 +71,9 @@ class Database:
     ) -> int | None:
         now = datetime.now(UTC).isoformat()
         body_sha256 = hashlib.sha256(body.encode()).hexdigest()
-        if force:
-            existing = self.connection.execute("SELECT id FROM messages WHERE gmail_message_id=?", (gmail_id,)).fetchone()
-            if existing:
-                return int(existing["id"])
+        existing = self.connection.execute("SELECT id, state FROM messages WHERE gmail_message_id=?", (gmail_id,)).fetchone()
+        if existing and (force or existing["state"] == "discovered"):
+            return int(existing["id"])
         cursor = self.connection.execute(
             """INSERT OR IGNORE INTO messages
             (gmail_message_id,gmail_thread_id,source_id,received_at,subject,sender,body_sha256,state,created_at,updated_at)

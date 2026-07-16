@@ -4,7 +4,7 @@ import httpx
 import pytest
 import respx
 
-from two_much_two_read.ollama import OllamaClient
+from two_much_two_read.ollama import OllamaClient, OllamaSchemaError
 
 
 def valid_result() -> dict[str, object]:
@@ -59,7 +59,7 @@ def test_schema_error_includes_source_validation_and_preview() -> None:
         ]
     )
 
-    with pytest.raises(ValueError) as exc_info:
+    with pytest.raises(OllamaSchemaError) as exc_info:
         OllamaClient().extract("alphasignal", "News https://example.com/a")
 
     message = str(exc_info.value)

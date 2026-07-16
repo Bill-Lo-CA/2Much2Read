@@ -1,10 +1,12 @@
 from pathlib import Path
 from unittest.mock import MagicMock
 
+import httpx
 import pytest
 
 from two_much_two_read import pipeline
 from two_much_two_read.config import Settings
+from two_much_two_read.ollama import OllamaSchemaError
 from two_much_two_read.pipeline import deliver_digest, run_pipeline
 from two_much_two_read.schemas import EmailExtraction
 from two_much_two_read.storage import Database
@@ -109,7 +111,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
 
         def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
             if content == "bad":
-                raise ValueError("OLLAMA_SCHEMA_INVALID")
+                raise OllamaSchemaError("OLLAMA_SCHEMA_INVALID")
             return EmailExtraction(
                 source_id=source_id,
                 newsletter_title="Good news",
@@ -147,3 +149,57 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
         ("good", "processed", None),
     ]
     database.close()
+
+
+def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    gmail = MagicMock()
+    gmail.list_messages.return_value = ["transient"]
+    gmail.get_message.return_value = {"internalDate": "0", "threadId": "transient", "payload": {"body": "transient"}}
+    ollama = MagicMock()
+    ollama.extract.side_effect = httpx.ConnectError("Ollama unavailable")
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda credentials: gmail)
+    monkeypatch.setattr(pipeline, "OllamaClient", lambda *args: ollama)
+    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+
+    with pytest.raises(httpx.ConnectError, match="Ollama unavailable"):
+        run_pipeline(settings, no_deliver=True)
+
+    gmail.add_labels.assert_not_called()
+    database = Database(settings.database_path)
+    assert database.connection.execute("SELECT state FROM messages").fetchone()["state"] == "discovered"
+    database.close()
+
+    ollama.extract.side_effect = None
+    ollama.extract.return_value = EmailExtraction(
+        source_id="alphasignal",
+        newsletter_title="Recovered",
+        newsletter_date=None,
+        overview_zh_tw="摘要",
+        items=[
+            {
+                "title": "Recovered item",
+                "category": "AI_MODEL",
+                "summary_zh_tw": "內容",
+                "why_it_matters_zh_tw": "原因",
+                "importance": 8,
+                "confidence": 0.9,
+            }
+        ],
+    )
+
+    assert run_pipeline(settings, no_deliver=True) == {
+        "status": "ok",
+        "discovered": 1,
+        "processed": 1,
+        "failed": 0,
+        "delivered": 0,
+    }
+    gmail.add_labels.assert_called_once_with("transient", ["NewsletterBot/Processed"])

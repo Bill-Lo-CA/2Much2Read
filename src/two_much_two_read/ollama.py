@@ -42,6 +42,10 @@ def _preview(value: str, limit: int = 800) -> str:
     return value[:limit] + ("…" if len(value) > limit else "")
 
 
+class OllamaSchemaError(ValueError):
+    """A completed Ollama response failed schema validation twice."""
+
+
 class OllamaClient:
     def __init__(
         self,
@@ -105,7 +109,7 @@ class OllamaClient:
                 return result
             except (ValidationError, ValueError, KeyError, TypeError) as error:
                 if attempt:
-                    raise ValueError(
+                    raise OllamaSchemaError(
                         "OLLAMA_SCHEMA_INVALID "
                         f"source={source_id!r} attempt={attempt + 1} "
                         f"error={str(error)!r} response_preview={_preview(raw)!r}"
