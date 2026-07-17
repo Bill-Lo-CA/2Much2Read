@@ -172,6 +172,21 @@ def test_cleanup_failure_restores_legacy_files_and_removes_new_targets(tmp_path:
     assert not (home / ".config" / "2much2read" / "gmail-client-secret.json").exists()
 
 
+def test_sqlite_rollback_restores_main_database_without_sidecars(tmp_path: Path) -> None:
+    source = tmp_path / "legacy.sqlite3"
+    destination = tmp_path / "current.sqlite3"
+    write_database(source, "legacy state")
+    write_database(destination, "current state")
+    source.with_name(source.name + "-wal").write_bytes(b"legacy wal")
+    source.with_name(source.name + "-shm").write_bytes(b"legacy shm")
+
+    migrate._restore_sqlite(migrate.MigrationOperation(source, destination, sqlite=True))
+
+    assert database_value(source) == "current state"
+    assert not source.with_name(source.name + "-wal").exists()
+    assert not source.with_name(source.name + "-shm").exists()
+
+
 def test_migration_without_legacy_environment_leaves_new_template_to_installer(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

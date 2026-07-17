@@ -146,10 +146,13 @@ def _remove_source(source: Path) -> None:
     source.unlink()
 
 
+def _restore_sqlite(operation: MigrationOperation) -> None:
+    for suffix in ("-wal", "-shm"):
+        operation.source.with_name(operation.source.name + suffix).unlink(missing_ok=True)
+    _copy_sqlite(operation.destination, operation.source)
+
+
 def _restore_source(operation: MigrationOperation, source: Path) -> None:
-    if operation.sqlite:
-        _copy_sqlite(operation.destination, source)
-        return
     assert operation.original is not None
     source.write_bytes(operation.original)
     os.chmod(source, 0o600)
@@ -177,8 +180,13 @@ def _execute(operations: list[MigrationOperation], directories: Iterable[Path]) 
                 _remove_source(source)
                 removed.append((operation, source))
     except Exception:
+        restored_sqlite: list[MigrationOperation] = []
         for operation, source in reversed(removed):
-            if not source.exists():
+            if operation.sqlite:
+                if operation not in restored_sqlite:
+                    _restore_sqlite(operation)
+                    restored_sqlite.append(operation)
+            elif not source.exists():
                 _restore_source(operation, source)
         for path in reversed(created):
             path.unlink(missing_ok=True)
