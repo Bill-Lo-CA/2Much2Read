@@ -9,6 +9,9 @@ from email.utils import parseaddr
 import httpx
 from pydantic import BaseModel, Field, model_validator
 
+from common.locking import ProcessLock
+from common.oauth import token_status
+
 from .config import (
     ExcludedSubscription,
     GmailFilter,
@@ -141,13 +144,14 @@ class DoctorResult(CommandResult):
 
 
 def gmail_client(settings: Settings) -> GmailClient:
-    return GmailClient(
-        credentials(
-            settings.gmail_credentials_path,
-            settings.gmail_token_path,
-            settings.gmail_oauth_callback_port,
+    with ProcessLock(settings.lock_path):
+        return GmailClient(
+            credentials(
+                settings.gmail_credentials_path,
+                settings.gmail_token_path,
+                settings.gmail_oauth_callback_port,
+            )
         )
-    )
 
 
 def message_headers(message: dict[str, object]) -> dict[str, str]:
@@ -444,7 +448,13 @@ def sync_subscriptions(settings: Settings, limit: int, apply: bool, choose_categ
 
 
 def authorize_gmail(settings: Settings) -> CommandResult:
-    credentials(settings.gmail_credentials_path, settings.gmail_token_path, settings.gmail_oauth_callback_port)
+    with ProcessLock(settings.lock_path):
+        credentials(
+            settings.gmail_credentials_path,
+            settings.gmail_token_path,
+            settings.gmail_oauth_callback_port,
+            interactive=True,
+        )
     return CommandResult()
 
 
@@ -477,7 +487,10 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
         checks["sources"] = "ok"
     except Exception as error:
         checks["sources"] = str(error)
-    checks["gmail_token"] = "ok" if settings.gmail_token_path.is_file() else "missing"
+    checks["gmail_token"] = token_status(
+        settings.gmail_token_path,
+        ("https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.settings.basic"),
+    )
     checks["database_directory"] = "ok" if os.access(settings.database_path.parent, os.W_OK) else "not_writable"
     try:
         response = httpx.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags", timeout=5)

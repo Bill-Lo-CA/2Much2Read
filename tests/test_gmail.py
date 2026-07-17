@@ -3,6 +3,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from common import oauth
 from two_much_two_read import gmail
 from two_much_two_read.config import Source
 from two_much_two_read.gmail import SCOPES, FilterStatus, GmailClient, find_label_id, source_backfill_query
@@ -51,10 +52,10 @@ def test_old_token_missing_scope_reauthorizes(tmp_path: Path, monkeypatch: pytes
     flow.run_local_server.return_value = new_credentials
     load_token = MagicMock(return_value=old_credentials)
     create_flow = MagicMock(return_value=flow)
-    monkeypatch.setattr(gmail.Credentials, "from_authorized_user_file", load_token)
-    monkeypatch.setattr(gmail.InstalledAppFlow, "from_client_secrets_file", create_flow)
+    monkeypatch.setattr(oauth.Credentials, "from_authorized_user_file", load_token)
+    monkeypatch.setattr(oauth.InstalledAppFlow, "from_client_secrets_file", create_flow)
 
-    assert gmail.credentials(credentials_path, token_path) is new_credentials
+    assert gmail.credentials(credentials_path, token_path, interactive=True) is new_credentials
     create_flow.assert_called_once_with(str(credentials_path), SCOPES)
     flow.run_local_server.assert_called_once_with(port=8765, access_type="offline", prompt="consent", open_browser=False)
 

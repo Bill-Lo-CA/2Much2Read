@@ -45,7 +45,11 @@ uv run 2much2read run --dry-run
 uv run 2much2read run
 ```
 
-The installer moves the supplied client credential to `gmail-client-secret.json`, copies `config/2much2read.env.example` and `sources.yaml` on first install, and enables `2much2read.timer`. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read/.2much2read.env` before running it.
+The installer moves the supplied client credential to `gmail-client-secret.json`, copies `config/2much2read.env.example` and `sources.yaml` on first install, and leaves `2much2read.timer` stopped and disabled. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read/.2much2read.env`, authorize, run `doctor` and a dry run, then explicitly enable the timer when ready:
+
+```bash
+systemctl --user enable --now 2much2read.timer
+```
 
 Useful commands:
 
@@ -72,7 +76,11 @@ uv run 2busy1miss run --dry-run
 uv run 2busy1miss run
 ```
 
-The installer moves the supplied client credential to `calendar-client-secret.json`, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, and enables `2busy1miss.timer`. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read/.2busy1miss.env` before running it.
+The installer moves the supplied client credential to `calendar-client-secret.json`, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, and leaves `2busy1miss.timer` stopped and disabled. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read/.2busy1miss.env`, authorize, run `doctor` and a dry run, then explicitly enable the timer when ready:
+
+```bash
+systemctl --user enable --now 2busy1miss.timer
+```
 
 Useful commands:
 

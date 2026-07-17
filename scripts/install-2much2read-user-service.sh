@@ -38,6 +38,16 @@ python="$repo_dir/.venv/bin/python"
   exit 1
 }
 
+for timer in newsletter-digest.timer 2much2read.timer; do
+  systemctl --user disable --now "$timer" 2>/dev/null || true
+done
+for service in newsletter-digest.service 2much2read.service; do
+  if systemctl --user is-active --quiet "$service"; then
+    printf '%s\n' "stop $service before migrating runtime files" >&2
+    exit 1
+  fi
+done
+
 if [ -n "$gmail_client_secret" ]; then
   "$python" -m two_much_two_read.migrate newsletter \
     --legacy-env "$HOME/.config/newsletter-digest/newsletter-digest.env" \
@@ -69,11 +79,12 @@ fi
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2much2read.service > "$systemd_dir/2much2read.service"
 cp deploy/systemd/2much2read.timer "$systemd_dir/2much2read.timer"
 systemctl --user daemon-reload
-systemctl --user enable --now 2much2read.timer
 
 printf '%s\n' \
   "Config: $config_dir" \
   "Edit Discord webhook: $env_file" \
   "Authorize Gmail: cd $repo_dir && uv run 2much2read auth gmail" \
-  "Check timer: systemctl --user status 2much2read.timer" \
+  "Check setup: cd $repo_dir && uv run 2much2read doctor" \
+  "Dry run: cd $repo_dir && uv run 2much2read run --dry-run" \
+  "Enable when ready: systemctl --user enable --now 2much2read.timer" \
   "Logs: journalctl --user -u 2much2read.service"

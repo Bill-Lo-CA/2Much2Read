@@ -43,13 +43,14 @@ def main() -> None:
     args = parser.parse_args()
     settings = Settings()
     queries = [source.gmail_query for source in load_sources(settings.sources_config_path).sources]
-    gmail = GmailClient(
-        credentials(
-            settings.gmail_credentials_path,
-            settings.gmail_token_path,
-            settings.gmail_oauth_callback_port,
+    with ProcessLock(settings.lock_path):
+        gmail = GmailClient(
+            credentials(
+                settings.gmail_credentials_path,
+                settings.gmail_token_path,
+                settings.gmail_oauth_callback_port,
+            )
         )
-    )
 
     def inspect() -> tuple[set[str], dict[str, int]]:
         message_ids = gmail_message_ids(gmail, queries)

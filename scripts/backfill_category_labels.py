@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 
+from common.locking import ProcessLock
 from two_much_two_read.config import Settings, load_sources
 from two_much_two_read.gmail import GmailClient, credentials, find_label_id, source_backfill_query
 
@@ -23,13 +24,14 @@ def main() -> None:
         parser.error(f"unknown or disabled source ID(s): {', '.join(sorted(unknown))}")
     if requested:
         sources = [source for source in sources if source.id in requested]
-    gmail = GmailClient(
-        credentials(
-            settings.gmail_credentials_path,
-            settings.gmail_token_path,
-            settings.gmail_oauth_callback_port,
+    with ProcessLock(settings.lock_path):
+        gmail = GmailClient(
+            credentials(
+                settings.gmail_credentials_path,
+                settings.gmail_token_path,
+                settings.gmail_oauth_callback_port,
+            )
         )
-    )
     jobs: list[tuple[str, str, str, str]] = []
     for source in sources:
         query = source_backfill_query(source)

@@ -74,11 +74,12 @@ sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss.service > "$systemd_dir/2
 cp deploy/systemd/2busy1miss.timer "$systemd_dir/2busy1miss.timer"
 
 systemctl --user daemon-reload
-systemctl --user enable --now 2busy1miss.timer
 
 printf '%s\n' \
   "Config: $config_dir" \
   "Edit Discord webhook: $env_file" \
   "Authorize calendar: cd $repo_dir && uv run 2busy1miss auth calendar" \
-  "Check timer: systemctl --user status 2busy1miss.timer" \
+  "Check setup: cd $repo_dir && uv run 2busy1miss doctor" \
+  "Dry run: cd $repo_dir && uv run 2busy1miss run --dry-run" \
+  "Enable when ready: systemctl --user enable --now 2busy1miss.timer" \
   "Logs: journalctl --user -u 2busy1miss.service"
