@@ -1,4 +1,4 @@
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -46,4 +46,22 @@ def test_failed_attempt_is_retryable(tmp_path: Path) -> None:
     database.fail_delivery(attempt_id)
 
     assert [int(row["id"]) for row in database.pending_attempts()] == [attempt_id]
+    database.close()
+
+
+def test_agenda_delivery_is_idempotent_and_forceable(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    day = date(2026, 7, 9)
+    delivery_id = database.create_agenda_delivery(day, "America/Montreal", "destination", "agenda")
+
+    assert delivery_id is not None
+    assert database.create_agenda_delivery(day, "America/Montreal", "destination", "agenda") is None
+
+    database.fail_agenda_delivery(delivery_id)
+    assert [int(row["id"]) for row in database.pending_agenda_deliveries(day, "America/Montreal", "destination")] == [delivery_id]
+
+    database.finish_agenda_delivery(delivery_id, ["123"])
+    assert database.agenda_delivery_state(delivery_id) == "delivered"
+    assert database.create_agenda_delivery(day, "America/Montreal", "destination", "agenda", force=True) == delivery_id
+    assert database.agenda_delivery_state(delivery_id) == "pending"
     database.close()

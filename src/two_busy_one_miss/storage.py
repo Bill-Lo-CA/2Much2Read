@@ -4,7 +4,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import cast
 
@@ -44,6 +44,21 @@ CREATE TABLE IF NOT EXISTS reminder_attempts(
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(calendar_id, event_id, instance_id, rule_id, reminder_at)
+);
+CREATE TABLE IF NOT EXISTS agenda_deliveries(
+  id INTEGER PRIMARY KEY,
+  agenda_day TEXT NOT NULL,
+  timezone TEXT NOT NULL,
+  destination_hash TEXT NOT NULL,
+  content TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  discord_message_ids_json TEXT,
+  delivered_at TEXT,
+  last_error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(agenda_day, timezone, destination_hash)
 );
 INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(1, datetime('now'));
 """
@@ -144,6 +159,61 @@ class Database:
         )
         self.connection.commit()
 
+    def create_agenda_delivery(
+        self, day: date, timezone: str, destination_hash: str, content: str, *, force: bool = False
+    ) -> int | None:
+        now = datetime.now(UTC).isoformat()
+        cursor = self.connection.execute(
+            """INSERT OR IGNORE INTO agenda_deliveries
+            (agenda_day,timezone,destination_hash,content,state,created_at,updated_at)
+            VALUES(?,?,?,?,'pending',?,?)""",
+            (day.isoformat(), timezone, destination_hash, content, now, now),
+        )
+        if cursor.rowcount and cursor.lastrowid is not None:
+            self.connection.commit()
+            return int(cursor.lastrowid)
+        if not force:
+            self.connection.commit()
+            return None
+        row = self.connection.execute(
+            "SELECT id FROM agenda_deliveries WHERE agenda_day=? AND timezone=? AND destination_hash=?",
+            (day.isoformat(), timezone, destination_hash),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError("agenda delivery was not created")
+        self.connection.execute(
+            """UPDATE agenda_deliveries SET content=?, state='pending', discord_message_ids_json=NULL,
+            delivered_at=NULL, last_error_code=NULL, updated_at=? WHERE id=?""",
+            (content, now, int(row["id"])),
+        )
+        self.connection.commit()
+        return int(row["id"])
+
+    def pending_agenda_deliveries(self, day: date, timezone: str, destination_hash: str) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            """SELECT * FROM agenda_deliveries
+            WHERE agenda_day=? AND timezone=? AND destination_hash=? AND state IN ('pending','failed') ORDER BY id""",
+            (day.isoformat(), timezone, destination_hash),
+        ).fetchall()
+
+    def finish_agenda_delivery(self, delivery_id: int, message_ids: list[str]) -> None:
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """UPDATE agenda_deliveries SET state='delivered', delivered_at=?, discord_message_ids_json=?,
+            attempt_count=attempt_count+1, last_error_code=NULL, updated_at=? WHERE id=?""",
+            (now, json.dumps(message_ids), now, delivery_id),
+        )
+        self.connection.commit()
+
+    def fail_agenda_delivery(self, delivery_id: int, error_code: str = "DISCORD_DELIVERY_FAILED") -> None:
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """UPDATE agenda_deliveries SET state='failed', attempt_count=attempt_count+1,
+            last_error_code=?, updated_at=? WHERE id=?""",
+            (error_code, now, delivery_id),
+        )
+        self.connection.commit()
+
     def counts(self) -> dict[str, int]:
         return {
             table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
@@ -152,6 +222,10 @@ class Database:
 
     def attempt_state(self, attempt_id: int) -> str:
         row = self.connection.execute("SELECT state FROM reminder_attempts WHERE id=?", (attempt_id,)).fetchone()
+        return cast(str, row["state"])
+
+    def agenda_delivery_state(self, delivery_id: int) -> str:
+        row = self.connection.execute("SELECT state FROM agenda_deliveries WHERE id=?", (delivery_id,)).fetchone()
         return cast(str, row["state"])
 
     def close(self) -> None:

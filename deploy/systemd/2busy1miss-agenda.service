@@ -1,0 +1,11 @@
+[Unit]
+Description=2busy1miss Next-Day Calendar Agenda
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/2much2read/.2busy1miss.env
+ExecStart=__EXECUTABLE__ agenda-next-day
+TimeoutStartSec=5min
+NoNewPrivileges=true
+PrivateTmp=true

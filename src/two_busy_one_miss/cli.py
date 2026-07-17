@@ -15,7 +15,7 @@ from common.oauth import token_status
 
 from .config import Settings, load_reminders
 from .google_calendar import credentials
-from .pipeline import agenda, calendar_client, discover, retry_delivery, run, test_rules
+from .pipeline import agenda, calendar_client, discover, next_day_agenda, retry_agenda, retry_delivery, run, test_rules
 
 app = typer.Typer(no_args_is_help=True)
 auth_app = typer.Typer(no_args_is_help=True)
@@ -105,6 +105,23 @@ def agenda_command(
     except ValueError as error:
         raise typer.BadParameter("date must use YYYY-MM-DD") from error
     emit(agenda(Settings(), parsed, dry_run))
+
+
+@app.command("agenda-next-day")
+def agenda_next_day_command(
+    dry_run: Annotated[bool, typer.Option()] = False,
+    force: Annotated[bool, typer.Option()] = False,
+) -> None:
+    emit(next_day_agenda(Settings(), dry_run, force))
+
+
+@app.command("agenda-retry")
+def agenda_retry_command(day: Annotated[str, typer.Argument()]) -> None:
+    try:
+        parsed = date.fromisoformat(day)
+    except ValueError as error:
+        raise typer.BadParameter("date must use YYYY-MM-DD") from error
+    emit(retry_agenda(Settings(), parsed))
 
 
 @app.command("retry-delivery")

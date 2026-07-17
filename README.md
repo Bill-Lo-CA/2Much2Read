@@ -76,10 +76,11 @@ uv run 2busy1miss run --dry-run
 uv run 2busy1miss run
 ```
 
-The installer moves the supplied client credential to `calendar-client-secret.json`, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, and leaves `2busy1miss.timer` stopped and disabled. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read/.2busy1miss.env`, authorize, run `doctor` and a dry run, then explicitly enable the timer when ready:
+The installer moves the supplied client credential to `calendar-client-secret.json`, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, and leaves both timers stopped and disabled. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read/.2busy1miss.env`, authorize, run `doctor` and a dry run, then explicitly enable each timer when ready:
 
 ```bash
 systemctl --user enable --now 2busy1miss.timer
+systemctl --user enable --now 2busy1miss-agenda.timer
 ```
 
 Useful commands:
@@ -88,8 +89,13 @@ Useful commands:
 uv run 2busy1miss calendars list
 uv run 2busy1miss discover --days 7
 uv run 2busy1miss agenda 2026-07-16 --dry-run
+uv run 2busy1miss agenda-next-day --dry-run
+uv run 2busy1miss agenda-next-day --force
+uv run 2busy1miss agenda-retry 2026-07-16
 uv run 2busy1miss retry-delivery
 ```
+
+`2busy1miss-agenda.timer` runs at 21:00 in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone. Normal `agenda-next-day` runs are de-duplicated by date, timezone, and Discord destination; `--force` is the explicit resend path. Empty days are sent as `No events`.
 
 ## OAuth safety
 

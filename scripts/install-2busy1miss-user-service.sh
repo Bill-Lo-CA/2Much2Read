@@ -38,11 +38,13 @@ python="$repo_dir/.venv/bin/python"
   exit 1
 }
 
-systemctl --user disable --now 2busy1miss.timer 2>/dev/null || true
-if systemctl --user is-active --quiet 2busy1miss.service; then
-  printf '%s\n' "stop 2busy1miss.service before migrating its files" >&2
-  exit 1
-fi
+systemctl --user disable --now 2busy1miss.timer 2busy1miss-agenda.timer 2>/dev/null || true
+for service in 2busy1miss.service 2busy1miss-agenda.service; do
+  if systemctl --user is-active --quiet "$service"; then
+    printf '%s\n' "stop $service before migrating its files" >&2
+    exit 1
+  fi
+done
 if [ -n "$calendar_client_secret" ]; then
   "$python" -m two_much_two_read.migrate calendar \
     --legacy-env "$HOME/.config/2busy1miss/2busy1miss.env" \
@@ -72,6 +74,8 @@ fi
 
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss.service > "$systemd_dir/2busy1miss.service"
 cp deploy/systemd/2busy1miss.timer "$systemd_dir/2busy1miss.timer"
+sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss-agenda.service > "$systemd_dir/2busy1miss-agenda.service"
+cp deploy/systemd/2busy1miss-agenda.timer "$systemd_dir/2busy1miss-agenda.timer"
 
 systemctl --user daemon-reload
 
@@ -81,5 +85,7 @@ printf '%s\n' \
   "Authorize calendar: cd $repo_dir && uv run 2busy1miss auth calendar" \
   "Check setup: cd $repo_dir && uv run 2busy1miss doctor" \
   "Dry run: cd $repo_dir && uv run 2busy1miss run --dry-run" \
-  "Enable when ready: systemctl --user enable --now 2busy1miss.timer" \
+  "Agenda dry run: cd $repo_dir && uv run 2busy1miss agenda-next-day --dry-run" \
+  "Enable reminders when ready: systemctl --user enable --now 2busy1miss.timer" \
+  "Enable agenda when ready: systemctl --user enable --now 2busy1miss-agenda.timer" \
   "Logs: journalctl --user -u 2busy1miss.service"
