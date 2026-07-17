@@ -1,14 +1,14 @@
 from pathlib import Path
 
-from newsletter_digest.schemas import DigestItem, EmailExtraction
-from newsletter_digest.storage import Database
+from two_much_two_read.schemas import DigestItem, EmailExtraction
+from two_much_two_read.storage import Database
 
 
 def test_message_and_digest_idempotency(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     message_id = database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body")
     assert message_id is not None
-    assert database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body") is None
+    assert database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body") == message_id
     database.store_extraction(
         message_id,
         EmailExtraction(
@@ -31,6 +31,11 @@ def test_message_and_digest_idempotency(tmp_path: Path) -> None:
         ),
     )
     assert len(database.recent_items()) == 1
+    assert database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body") is None
+    failed_id = database.discover("gmail-2", "thread-2", "source", "now", "subject", "sender", "body")
+    assert failed_id is not None
+    database.fail_message(failed_id, "OLLAMA_SCHEMA_INVALID")
+    assert database.discover("gmail-2", "thread-2", "source", "now", "subject", "sender", "body") is None
     digest_id = database.save_digest("daily:1", "start", "end", "UTC", "digest")
     assert digest_id is not None
     assert database.pending_digest(digest_id)["rendered_content"] == "digest"

@@ -1,15 +1,16 @@
 import base64
 import json
+import re
 from pathlib import Path
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
-from newsletter_digest import cli, operations
-from newsletter_digest.config import Settings
-from newsletter_digest.operations import FiltersResult
-from newsletter_digest.schemas import EmailExtraction
+from two_much_two_read import cli, operations
+from two_much_two_read.config import Settings
+from two_much_two_read.operations import FiltersResult
+from two_much_two_read.schemas import EmailExtraction
 
 
 def test_cli_has_only_target_command_tree() -> None:
@@ -30,11 +31,12 @@ def test_cli_has_only_target_command_tree() -> None:
 
 def test_run_help_uses_clear_delivery_flags_without_resend() -> None:
     result = CliRunner().invoke(cli.app, ["run", "--help"])
+    help_text = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", result.stdout)
 
     assert result.exit_code == 0
-    assert "--deliver" in result.stdout
-    assert "--no-deliver" in result.stdout
-    assert "--resend" not in result.stdout
+    assert "--deliver" in help_text
+    assert "--no-deliver" in help_text
+    assert "--resend" not in help_text
 
 
 def test_run_outputs_elapsed_time_without_polluting_json(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -47,8 +49,8 @@ def test_run_outputs_elapsed_time_without_polluting_json(monkeypatch: pytest.Mon
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {"status": "ok", "discovered": 1, "processed": 1, "delivered": 0}
-    assert "newsletter-digest run elapsed" in result.stderr
-    assert "newsletter-digest run finished in" in result.stderr
+    assert "2much2read run elapsed" in result.stderr
+    assert "2much2read run finished in" in result.stderr
 
 
 @pytest.mark.parametrize(

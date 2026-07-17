@@ -4,10 +4,24 @@ import time
 
 import httpx
 
-from .digest import chunk_text
+
+def chunk_text(text: str, limit: int = 2000) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    chunks: list[str] = []
+    remaining = text
+    while remaining:
+        cut = min(limit - 12, len(remaining))
+        if cut < len(remaining):
+            boundary = max(remaining.rfind("\n\n", 0, cut), remaining.rfind("\n", 0, cut))
+            cut = boundary if boundary > limit // 2 else cut
+        chunks.append(remaining[:cut].rstrip())
+        remaining = remaining[cut:].lstrip()
+    total = len(chunks)
+    return [f"({index}/{total}) {chunk}" for index, chunk in enumerate(chunks, 1)]
 
 
-def deliver(webhook_url: str, content: str, username: str = "Newsletter Digest") -> list[str]:
+def deliver(webhook_url: str, content: str, username: str) -> list[str]:
     if not webhook_url:
         raise ValueError("DISCORD_WEBHOOK_URL is required")
     message_ids: list[str] = []
@@ -16,11 +30,7 @@ def deliver(webhook_url: str, content: str, username: str = "Newsletter Digest")
             response = httpx.post(
                 webhook_url,
                 params={"wait": "true"},
-                json={
-                    "content": chunk,
-                    "username": username,
-                    "allowed_mentions": {"parse": []},
-                },
+                json={"content": chunk, "username": username, "allowed_mentions": {"parse": []}},
                 timeout=30,
             )
             if response.status_code == 429:

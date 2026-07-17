@@ -8,17 +8,19 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-
-def _config_dir() -> Path:
-    return Path.home() / ".config" / "2busy1miss"
-
-
-def _data_dir() -> Path:
-    return Path.home() / ".local" / "share" / "2busy1miss"
+from common.paths import config_dir, data_dir, env_file
 
 
 def settings_env_file() -> Path:
-    return _config_dir() / "2busy1miss.env"
+    return env_file("2busy1miss")
+
+
+def reminder_data_dir() -> Path:
+    target = data_dir()
+    legacy = Path.home() / ".local" / "share" / "2busy1miss"
+    if (legacy / "2busy1miss.sqlite3").is_file() and not (target / "2busy1miss.sqlite3").exists():
+        return legacy
+    return target
 
 
 class CalendarConfig(BaseModel):
@@ -87,12 +89,12 @@ class RemindersConfig(BaseModel):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
-    google_calendar_credentials_path: Path = Field(default_factory=lambda: _config_dir() / "google-client-secret.json")
-    google_calendar_token_path: Path = Field(default_factory=lambda: _config_dir() / "google-calendar-token.json")
+    google_calendar_credentials_path: Path = Field(default_factory=lambda: config_dir() / "calendar-client-secret.json")
+    google_calendar_token_path: Path = Field(default_factory=lambda: config_dir() / "calendar-token.json")
     google_calendar_oauth_callback_port: int = Field(default=8765, ge=1024, le=65535)
-    reminders_config_path: Path = Field(default_factory=lambda: _config_dir() / "reminders.yaml")
-    database_path: Path = Field(default_factory=lambda: _data_dir() / "2busy1miss.sqlite3")
-    lock_path: Path = Field(default_factory=lambda: _data_dir() / "2busy1miss.lock")
+    reminders_config_path: Path = Field(default_factory=lambda: config_dir() / "reminders.yaml")
+    database_path: Path = Field(default_factory=lambda: reminder_data_dir() / "2busy1miss.sqlite3")
+    lock_path: Path = Field(default_factory=lambda: reminder_data_dir() / "2busy1miss.lock")
     discord_webhook_url: str = ""
     discord_username: str = "2busy1miss"
     reminder_timezone: str = "America/Montreal"

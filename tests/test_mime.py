@@ -2,7 +2,7 @@ from email.message import EmailMessage
 
 import pytest
 
-from newsletter_digest.mime import EmptyEmailError, extract_mime, html_to_text
+from two_much_two_read.mime import EmptyEmailError, extract_mime, html_to_text
 
 
 def test_prefers_plain_text() -> None:

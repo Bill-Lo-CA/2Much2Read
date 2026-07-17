@@ -4,7 +4,7 @@ import httpx
 import pytest
 import respx
 
-from newsletter_digest.ollama import OllamaClient
+from two_much_two_read.ollama import OllamaClient, OllamaSchemaError
 
 
 def valid_result() -> dict[str, object]:
@@ -31,9 +31,11 @@ def valid_result() -> dict[str, object]:
 
 @respx.mock
 def test_repairs_invalid_schema_once() -> None:
+    invalid_result = valid_result()
+    invalid_result["items"][0]["confidence"] = 9  # type: ignore[index]
     route = respx.post("http://127.0.0.1:11434/api/chat").mock(
         side_effect=[
-            httpx.Response(200, json={"message": {"content": "not json"}}),
+            httpx.Response(200, json={"message": {"content": json.dumps(invalid_result)}}),
             httpx.Response(200, json={"message": {"content": json.dumps(valid_result())}}),
         ]
     )
@@ -42,8 +44,10 @@ def test_repairs_invalid_schema_once() -> None:
     assert route.call_count == 2
     request_payload = json.loads(route.calls[0].request.content)
     assert "maxLength" not in json.dumps(request_payload["format"])
+    assert "use 0.9, never 9" in request_payload["messages"][0]["content"]
     repair_payload = json.loads(route.calls[1].request.content)
-    assert repair_payload["messages"][-2] == {"role": "assistant", "content": "not json"}
+    assert repair_payload["messages"][-2] == {"role": "assistant", "content": json.dumps(invalid_result)}
+    assert "use 0.9, never 9" in repair_payload["messages"][-1]["content"]
 
 
 @respx.mock
@@ -55,7 +59,7 @@ def test_schema_error_includes_source_validation_and_preview() -> None:
         ]
     )
 
-    with pytest.raises(ValueError) as exc_info:
+    with pytest.raises(OllamaSchemaError) as exc_info:
         OllamaClient().extract("alphasignal", "News https://example.com/a")
 
     message = str(exc_info.value)

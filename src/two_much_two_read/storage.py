@@ -71,10 +71,9 @@ class Database:
     ) -> int | None:
         now = datetime.now(UTC).isoformat()
         body_sha256 = hashlib.sha256(body.encode()).hexdigest()
-        if force:
-            existing = self.connection.execute("SELECT id FROM messages WHERE gmail_message_id=?", (gmail_id,)).fetchone()
-            if existing:
-                return int(existing["id"])
+        existing = self.connection.execute("SELECT id, state FROM messages WHERE gmail_message_id=?", (gmail_id,)).fetchone()
+        if existing and (force or existing["state"] == "discovered"):
+            return int(existing["id"])
         cursor = self.connection.execute(
             """INSERT OR IGNORE INTO messages
             (gmail_message_id,gmail_thread_id,source_id,received_at,subject,sender,body_sha256,state,created_at,updated_at)
@@ -122,6 +121,15 @@ class Database:
                     ),
                 )
             connection.execute("UPDATE messages SET state='processed', updated_at=? WHERE id=?", (now, message_id))
+
+    def fail_message(self, message_id: int, error_code: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """UPDATE messages SET state='failed', attempt_count=attempt_count+1,
+            last_error_code=?, updated_at=? WHERE id=?""",
+            (error_code, now, message_id),
+        )
+        self.connection.commit()
 
     def recent_items(self, limit: int = 100) -> list[dict[str, object]]:
         rows = self.connection.execute(

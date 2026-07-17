@@ -5,10 +5,10 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from newsletter_digest.config import Settings, load_sources
-from newsletter_digest.gmail import GmailClient, credentials, find_label_id
-from newsletter_digest.locking import ProcessLock
-from newsletter_digest.storage import Database
+from common.locking import ProcessLock
+from two_much_two_read.config import Settings, load_sources
+from two_much_two_read.gmail import GmailClient, credentials, find_label_id
+from two_much_two_read.storage import Database
 
 PROCESSING_LABELS = ["NewsletterBot/Processed", "NewsletterBot/Failed"]
 
@@ -38,7 +38,7 @@ def gmail_message_ids(gmail: GmailClient, queries: list[str]) -> set[str]:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Reset all local newsletter test state")
+    parser = argparse.ArgumentParser(description="Reset all local 2much2read test state")
     parser.add_argument("--apply", action="store_true", help="perform the reset; otherwise only show counts")
     args = parser.parse_args()
     settings = Settings()

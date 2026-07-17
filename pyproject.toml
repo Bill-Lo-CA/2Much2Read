@@ -3,9 +3,9 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "newsletter-digest"
+name = "2much2read"
 version = "0.1.0"
-description = "Local-first Gmail newsletter summaries via Ollama and Discord"
+description = "Local-first Gmail digests and Google Calendar reminders via Discord"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
@@ -30,11 +30,11 @@ dev = [
 ]
 
 [project.scripts]
-newsletter-digest = "newsletter_digest.cli:app"
+2much2read = "two_much_two_read.cli:app"
 2busy1miss = "two_busy_one_miss.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/newsletter_digest", "src/two_busy_one_miss"]
+packages = ["src/common", "src/two_busy_one_miss", "src/two_much_two_read"]
 
 [tool.ruff]
 line-length = 130
@@ -46,7 +46,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["newsletter_digest", "two_busy_one_miss"]
+packages = ["common", "two_busy_one_miss", "two_much_two_read"]
 mypy_path = "src"
 
 [tool.pytest.ini_options]

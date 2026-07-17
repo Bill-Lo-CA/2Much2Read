@@ -5,13 +5,14 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+from common.discord import deliver
+from common.locking import ProcessLock
+
 from .config import Settings, load_sources
 from .digest import render_digest
-from .discord import deliver
 from .gmail import GmailClient, credentials
-from .locking import ProcessLock
 from .mime import extract_gmail_payload
-from .ollama import OllamaClient
+from .ollama import OllamaClient, OllamaSchemaError
 from .schemas import DigestItem
 from .storage import Database
 
@@ -77,6 +78,7 @@ def run_pipeline(
     database = Database(Path(":memory:") if dry_run else settings.database_path)
     processed = 0
     discovered = 0
+    failed = 0
     try:
         with ProcessLock(settings.lock_path):
             for source in sources:
@@ -109,7 +111,14 @@ def run_pipeline(
                     if message_id is None:
                         continue
                     discovered += 1
-                    extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
+                    try:
+                        extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
+                    except OllamaSchemaError:
+                        database.fail_message(message_id, "OLLAMA_EXTRACTION_FAILED")
+                        failed += 1
+                        if not dry_run:
+                            gmail.add_labels(gmail_id, [failed_label])
+                        continue
                     database.store_extraction(message_id, extraction, replace=force)
                     processed += 1
                     if not dry_run:
@@ -140,9 +149,10 @@ def run_pipeline(
                     deliver_digest(settings, database, digest_id)
                     delivered = 1
             return {
-                "status": "ok" if content else "no_content",
+                "status": "partial" if failed else "ok" if content else "no_content",
                 "discovered": discovered,
                 "processed": processed,
+                "failed": failed,
                 "delivered": delivered,
             }
     finally:
@@ -154,18 +164,19 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> int:
     database = database or Database(settings.database_path)
     delivered = 0
     try:
-        for digest in database.pending_digests():
-            try:
-                ids = deliver(
-                    settings.discord_webhook_url,
-                    str(digest["rendered_content"]),
-                    settings.discord_username,
-                )
-                database.finish_delivery(int(digest["id"]), ids)
-                delivered += 1
-            except Exception:
-                database.fail_delivery(int(digest["id"]))
-                raise
+        with ProcessLock(settings.lock_path):
+            for digest in database.pending_digests():
+                try:
+                    ids = deliver(
+                        settings.discord_webhook_url,
+                        str(digest["rendered_content"]),
+                        settings.discord_username,
+                    )
+                    database.finish_delivery(int(digest["id"]), ids)
+                    delivered += 1
+                except Exception:
+                    database.fail_delivery(int(digest["id"]))
+                    raise
     finally:
         if owned:
             database.close()

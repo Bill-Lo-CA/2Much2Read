@@ -1,10 +1,10 @@
 [Unit]
-Description=Newsletter Digest
+Description=2much2read Gmail Digest
 After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/.config/newsletter-digest/newsletter-digest.env
+EnvironmentFile=%h/.config/2much2read/.2much2read.env
 ExecStart=__EXECUTABLE__ run
 TimeoutStartSec=30min
 NoNewPrivileges=true
