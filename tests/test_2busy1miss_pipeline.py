@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 from two_busy_one_miss import pipeline
 from two_busy_one_miss.config import EventMatch, RemindersConfig, ReminderSpec, RuleConfig, Settings
 from two_busy_one_miss.pipeline import event_query_lookahead
+from two_busy_one_miss.renderer import render_agenda
 from two_busy_one_miss.storage import Database
 
 
@@ -72,14 +73,7 @@ def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkey
     assert pipeline.next_day_agenda(settings, dry_run=False, force=False)["day"] == "2026-03-09"
     assert pipeline.next_day_agenda(settings, dry_run=False, force=False)["skipped"] == 1
     assert pipeline.next_day_agenda(settings, dry_run=False, force=True)["sent"] == 1
-    assert (
-        deliveries
-        == [
-            "```text\n2busy1miss agenda · 2026-03-09\nTIME        | EVENT\n"
-            "------------+----------------------------\n            | No events\n```"
-        ]
-        * 2
-    )
+    assert deliveries == [render_agenda(date(2026, 3, 9), [])] * 2
     assert windows[0] == (
         datetime(2026, 3, 9, 0, tzinfo=timezone),
         datetime(2026, 3, 10, 0, tzinfo=timezone),

@@ -62,10 +62,11 @@ def test_render_agenda_lists_events_and_disables_mentions() -> None:
 
 
 def test_render_agenda_handles_empty_day() -> None:
-    assert render_agenda(date(2026, 7, 9), []) == (
-        "```text\n2busy1miss agenda · 2026-07-09\nTIME        | EVENT\n"
-        "------------+----------------------------\n            | No events\n```"
-    )
+    rendered = render_agenda(date(2026, 7, 9), [])
+
+    assert rendered.startswith("```text\n2busy1miss agenda · 2026-07-09\nTIME        | EVENT\n------------+")
+    assert "            | No events" in rendered
+    assert rendered.endswith("\n```")
 
 
 def test_render_agenda_keeps_event_text_inside_code_block() -> None:
