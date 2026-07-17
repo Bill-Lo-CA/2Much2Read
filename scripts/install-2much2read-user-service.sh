@@ -38,11 +38,6 @@ python="$repo_dir/.venv/bin/python"
   exit 1
 }
 
-systemctl --user disable --now newsletter-digest.timer 2>/dev/null || true
-if systemctl --user is-active --quiet newsletter-digest.service; then
-  printf '%s\n' "stop newsletter-digest.service before migrating its files" >&2
-  exit 1
-fi
 if [ -n "$gmail_client_secret" ]; then
   "$python" -m two_much_two_read.migrate newsletter \
     --legacy-env "$HOME/.config/newsletter-digest/newsletter-digest.env" \
@@ -73,7 +68,6 @@ fi
 
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2much2read.service > "$systemd_dir/2much2read.service"
 cp deploy/systemd/2much2read.timer "$systemd_dir/2much2read.timer"
-rm -f "$systemd_dir/newsletter-digest.service" "$systemd_dir/newsletter-digest.timer"
 systemctl --user daemon-reload
 systemctl --user enable --now 2much2read.timer
 
