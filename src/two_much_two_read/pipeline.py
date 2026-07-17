@@ -61,26 +61,27 @@ def run_pipeline(
     if not sources:
         raise ValueError("no enabled sources configured")
 
-    creds = credentials(
-        settings.gmail_credentials_path,
-        settings.gmail_token_path,
-        settings.gmail_oauth_callback_port,
-    )
-    gmail = GmailClient(creds)
-    gmail.ensure_labels()
-    ollama = OllamaClient(
-        settings.ollama_base_url,
-        settings.ollama_model,
-        settings.ollama_timeout_seconds,
-        settings.ollama_num_ctx,
-        settings.ollama_keep_alive,
-    )
-    database = Database(Path(":memory:") if dry_run else settings.database_path)
+    database: Database | None = None
     processed = 0
     discovered = 0
     failed = 0
     try:
         with ProcessLock(settings.lock_path):
+            creds = credentials(
+                settings.gmail_credentials_path,
+                settings.gmail_token_path,
+                settings.gmail_oauth_callback_port,
+            )
+            gmail = GmailClient(creds)
+            gmail.ensure_labels()
+            ollama = OllamaClient(
+                settings.ollama_base_url,
+                settings.ollama_model,
+                settings.ollama_timeout_seconds,
+                settings.ollama_num_ctx,
+                settings.ollama_keep_alive,
+            )
+            database = Database(Path(":memory:") if dry_run else settings.database_path)
             for source in sources:
                 processed_label = "NewsletterBot/Processed"
                 failed_label = "NewsletterBot/Failed"
@@ -156,30 +157,32 @@ def run_pipeline(
                 "delivered": delivered,
             }
     finally:
-        database.close()
+        if database is not None:
+            database.close()
 
 
 def retry_delivery(settings: Settings, database: Database | None = None) -> int:
     owned = database is None
-    database = database or Database(settings.database_path)
+    active_database = database
     delivered = 0
     try:
         with ProcessLock(settings.lock_path):
-            for digest in database.pending_digests():
+            active_database = active_database or Database(settings.database_path)
+            for digest in active_database.pending_digests():
                 try:
                     ids = deliver(
                         settings.discord_webhook_url,
                         str(digest["rendered_content"]),
                         settings.discord_username,
                     )
-                    database.finish_delivery(int(digest["id"]), ids)
+                    active_database.finish_delivery(int(digest["id"]), ids)
                     delivered += 1
                 except Exception:
-                    database.fail_delivery(int(digest["id"]))
+                    active_database.fail_delivery(int(digest["id"]))
                     raise
     finally:
-        if owned:
-            database.close()
+        if owned and active_database is not None:
+            active_database.close()
     return delivered
 
 

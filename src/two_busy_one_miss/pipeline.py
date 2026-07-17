@@ -14,14 +14,13 @@ from .storage import Database
 
 
 def calendar_client(settings: Settings, config: RemindersConfig) -> CalendarClient:
-    return CalendarClient(
-        credentials(
+    with ProcessLock(settings.lock_path):
+        credentials_value = credentials(
             settings.google_calendar_credentials_path,
             settings.google_calendar_token_path,
             settings.google_calendar_oauth_callback_port,
-        ),
-        config.timezone or settings.reminder_timezone,
-    )
+        )
+    return CalendarClient(credentials_value, config.timezone or settings.reminder_timezone)
 
 
 def list_events(settings: Settings, config: RemindersConfig, days: int) -> list[CalendarEvent]:
@@ -90,7 +89,8 @@ def agenda(settings: Settings, day: date, dry_run: bool) -> dict[str, object]:
     content = render_agenda(day, events)
     if dry_run:
         return {"status": "ok", "content": content, "events": [event_view(event) for event in events]}
-    message_ids = deliver(settings.discord_webhook_url, content, settings.discord_username)
+    with ProcessLock(settings.lock_path):
+        message_ids = deliver(settings.discord_webhook_url, content, settings.discord_username)
     return {"status": "ok", "sent": 1, "discord_message_ids": message_ids, "events": len(events)}
 
 

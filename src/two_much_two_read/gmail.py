@@ -1,15 +1,14 @@
 from __future__ import annotations
 
 import hashlib
-import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
-from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-untyped]
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
+
+from common.oauth import load_credentials
 
 from .config import Source
 
@@ -45,23 +44,16 @@ def source_backfill_query(source: Source) -> str:
     return f'{query} -label:"{source.gmail_filter.label}"'
 
 
-def credentials(credentials_path: Path, token_path: Path, port: int = 8765) -> Credentials:
-    creds: Credentials | None = None
-    if token_path.is_file():
-        creds = Credentials.from_authorized_user_file(str(token_path))  # type: ignore[no-untyped-call]
-    if creds and not creds.has_scopes(SCOPES):  # type: ignore[no-untyped-call]
-        creds = None
-    if creds and creds.expired and creds.refresh_token:
-        creds.refresh(Request())  # type: ignore[no-untyped-call]
-    if not creds or not creds.valid:
-        if not credentials_path.is_file():
-            raise ValueError(f"GMAIL_AUTH_REQUIRED: missing {credentials_path}")
-        flow = InstalledAppFlow.from_client_secrets_file(str(credentials_path), SCOPES)
-        creds = flow.run_local_server(port=port, access_type="offline", prompt="consent", open_browser=False)
-    token_path.parent.mkdir(parents=True, exist_ok=True)
-    token_path.write_text(creds.to_json(), encoding="utf-8")
-    os.chmod(token_path, 0o600)
-    return creds
+def credentials(credentials_path: Path, token_path: Path, port: int = 8765, *, interactive: bool = False) -> Credentials:
+    return load_credentials(
+        credentials_path,
+        token_path,
+        SCOPES,
+        port,
+        interactive=interactive,
+        auth_command="2much2read auth gmail",
+        missing_credentials_code="GMAIL_AUTH_REQUIRED",
+    )
 
 
 class GmailClient:

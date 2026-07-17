@@ -10,6 +10,8 @@ import typer
 from pydantic import BaseModel
 
 from common.discord import deliver
+from common.locking import ProcessLock
+from common.oauth import token_status
 
 from .config import Settings, load_reminders
 from .google_calendar import credentials
@@ -38,11 +40,13 @@ def emit(result: BaseModel | Mapping[str, object]) -> None:
 @auth_app.command("calendar")
 def auth_calendar() -> None:
     settings = Settings()
-    credentials(
-        settings.google_calendar_credentials_path,
-        settings.google_calendar_token_path,
-        settings.google_calendar_oauth_callback_port,
-    )
+    with ProcessLock(settings.lock_path):
+        credentials(
+            settings.google_calendar_credentials_path,
+            settings.google_calendar_token_path,
+            settings.google_calendar_oauth_callback_port,
+            interactive=True,
+        )
     emit({"status": "ok"})
 
 
@@ -62,7 +66,10 @@ def doctor(send_test: Annotated[bool, typer.Option()] = False) -> None:
         checks["config"] = "ok"
     except Exception as error:
         checks["config"] = str(error)
-    checks["google_calendar_token"] = "ok" if settings.google_calendar_token_path.is_file() else "missing"
+    checks["google_calendar_token"] = token_status(
+        settings.google_calendar_token_path,
+        ("https://www.googleapis.com/auth/calendar.readonly",),
+    )
     parent = settings.database_path.parent
     checks["database_directory"] = "ok" if parent.exists() and os.access(parent, os.W_OK) else "not_writable"
     checks["discord"] = "configured" if settings.discord_webhook_url else "missing"
