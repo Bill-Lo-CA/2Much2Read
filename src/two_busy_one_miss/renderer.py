@@ -33,7 +33,7 @@ def render_agenda(day: date, events: list[CalendarEvent]) -> str:
         "```text",
         f"2busy1miss agenda · {day.isoformat()}",
         "TIME        | EVENT",
-        "------------+----------------------------",
+        "------------+-------------------------------------------",
     ]
     if not events:
         return "\n".join([*lines, f"{'':<11} | No events", "```"])
