@@ -74,6 +74,34 @@ def test_force_replaces_existing_extraction(tmp_path: Path) -> None:
     database.close()
 
 
+def test_items_for_messages_excludes_prior_runs(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    first_id = database.discover("gmail-1", "thread-1", "source", "2026-07-01", "subject", "sender", "body")
+    second_id = database.discover("gmail-2", "thread-2", "source", "2026-07-02", "subject", "sender", "body")
+    assert first_id is not None and second_id is not None
+    extraction = EmailExtraction(
+        source_id="source",
+        newsletter_title="News",
+        newsletter_date=None,
+        overview_zh_tw="摘要",
+        items=[
+            DigestItem(
+                title="Item",
+                category="OTHER",
+                summary_zh_tw="摘要",
+                why_it_matters_zh_tw="原因",
+                importance=5,
+                confidence=0.8,
+            )
+        ],
+    )
+    database.store_extraction(first_id, extraction)
+    database.store_extraction(second_id, extraction)
+
+    assert [row["message_id"] for row in database.items_for_messages([second_id], 10)] == [second_id]
+    database.close()
+
+
 def test_backup_and_reset(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     assert database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body") is not None

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Callable, Mapping
 from threading import Event, Thread
 from time import monotonic
@@ -65,6 +66,8 @@ def _format_elapsed(seconds: float) -> str:
 def run_with_elapsed(
     operation: Callable[[], BaseModel | Mapping[str, object]], interval: float = 1.0
 ) -> BaseModel | Mapping[str, object]:
+    if not sys.stderr.isatty():
+        return operation()
     start = monotonic()
     stop = Event()
 

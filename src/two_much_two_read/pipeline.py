@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -23,9 +24,9 @@ def _headers(message: dict[str, object]) -> dict[str, str]:
     return {str(header.get("name", "")).lower(): str(header.get("value", "")) for header in values if isinstance(header, dict)}
 
 
-def _items(database: Database, maximum: int) -> list[DigestItem]:
+def _items(database: Database, message_ids: list[int], maximum: int) -> list[DigestItem]:
     result: list[DigestItem] = []
-    for row in database.recent_items(maximum * 5):
+    for row in database.items_for_messages(message_ids, maximum * 5):
         result.append(
             DigestItem.model_validate(
                 {
@@ -41,6 +42,14 @@ def _items(database: Database, maximum: int) -> list[DigestItem]:
             )
         )
     return result
+
+
+def _message_ids(row: sqlite3.Row) -> list[str]:
+    try:
+        value = row["discord_message_ids_json"]
+    except KeyError:
+        return []
+    return [str(item) for item in json.loads(str(value))] if value else []
 
 
 def run_pipeline(
@@ -63,6 +72,7 @@ def run_pipeline(
 
     database: Database | None = None
     processed = 0
+    processed_message_ids: list[int] = []
     discovered = 0
     failed = 0
     try:
@@ -122,12 +132,13 @@ def run_pipeline(
                         continue
                     database.store_extraction(message_id, extraction, replace=force)
                     processed += 1
+                    processed_message_ids.append(message_id)
                     if not dry_run:
                         gmail.add_labels(gmail_id, [processed_label])
 
             now = datetime.now(ZoneInfo(settings.digest_timezone))
             content = render_digest(
-                _items(database, settings.digest_max_items)[: settings.digest_max_items],
+                _items(database, processed_message_ids, settings.digest_max_items)[: settings.digest_max_items],
                 now,
                 ", ".join(dict.fromkeys(source.category for source in sources)),
                 ", ".join(source.name for source in sources),
@@ -136,7 +147,7 @@ def run_pipeline(
             delivered = 0
             if content and not dry_run:
                 period_start = now - timedelta(days=1)
-                digest_key = f"daily:{now.date()}:{settings.digest_timezone}"
+                digest_key = f"daily:{now.date()}:{settings.digest_timezone}:{source_id or 'all'}"
                 if force:
                     digest_key += f":force:{datetime.now(UTC).isoformat()}"
                 digest_id = database.save_digest(
@@ -168,14 +179,22 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> int:
     try:
         with ProcessLock(settings.lock_path):
             active_database = active_database or Database(settings.database_path)
+            assert active_database is not None
             for digest in active_database.pending_digests():
                 try:
+                    digest_id = int(digest["id"])
+
+                    def save_progress(message_ids: list[str], target_id: int = digest_id) -> None:
+                        active_database.record_delivery_progress(target_id, message_ids)
+
                     ids = deliver(
                         settings.discord_webhook_url,
                         str(digest["rendered_content"]),
                         settings.discord_username,
+                        _message_ids(digest),
+                        save_progress,
                     )
-                    active_database.finish_delivery(int(digest["id"]), ids)
+                    active_database.finish_delivery(digest_id, ids)
                     delivered += 1
                 except Exception:
                     active_database.fail_delivery(int(digest["id"]))
@@ -190,11 +209,17 @@ def deliver_digest(settings: Settings, database: Database, digest_id: int) -> No
     digest = database.pending_digest(digest_id)
     if digest is None:
         raise ValueError(f"digest {digest_id} is not pending")
+
+    def save_progress(message_ids: list[str]) -> None:
+        database.record_delivery_progress(digest_id, message_ids)
+
     try:
         ids = deliver(
             settings.discord_webhook_url,
             str(digest["rendered_content"]),
             settings.discord_username,
+            _message_ids(digest),
+            save_progress,
         )
         database.finish_delivery(digest_id, ids)
     except Exception:

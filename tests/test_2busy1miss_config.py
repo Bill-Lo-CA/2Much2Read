@@ -55,6 +55,23 @@ default_rules:
         load_reminders(path)
 
 
+def test_rejects_excessive_offset_and_unknown_timezone(tmp_path: Path) -> None:
+    path = tmp_path / "reminders.yaml"
+    path.write_text(
+        """
+timezone: Not/A_Timezone
+calendars:
+  - id: primary
+default_rules:
+  - before: 367d
+""",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="timezone|offset"):
+        load_reminders(path)
+
+
 def test_rejects_duplicate_calendar_ids(tmp_path: Path) -> None:
     path = tmp_path / "reminders.yaml"
     path.write_text(

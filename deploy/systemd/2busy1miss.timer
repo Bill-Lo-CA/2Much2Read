@@ -2,9 +2,8 @@
 Description=2busy1miss Calendar Reminder Timer
 
 [Timer]
-OnCalendar=*:0/5
+OnCalendar=*-*-* *:*:00
 Persistent=true
-RandomizedDelaySec=30s
 
 [Install]
 WantedBy=timers.target

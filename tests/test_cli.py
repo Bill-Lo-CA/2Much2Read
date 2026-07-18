@@ -39,7 +39,7 @@ def test_run_help_uses_clear_delivery_flags_without_resend() -> None:
     assert "--resend" not in help_text
 
 
-def test_run_outputs_elapsed_time_without_polluting_json(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_run_avoids_ansi_progress_when_stderr_is_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run_pipeline(*args: object) -> dict[str, int | str]:
         return {"status": "ok", "discovered": 1, "processed": 1, "delivered": 0}
 
@@ -49,8 +49,7 @@ def test_run_outputs_elapsed_time_without_polluting_json(monkeypatch: pytest.Mon
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {"status": "ok", "discovered": 1, "processed": 1, "delivered": 0}
-    assert "2much2read run elapsed" in result.stderr
-    assert "2much2read run finished in" in result.stderr
+    assert result.stderr == ""
 
 
 @pytest.mark.parametrize(

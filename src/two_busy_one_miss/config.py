@@ -1,14 +1,26 @@
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from pathlib import Path
 from typing import Any, Self
+from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from common.paths import config_dir, data_dir, env_file
+
+MAX_REMINDER_OFFSET = timedelta(days=366)
+
+
+def _timezone(value: str) -> str:
+    try:
+        ZoneInfo(value)
+    except ZoneInfoNotFoundError as error:
+        raise ValueError(f"unknown IANA timezone {value!r}") from error
+    return value
 
 
 def settings_env_file() -> Path:
@@ -40,8 +52,13 @@ class ReminderSpec(BaseModel):
     @field_validator("before")
     @classmethod
     def valid_offset(cls, value: str) -> str:
-        if not re.fullmatch(r"[1-9]\d*[mhd]", value):
+        match = re.fullmatch(r"([1-9]\d*)([mhd])", value)
+        if match is None:
             raise ValueError("reminder offset must look like 5m, 2h, or 1d")
+        amount, unit = int(match.group(1)), match.group(2)
+        offset = timedelta(minutes=amount) if unit == "m" else timedelta(hours=amount) if unit == "h" else timedelta(days=amount)
+        if offset > MAX_REMINDER_OFFSET:
+            raise ValueError("reminder offset must not exceed 366d")
         return value
 
 
@@ -73,6 +90,8 @@ class RemindersConfig(BaseModel):
 
     @model_validator(mode="after")
     def unique_ids(self) -> Self:
+        if self.timezone is not None:
+            _timezone(self.timezone)
         calendar_ids = [calendar.id for calendar in self.calendars]
         if len(calendar_ids) != len(set(calendar_ids)):
             raise ValueError("calendar ids must be unique")
@@ -98,7 +117,12 @@ class Settings(BaseSettings):
     discord_webhook_url: str = ""
     discord_username: str = "2busy1miss"
     reminder_timezone: str = "America/Montreal"
-    reminder_lookahead_days: int = Field(default=7, ge=1, le=30)
+    reminder_lookahead_days: int = Field(default=7, ge=1, le=366)
+
+    @field_validator("reminder_timezone")
+    @classmethod
+    def valid_timezone(cls, value: str) -> str:
+        return _timezone(value)
 
     def __init__(self, **data: Any) -> None:
         super().__init__(_env_file=settings_env_file(), **data)

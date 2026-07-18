@@ -25,6 +25,8 @@ def test_render_reminder_disables_mentions() -> None:
 
     rendered = render_reminder(candidate)
 
+    assert rendered.startswith("```text\n2busy1miss reminder · 5m before\nTIME        | EVENT")
+    assert rendered.endswith("\n```")
     assert "@everyone" not in rendered
     assert "@here" not in rendered
 
@@ -59,6 +61,29 @@ def test_render_agenda_lists_events_and_disables_mentions() -> None:
     assert rendered.endswith("\n```")
     assert "@everyone" not in rendered
     assert "@here" not in rendered
+
+
+def test_render_agenda_marks_events_crossing_the_day_boundary() -> None:
+    timezone = ZoneInfo("America/Montreal")
+    day = date(2026, 7, 9)
+
+    def event(title: str, start: datetime, end: datetime) -> CalendarEvent:
+        return CalendarEvent("primary", "Main", title, title, title, "", start, end, False)
+
+    rendered = render_agenda(
+        day,
+        [
+            event("yesterday", datetime(2026, 7, 8, 21, tzinfo=timezone), datetime(2026, 7, 9, 4, tzinfo=timezone)),
+            event("tomorrow", datetime(2026, 7, 9, 21, tzinfo=timezone), datetime(2026, 7, 10, 4, tzinfo=timezone)),
+            event("midnight", datetime(2026, 7, 9, 21, tzinfo=timezone), datetime(2026, 7, 10, 0, tzinfo=timezone)),
+            event("earlier", datetime(2026, 7, 7, 21, tzinfo=timezone), datetime(2026, 7, 9, 4, tzinfo=timezone)),
+        ],
+    )
+
+    assert "Yesterday-04:00 | yesterday" in rendered
+    assert "21:00-Tomorrow | tomorrow" in rendered
+    assert "21:00-00:00 | midnight" in rendered
+    assert "2026-07-07-04:00 | earlier" in rendered
 
 
 def test_render_agenda_handles_empty_day() -> None:

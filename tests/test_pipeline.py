@@ -46,7 +46,7 @@ def test_deliver_digest_only_sends_selected_digest(tmp_path: Path, monkeypatch: 
     assert first_id is not None and current_id is not None
     delivered: list[str] = []
 
-    def fake_deliver(webhook_url: str, content: str, username: str) -> list[str]:
+    def fake_deliver(webhook_url: str, content: str, username: str, *args: object, **kwargs: object) -> list[str]:
         delivered.append(content)
         return ["discord-1"]
 
@@ -63,7 +63,7 @@ def test_deliver_digest_only_sends_selected_digest(tmp_path: Path, monkeypatch: 
 def test_retry_delivery_holds_process_lock(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
     database = MagicMock()
-    database.pending_digests.return_value = [{"id": 1, "rendered_content": "content"}]
+    database.pending_digests.return_value = [{"id": 1, "rendered_content": "content", "discord_message_ids_json": None}]
     lock = MagicMock()
     process_lock = MagicMock(return_value=lock)
     monkeypatch.setattr(pipeline, "Database", MagicMock(return_value=database))

@@ -52,3 +52,10 @@ def test_2busy1miss_agenda_timer_runs_at_local_2100() -> None:
     assert "OnCalendar=*-*-* 21:00:00" in timer
     assert "Persistent=true" in timer
     assert "ExecStart=__EXECUTABLE__ agenda-next-day --scheduled" in service
+
+
+def test_2busy1miss_dispatcher_runs_every_minute() -> None:
+    timer = (Path(__file__).parents[1] / "deploy/systemd/2busy1miss.timer").read_text(encoding="utf-8")
+
+    assert "OnCalendar=*-*-* *:*:00" in timer
+    assert "RandomizedDelaySec" not in timer

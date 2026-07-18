@@ -24,3 +24,21 @@ def test_disables_mentions() -> None:
     assert deliver("https://discord.example/webhook", "hello", "2much2read") == ["123"]
     assert route.calls[0].request.read()
     assert b'"allowed_mentions":{"parse":[]}' in route.calls[0].request.content
+
+
+@respx.mock
+def test_resumes_after_saved_chunk_progress() -> None:
+    route = respx.post("https://discord.example/webhook").mock(return_value=httpx.Response(200, json={"id": "2"}))
+    progress: list[list[str]] = []
+
+    message_ids = deliver(
+        "https://discord.example/webhook",
+        "x" * 3000,
+        "2much2read",
+        message_ids=["1"],
+        on_progress=progress.append,
+    )
+
+    assert message_ids == ["1", "2"]
+    assert progress == [["1", "2"]]
+    assert route.call_count == 1
