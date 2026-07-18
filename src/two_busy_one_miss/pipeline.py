@@ -157,7 +157,7 @@ def next_day_agenda(settings: Settings, dry_run: bool, force: bool, *, scheduled
     end = datetime.combine(day + timedelta(days=1), time.min, timezone)
     sync_end = now + event_query_lookahead(config, settings.reminder_lookahead_days)
     events = list_events_between(settings, config, now, sync_end)
-    agenda_events = [event for event in events if start <= event.start < end]
+    agenda_events = [event for event in events if event.end > start and event.start < end]
     content = render_agenda(day, agenda_events)
     if dry_run:
         return {

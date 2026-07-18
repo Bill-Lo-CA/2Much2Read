@@ -134,6 +134,34 @@ def test_next_day_agenda_dry_run_skips_database_and_discord(tmp_path: Path, monk
     deliver.assert_not_called()
 
 
+def test_next_day_agenda_includes_overlapping_events(tmp_path: Path, monkeypatch) -> None:
+    timezone = ZoneInfo("America/Montreal")
+    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    settings = Settings(database_path=tmp_path / "reminders.sqlite3", lock_path=tmp_path / "reminders.lock")
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 3, 8, 21, tzinfo=tz)
+
+    def event(instance_id: str, start: datetime, end: datetime) -> pipeline.CalendarEvent:
+        return pipeline.CalendarEvent("primary", "Main", instance_id, instance_id, instance_id, "", start, end, False)
+
+    events = [
+        event("overlap", datetime(2026, 3, 8, 21, tzinfo=timezone), datetime(2026, 3, 9, 4, tzinfo=timezone)),
+        event("within-day", datetime(2026, 3, 9, 9, tzinfo=timezone), datetime(2026, 3, 9, 10, tzinfo=timezone)),
+        event("ends-at-start", datetime(2026, 3, 8, 22, tzinfo=timezone), datetime(2026, 3, 9, 0, tzinfo=timezone)),
+        event("starts-at-end", datetime(2026, 3, 10, 0, tzinfo=timezone), datetime(2026, 3, 10, 1, tzinfo=timezone)),
+    ]
+    monkeypatch.setattr(pipeline, "datetime", FixedDatetime)
+    monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
+    monkeypatch.setattr(pipeline, "list_events_between", lambda *args: events)
+
+    result = pipeline.next_day_agenda(settings, dry_run=True, force=False)
+
+    assert [item["title"] for item in result["events"]] == ["overlap", "within-day"]
+
+
 def test_retry_agenda_delivers_only_the_current_destination(tmp_path: Path, monkeypatch) -> None:
     timezone = "America/Montreal"
     config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone)
