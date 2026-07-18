@@ -24,17 +24,25 @@ def render_reminder(candidate: ReminderCandidate) -> str:
     return "\n".join(lines)
 
 
+def _agenda_cell(value: str) -> str:
+    return " ".join(value.replace("@", "@\u200b").replace("`", "ˋ").split())
+
+
 def render_agenda(day: date, events: list[CalendarEvent]) -> str:
-    header = f"2busy1miss agenda: {day.isoformat()}"
+    lines = [
+        "```text",
+        f"2busy1miss agenda · {day.isoformat()}",
+        "TIME        | EVENT",
+        "------------+-------------------------------------------",
+    ]
     if not events:
-        return f"{header}\nNo events"
-    lines = [header]
+        return "\n".join([*lines, f"{'':<11} | No events", "```"])
     for event in sorted(events, key=lambda item: (item.start, item.calendar_id, item.instance_id)):
         when = "All day" if event.all_day else f"{event.start:%H:%M}-{event.end:%H:%M}"
-        summary = f"- {when} {event.title}".replace("@", "@\u200b")
+        summary = _agenda_cell(event.title)
         if event.calendar_name:
-            summary += f" ({event.calendar_name})"
-        lines.append(summary)
+            summary += f" ({_agenda_cell(event.calendar_name)})"
+        lines.append(f"{when:<11} | {summary}")
         if event.location:
-            lines.append(f"  Location: {event.location}".replace("@", "@\u200b"))
-    return "\n".join(lines)
+            lines.append(f"{'':<11} | {_agenda_cell(event.location)}")
+    return "\n".join([*lines, "```"])

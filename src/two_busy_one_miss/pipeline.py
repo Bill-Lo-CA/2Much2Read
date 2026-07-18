@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
+from hashlib import sha256
 from zoneinfo import ZoneInfo
 
 from common.discord import deliver
@@ -84,7 +85,7 @@ def agenda(settings: Settings, day: date, dry_run: bool) -> dict[str, object]:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
     start = datetime.combine(day, time.min, timezone)
-    end = start + timedelta(days=1)
+    end = datetime.combine(day + timedelta(days=1), time.min, timezone)
     events = list_events_between(settings, config, start, end)
     content = render_agenda(day, events)
     if dry_run:
@@ -92,6 +93,60 @@ def agenda(settings: Settings, day: date, dry_run: bool) -> dict[str, object]:
     with ProcessLock(settings.lock_path):
         message_ids = deliver(settings.discord_webhook_url, content, settings.discord_username)
     return {"status": "ok", "sent": 1, "discord_message_ids": message_ids, "events": len(events)}
+
+
+def next_day_agenda(settings: Settings, dry_run: bool, force: bool, *, scheduled: bool = False) -> dict[str, object]:
+    config = load_reminders(settings.reminders_config_path)
+    timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
+    now = datetime.now(timezone)
+    day = now.date() + timedelta(days=1)
+    if scheduled and now < datetime.combine(now.date(), time(21), timezone):
+        return {"status": "ok", "day": day.isoformat(), "sent": 0, "skipped": 1, "reason": "before_schedule"}
+    start = datetime.combine(day, time.min, timezone)
+    end = datetime.combine(day + timedelta(days=1), time.min, timezone)
+    events = list_events_between(settings, config, start, end)
+    content = render_agenda(day, events)
+    if dry_run:
+        return {"status": "ok", "day": day.isoformat(), "content": content, "events": [event_view(event) for event in events]}
+
+    destination_hash = sha256(settings.discord_webhook_url.encode()).hexdigest()
+    with ProcessLock(settings.lock_path):
+        database = Database(settings.database_path)
+        try:
+            delivery_id = database.create_agenda_delivery(day, timezone.key, destination_hash, content, force=force)
+            if delivery_id is None:
+                return {"status": "ok", "day": day.isoformat(), "sent": 0, "skipped": 1, "events": len(events)}
+            try:
+                message_ids = deliver(settings.discord_webhook_url, content, settings.discord_username)
+                database.finish_agenda_delivery(delivery_id, message_ids)
+            except Exception:
+                database.fail_agenda_delivery(delivery_id)
+                raise
+        finally:
+            database.close()
+    return {"status": "ok", "day": day.isoformat(), "sent": 1, "events": len(events)}
+
+
+def retry_agenda(settings: Settings, day: date) -> dict[str, object]:
+    config = load_reminders(settings.reminders_config_path)
+    timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
+    destination_hash = sha256(settings.discord_webhook_url.encode()).hexdigest()
+    delivered = 0
+    with ProcessLock(settings.lock_path):
+        database = Database(settings.database_path)
+        try:
+            for delivery in database.pending_agenda_deliveries(day, timezone.key, destination_hash):
+                delivery_id = int(delivery["id"])
+                try:
+                    message_ids = deliver(settings.discord_webhook_url, str(delivery["content"]), settings.discord_username)
+                    database.finish_agenda_delivery(delivery_id, message_ids)
+                    delivered += 1
+                except Exception:
+                    database.fail_agenda_delivery(delivery_id)
+                    raise
+        finally:
+            database.close()
+    return {"status": "ok", "day": day.isoformat(), "delivered": delivered}
 
 
 def run(settings: Settings, dry_run: bool) -> dict[str, object]:

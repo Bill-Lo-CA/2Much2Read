@@ -36,4 +36,19 @@ def test_installers_leave_timers_disabled(tmp_path: Path, script: str, timer: st
     assert f"is-active --quiet {service}" in calls
     assert "daemon-reload" in calls
     assert "enable --now" not in calls
-    assert f"Enable when ready: systemctl --user enable --now {timer}" in result.stdout
+    if script == "install-2busy1miss-user-service.sh":
+        assert "disable --now 2busy1miss.timer 2busy1miss-agenda.timer" in calls
+        assert "Enable reminders when ready: systemctl --user enable --now 2busy1miss.timer" in result.stdout
+        assert "Enable agenda when ready: systemctl --user enable --now 2busy1miss-agenda.timer" in result.stdout
+    else:
+        assert f"Enable when ready: systemctl --user enable --now {timer}" in result.stdout
+
+
+def test_2busy1miss_agenda_timer_runs_at_local_2100() -> None:
+    root = Path(__file__).parents[1]
+    timer = (root / "deploy/systemd/2busy1miss-agenda.timer").read_text(encoding="utf-8")
+    service = (root / "deploy/systemd/2busy1miss-agenda.service").read_text(encoding="utf-8")
+
+    assert "OnCalendar=*-*-* 21:00:00" in timer
+    assert "Persistent=true" in timer
+    assert "ExecStart=__EXECUTABLE__ agenda-next-day --scheduled" in service

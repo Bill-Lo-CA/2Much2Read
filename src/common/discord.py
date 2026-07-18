@@ -5,20 +5,38 @@ import time
 import httpx
 
 
-def chunk_text(text: str, limit: int = 2000) -> list[str]:
-    if len(text) <= limit:
-        return [text]
+def _split_text(text: str, limit: int) -> list[str]:
     chunks: list[str] = []
     remaining = text
     while remaining:
-        cut = min(limit - 12, len(remaining))
+        cut = min(limit, len(remaining))
         if cut < len(remaining):
             boundary = max(remaining.rfind("\n\n", 0, cut), remaining.rfind("\n", 0, cut))
             cut = boundary if boundary > limit // 2 else cut
         chunks.append(remaining[:cut].rstrip())
         remaining = remaining[cut:].lstrip()
+    return chunks
+
+
+def _fenced_block(text: str) -> tuple[str, str] | None:
+    opener, separator, body = text.partition("\n")
+    if not separator or not opener.startswith("```") or not body.endswith("\n```"):
+        return None
+    return opener, body.removesuffix("\n```")
+
+
+def chunk_text(text: str, limit: int = 2000) -> list[str]:
+    if len(text) <= limit:
+        return [text]
+    fenced = _fenced_block(text)
+    if fenced is None:
+        chunks = _split_text(text, limit - 12)
+        total = len(chunks)
+        return [f"({index}/{total}) {chunk}" for index, chunk in enumerate(chunks, 1)]
+    opener, body = fenced
+    chunks = _split_text(body, limit - len(opener) - len("\n```") - 12)
     total = len(chunks)
-    return [f"({index}/{total}) {chunk}" for index, chunk in enumerate(chunks, 1)]
+    return [f"({index}/{total}) {opener}\n{chunk}\n```" for index, chunk in enumerate(chunks, 1)]
 
 
 def deliver(webhook_url: str, content: str, username: str) -> list[str]:

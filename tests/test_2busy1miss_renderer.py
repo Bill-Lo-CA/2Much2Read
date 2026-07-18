@@ -53,11 +53,37 @@ def test_render_agenda_lists_events_and_disables_mentions() -> None:
 
     rendered = render_agenda(date(2026, 7, 9), [event])
 
-    assert "2busy1miss agenda: 2026-07-09" in rendered
-    assert "- 07:00-10:00" in rendered
+    assert rendered.startswith("```text\n2busy1miss agenda · 2026-07-09\nTIME        | EVENT")
+    assert "07:00-10:00 | @\u200beveryone French class (Main)" in rendered
+    assert "            | Zoom @\u200bhere" in rendered
+    assert rendered.endswith("\n```")
     assert "@everyone" not in rendered
     assert "@here" not in rendered
 
 
 def test_render_agenda_handles_empty_day() -> None:
-    assert render_agenda(date(2026, 7, 9), []) == "2busy1miss agenda: 2026-07-09\nNo events"
+    rendered = render_agenda(date(2026, 7, 9), [])
+
+    assert rendered.startswith("```text\n2busy1miss agenda · 2026-07-09\nTIME        | EVENT\n------------+")
+    assert "            | No events" in rendered
+    assert rendered.endswith("\n```")
+
+
+def test_render_agenda_keeps_event_text_inside_code_block() -> None:
+    event = CalendarEvent(
+        calendar_id="primary",
+        calendar_name="Main",
+        event_id="event-1",
+        instance_id="event-1",
+        title="Deploy ``` now",
+        location="Room\n2",
+        start=datetime(2026, 7, 9, 7, 0, tzinfo=ZoneInfo("America/Montreal")),
+        end=datetime(2026, 7, 9, 8, 0, tzinfo=ZoneInfo("America/Montreal")),
+        all_day=False,
+    )
+
+    rendered = render_agenda(date(2026, 7, 9), [event])
+
+    assert "``` now" not in rendered
+    assert "Deploy ˋˋˋ now" in rendered
+    assert "Room 2" in rendered
