@@ -118,6 +118,45 @@ only sends the remaining chunks.
 
 Gmail and Calendar client secrets and user tokens are intentionally distinct. Give each installer its matching `--*-client-secret` path if the credentials came from different Google Cloud projects.
 
+## Operations and recovery
+
+OAuth consent screens left in Google test mode can invalidate refresh tokens. If a
+scheduled command reports `AUTH_REAUTH_REQUIRED`, reauthorize interactively with
+`uv run 2much2read auth gmail` or `uv run 2busy1miss auth calendar`; systemd jobs
+never open a browser. For a remote host, create the callback tunnel on the local
+machine before authorizing, then complete the printed URL in the local browser:
+
+```bash
+ssh -L 8765:127.0.0.1:8765 user@remote-host
+```
+
+Use SQLite's backup command rather than copying a live database file. Stop the
+relevant timers and service before restoring; preserve the current database under
+a new name, restore the backup at the configured path with mode `0600`, then run
+`doctor` and a dry run before enabling a timer. The installers' runtime migration
+creates a `*.pre-migration-backup` beside each migrated SQLite database. Treat it
+as a backup and restore it using the same stopped-service procedure if needed.
+
+```bash
+sqlite3 ~/.local/share/2much2read/2much2read.sqlite3 \
+  ".backup '/secure-backups/2much2read.sqlite3'"
+sqlite3 ~/.local/share/2much2read/2busy1miss.sqlite3 \
+  ".backup '/secure-backups/2busy1miss.sqlite3'"
+```
+
+Inspect timers and recent failures without sending work:
+
+```bash
+systemctl --user list-timers '2much2read*' '2busy1miss*'
+systemctl --user status 2much2read.timer 2busy1miss.timer 2busy1miss-agenda.timer
+journalctl --user -u 2much2read.service -u 2busy1miss.service -u 2busy1miss-agenda.service -n 100 --no-pager
+```
+
+`LOCK_CONTENDED` means another local run is active; retry after it finishes.
+`DISCORD_DELIVERY_FAILED` leaves a durable delivery pending, so use the relevant
+retry command after fixing the webhook or network. `doctor` checks local setup
+without posting unless `--send-test` is explicitly supplied.
+
 ## Development
 
 ```bash

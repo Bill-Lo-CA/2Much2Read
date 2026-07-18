@@ -6,8 +6,8 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from common.discord import deliver
-from common.locking import ProcessLock
+from two_read_runtime.discord import deliver
+from two_read_runtime.locking import ProcessLock
 
 from .config import Settings, load_sources
 from .digest import render_digest
@@ -71,10 +71,14 @@ def run_pipeline(
         raise ValueError("no enabled sources configured")
 
     database: Database | None = None
+    run_id: int | None = None
+    run_status = "failed"
+    error_summary: str | None = None
     processed = 0
     processed_message_ids: list[int] = []
     discovered = 0
     failed = 0
+    delivered = 0
     try:
         with ProcessLock(settings.lock_path):
             creds = credentials(
@@ -92,6 +96,8 @@ def run_pipeline(
                 settings.ollama_keep_alive,
             )
             database = Database(Path(":memory:") if dry_run else settings.database_path)
+            if not dry_run:
+                run_id = database.start_run("newsletter_digest")
             for source in sources:
                 processed_label = "NewsletterBot/Processed"
                 failed_label = "NewsletterBot/Failed"
@@ -144,7 +150,6 @@ def run_pipeline(
                 ", ".join(source.name for source in sources),
                 settings.digest_top_items,
             )
-            delivered = 0
             if content and not dry_run:
                 period_start = now - timedelta(days=1)
                 digest_key = f"daily:{now.date()}:{settings.digest_timezone}:{source_id or 'all'}"
@@ -160,15 +165,22 @@ def run_pipeline(
                 if digest_id is not None and not no_deliver:
                     deliver_digest(settings, database, digest_id)
                     delivered = 1
-            return {
+            result = {
                 "status": "partial" if failed else "ok" if content else "no_content",
                 "discovered": discovered,
                 "processed": processed,
                 "failed": failed,
                 "delivered": delivered,
             }
+            run_status = str(result["status"])
+            return result
+    except Exception as error:
+        error_summary = type(error).__name__
+        raise
     finally:
         if database is not None:
+            if run_id is not None:
+                database.finish_run(run_id, run_status, discovered, processed, failed, delivered, error_summary)
             database.close()
 
 

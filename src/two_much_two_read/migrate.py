@@ -11,7 +11,7 @@ from pathlib import Path
 
 from dotenv import dotenv_values
 
-from common.paths import config_dir, data_dir, env_file
+from two_read_runtime.paths import config_dir, data_dir, env_file
 
 
 @dataclass(frozen=True)

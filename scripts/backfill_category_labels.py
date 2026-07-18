@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import argparse
 
-from common.locking import ProcessLock
 from two_much_two_read.config import Settings, load_sources
 from two_much_two_read.gmail import GmailClient, credentials, find_label_id, source_backfill_query
+from two_read_runtime.locking import ProcessLock
 
 
 def main() -> None:

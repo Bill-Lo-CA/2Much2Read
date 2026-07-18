@@ -39,6 +39,35 @@ def test_no_enabled_sources_has_distinct_error(tmp_path: Path) -> None:
         run_pipeline(Settings(sources_config_path=sources_path), dry_run=True)
 
 
+def test_empty_news_day_records_no_content_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    gmail = MagicMock()
+    gmail.list_messages.return_value = []
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda credentials: gmail)
+
+    assert run_pipeline(settings, no_deliver=True) == {
+        "status": "no_content",
+        "discovered": 0,
+        "processed": 0,
+        "failed": 0,
+        "delivered": 0,
+    }
+
+    database = Database(settings.database_path)
+    row = database.connection.execute(
+        "SELECT run_type,status,discovered_count,processed_count,failed_count,delivered_digest_count FROM runs"
+    ).fetchone()
+    assert tuple(row) == ("newsletter_digest", "no_content", 0, 0, 0, 0)
+    database.close()
+
+
 def test_deliver_digest_only_sends_selected_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = Database(tmp_path / "test.sqlite3")
     first_id = database.save_digest("daily:1", "start", "end", "UTC", "old digest")
@@ -175,6 +204,7 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
     gmail.add_labels.assert_not_called()
     database = Database(settings.database_path)
     assert database.connection.execute("SELECT state FROM messages").fetchone()["state"] == "discovered"
+    assert tuple(database.connection.execute("SELECT status,error_summary FROM runs").fetchone()) == ("failed", "ConnectError")
     database.close()
 
     ollama.extract.side_effect = None

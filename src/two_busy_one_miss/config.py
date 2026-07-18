@@ -10,7 +10,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
-from common.paths import config_dir, data_dir, env_file
+from two_read_runtime.paths import config_dir, data_dir, env_file
 
 MAX_REMINDER_OFFSET = timedelta(days=366)
 

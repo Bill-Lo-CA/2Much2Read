@@ -2,9 +2,9 @@ from datetime import UTC, datetime
 
 import pytest
 
-from common.discord import chunk_text
 from two_much_two_read.digest import canonical_url, dedupe, render_digest
 from two_much_two_read.schemas import DigestItem
+from two_read_runtime.discord import chunk_text
 
 
 def item(title: str, url: str | None, confidence: float = 0.8) -> DigestItem:

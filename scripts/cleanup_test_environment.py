@@ -5,10 +5,10 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from common.locking import ProcessLock
 from two_much_two_read.config import Settings, load_sources
 from two_much_two_read.gmail import GmailClient, credentials, find_label_id
 from two_much_two_read.storage import Database
+from two_read_runtime.locking import ProcessLock
 
 PROCESSING_LABELS = ["NewsletterBot/Processed", "NewsletterBot/Failed"]
 
