@@ -63,6 +63,17 @@ def test_rejects_unknown_gmail_filter_criteria(tmp_path: Path) -> None:
         load_sources(config)
 
 
+def test_rejects_unknown_source_fields(tmp_path: Path) -> None:
+    config = tmp_path / "sources.yaml"
+    config.write_text(
+        "sources:\n  - {id: news, name: News, gmail_query: news, typo: true}\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="typo"):
+        load_sources(config)
+
+
 def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     app_config = home / ".config" / "2much2read"

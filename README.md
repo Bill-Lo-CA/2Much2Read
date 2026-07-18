@@ -3,7 +3,8 @@
 Two local-first tools that post only their final output to a private Discord webhook:
 
 - `2much2read` reads configured Gmail newsletters, summarizes them with local Ollama, and records digests in SQLite.
-- `2busy1miss` reads Google Calendar events, applies local YAML rules, and sends due reminders.
+- `2busy1miss` syncs configured Google Calendar events into SQLite reminder jobs,
+  then sends due reminders without repeatedly querying Google.
 
 They are separate commands, OAuth clients, OAuth tokens, YAML files, SQLite databases, and environment files. They share only configuration-path resolution, Discord delivery, and a process lock implementation.
 
@@ -83,6 +84,13 @@ systemctl --user enable --now 2busy1miss.timer
 systemctl --user enable --now 2busy1miss-agenda.timer
 ```
 
+`REMINDER_LOOKAHEAD_DAYS` in `.2busy1miss.env` controls the Calendar sync horizon
+(default: 7; maximum: 366). The 21:00 agenda job reads that horizon and writes
+one-time reminder jobs to SQLite. `2busy1miss.timer` runs every minute and only
+dispatches those local jobs. To refresh jobs after adding or changing an event,
+run `uv run 2busy1miss agenda-next-day`; an already delivered agenda is skipped,
+but reminder jobs are reconciled.
+
 Useful commands:
 
 ```bash
@@ -95,7 +103,16 @@ uv run 2busy1miss agenda-retry 2026-07-16
 uv run 2busy1miss retry-delivery
 ```
 
-`2busy1miss-agenda.timer` runs at 21:00 in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone. Its persistent catch-up is ignored before 21:00 in that timezone, so a morning startup cannot send the next day's agenda early. Normal `agenda-next-day` runs are de-duplicated by date, timezone, and Discord destination; `--force` is the explicit resend path. Empty days are sent as `No events`.
+`2busy1miss-agenda.timer` runs at 21:00 in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone and synchronizes the configured reminder horizon. Its persistent catch-up is ignored before 21:00 in that timezone, so a morning startup cannot send the next day's agenda early. Normal `agenda-next-day` runs are de-duplicated by date, timezone, and Discord destination; `--force` is the explicit resend path. Empty days are sent as `No events`. Reminder messages use the same Markdown code-block style as agendas; a retry after an event starts marks the job `expired` instead of sending it.
+
+## Delivery behavior
+
+Newsletter digests contain only items extracted in that run, so a source-specific
+run cannot include older items or another source's items. `2much2read run
+--no-deliver` stores the rendered digest as pending and reserves its daily key;
+send it later with `uv run 2much2read delivery retry`. Durable digest, reminder,
+and next-day-agenda deliveries checkpoint each confirmed Discord chunk, so a retry
+only sends the remaining chunks.
 
 ## OAuth safety
 

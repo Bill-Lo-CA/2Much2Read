@@ -12,16 +12,20 @@ def _when(value: datetime) -> str:
 
 def render_reminder(candidate: ReminderCandidate) -> str:
     event = candidate.event
+    when = "All day" if event.all_day else f"{event.start:%H:%M}-{event.end:%H:%M}"
     lines = [
-        f"2busy1miss: {event.title}".replace("@", "@\u200b"),
-        f"Starts: {_when(event.start)}",
-        f"Reminder: {candidate.before} before",
+        "```text",
+        f"2busy1miss reminder · {candidate.before} before",
+        "TIME        | EVENT",
+        "------------+-------------------------------------------",
+        f"{when:<11} | {_agenda_cell(event.title)}",
+        f"{'':<11} | Starts: {_when(event.start)}",
     ]
     if event.calendar_name:
-        lines.append(f"Calendar: {event.calendar_name}")
+        lines.append(f"{'':<11} | Calendar: {_agenda_cell(event.calendar_name)}")
     if event.location:
-        lines.append(f"Location: {event.location}".replace("@", "@\u200b"))
-    return "\n".join(lines)
+        lines.append(f"{'':<11} | Location: {_agenda_cell(event.location)}")
+    return "\n".join([*lines, "```"])
 
 
 def _agenda_cell(value: str) -> str:

@@ -43,6 +43,8 @@ class GmailFilter(BaseModel):
 
 
 class Source(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     id: str
     name: str
     enabled: bool = True
@@ -62,6 +64,8 @@ class Source(BaseModel):
 
 
 class Sources(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     sources: list[Source]
 
     @model_validator(mode="after")
@@ -83,6 +87,8 @@ class ExcludedSubscription(BaseModel):
 
 
 class ExcludedSubscriptions(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     excluded_subscriptions: list[ExcludedSubscription] = Field(default_factory=list)
 
 

@@ -11,7 +11,29 @@ from typing import cast
 from .google_calendar import CalendarEvent
 from .rules import ReminderCandidate
 
-SCHEMA = """
+REMINDER_ATTEMPTS_SCHEMA = """
+CREATE TABLE IF NOT EXISTS reminder_attempts(
+  id INTEGER PRIMARY KEY,
+  event_row_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
+  calendar_id TEXT NOT NULL,
+  event_id TEXT NOT NULL,
+  instance_id TEXT NOT NULL,
+  rule_id TEXT NOT NULL,
+  reminder_at TEXT NOT NULL,
+  content TEXT NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed','expired','cancelled')),
+  attempt_count INTEGER NOT NULL DEFAULT 0,
+  discord_message_ids_json TEXT,
+  delivered_at TEXT,
+  last_error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  UNIQUE(calendar_id, event_id, instance_id, rule_id, reminder_at)
+);
+"""
+
+SCHEMA = (
+    """
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY,
@@ -27,24 +49,9 @@ CREATE TABLE IF NOT EXISTS events(
   updated_at TEXT NOT NULL,
   UNIQUE(calendar_id, instance_id)
 );
-CREATE TABLE IF NOT EXISTS reminder_attempts(
-  id INTEGER PRIMARY KEY,
-  event_row_id INTEGER NOT NULL REFERENCES events(id) ON DELETE CASCADE,
-  calendar_id TEXT NOT NULL,
-  event_id TEXT NOT NULL,
-  instance_id TEXT NOT NULL,
-  rule_id TEXT NOT NULL,
-  reminder_at TEXT NOT NULL,
-  content TEXT NOT NULL,
-  state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed')),
-  attempt_count INTEGER NOT NULL DEFAULT 0,
-  discord_message_ids_json TEXT,
-  delivered_at TEXT,
-  last_error_code TEXT,
-  created_at TEXT NOT NULL,
-  updated_at TEXT NOT NULL,
-  UNIQUE(calendar_id, event_id, instance_id, rule_id, reminder_at)
-);
+"""
+    + REMINDER_ATTEMPTS_SCHEMA
+    + """
 CREATE TABLE IF NOT EXISTS agenda_deliveries(
   id INTEGER PRIMARY KEY,
   agenda_day TEXT NOT NULL,
@@ -62,17 +69,40 @@ CREATE TABLE IF NOT EXISTS agenda_deliveries(
 );
 INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(1, datetime('now'));
 """
+)
 
 
 class Database:
-    def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        self.connection = sqlite3.connect(path)
+    def __init__(self, path: Path, *, read_only: bool = False) -> None:
+        if read_only:
+            self.connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        else:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA busy_timeout=5000")
-        self.connection.executescript(SCHEMA)
+        if not read_only:
+            self.connection.execute("PRAGMA journal_mode=WAL")
+            self.connection.execute("PRAGMA foreign_keys=ON")
+            self.connection.executescript(SCHEMA)
+            self._migrate_reminder_attempts()
+
+    def _migrate_reminder_attempts(self) -> None:
+        row = self.connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reminder_attempts'").fetchone()
+        if row is None or "'expired'" in str(row["sql"]):
+            return
+        with self.connection:
+            self.connection.execute("ALTER TABLE reminder_attempts RENAME TO reminder_attempts_legacy")
+            self.connection.executescript(REMINDER_ATTEMPTS_SCHEMA)
+            self.connection.execute(
+                """INSERT INTO reminder_attempts
+                (id,event_row_id,calendar_id,event_id,instance_id,rule_id,reminder_at,content,state,attempt_count,
+                 discord_message_ids_json,delivered_at,last_error_code,created_at,updated_at)
+                SELECT id,event_row_id,calendar_id,event_id,instance_id,rule_id,reminder_at,content,state,attempt_count,
+                       discord_message_ids_json,delivered_at,last_error_code,created_at,updated_at
+                FROM reminder_attempts_legacy"""
+            )
+            self.connection.execute("DROP TABLE reminder_attempts_legacy")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -134,12 +164,89 @@ class Database:
             ),
         )
         self.connection.commit()
-        return int(cursor.lastrowid) if cursor.rowcount and cursor.lastrowid is not None else None
+        if cursor.rowcount and cursor.lastrowid is not None:
+            return int(cursor.lastrowid)
+        self.connection.execute(
+            """UPDATE reminder_attempts SET event_row_id=?, content=?, state='pending', discord_message_ids_json=NULL,
+            last_error_code=NULL, updated_at=?
+            WHERE calendar_id=? AND event_id=? AND instance_id=? AND rule_id=? AND reminder_at=?
+              AND state IN ('pending','failed') AND content<>?""",
+            (
+                event_row_id,
+                content,
+                now,
+                candidate.event.calendar_id,
+                candidate.event.event_id,
+                candidate.event.instance_id,
+                candidate.rule_id,
+                candidate.reminder_time.isoformat(),
+                content,
+            ),
+        )
+        self.connection.commit()
+        return None
 
     def pending_attempts(self) -> list[sqlite3.Row]:
         return self.connection.execute(
             "SELECT * FROM reminder_attempts WHERE state IN ('pending','failed') ORDER BY reminder_at, id"
         ).fetchall()
+
+    def due_attempts(self, now: datetime) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            """SELECT reminder_attempts.*, events.start_at AS event_start_at, events.end_at AS event_end_at
+            FROM reminder_attempts JOIN events ON events.id=reminder_attempts.event_row_id
+            WHERE reminder_attempts.state IN ('pending','failed') AND reminder_attempts.reminder_at<=?
+            ORDER BY reminder_attempts.reminder_at, reminder_attempts.id""",
+            (now.isoformat(),),
+        ).fetchall()
+
+    def cancel_unmatched_attempts(self, candidates: list[ReminderCandidate], window_start: datetime, window_end: datetime) -> int:
+        expected = {
+            (
+                candidate.event.calendar_id,
+                candidate.event.event_id,
+                candidate.event.instance_id,
+                candidate.rule_id,
+                candidate.reminder_time.isoformat(),
+            )
+            for candidate in candidates
+        }
+        rows = self.connection.execute(
+            """SELECT id,calendar_id,event_id,instance_id,rule_id,reminder_at FROM reminder_attempts
+            WHERE state IN ('pending','failed') AND reminder_at>=? AND reminder_at<=?""",
+            (window_start.isoformat(), window_end.isoformat()),
+        ).fetchall()
+        cancelled = [
+            int(row["id"])
+            for row in rows
+            if (row["calendar_id"], row["event_id"], row["instance_id"], row["rule_id"], row["reminder_at"]) not in expected
+        ]
+        if cancelled:
+            now = datetime.now(UTC).isoformat()
+            self.connection.executemany(
+                """UPDATE reminder_attempts SET state='cancelled', last_error_code='CALENDAR_EVENT_CHANGED',
+                updated_at=? WHERE id=?""",
+                [(now, attempt_id) for attempt_id in cancelled],
+            )
+            self.connection.commit()
+        return len(cancelled)
+
+    def expire_attempt(self, attempt_id: int) -> None:
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """UPDATE reminder_attempts SET state='expired', last_error_code='REMINDER_EVENT_STARTED',
+            updated_at=? WHERE id=?""",
+            (now, attempt_id),
+        )
+        self.connection.commit()
+
+    def record_delivery_progress(self, attempt_id: int, message_ids: list[str]) -> None:
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            "UPDATE reminder_attempts SET discord_message_ids_json=?, updated_at=? WHERE id=?",
+            (json.dumps(message_ids), now, attempt_id),
+        )
+        self.connection.commit()
 
     def finish_delivery(self, attempt_id: int, message_ids: list[str]) -> None:
         now = datetime.now(UTC).isoformat()
@@ -202,6 +309,14 @@ class Database:
             """UPDATE agenda_deliveries SET state='delivered', delivered_at=?, discord_message_ids_json=?,
             attempt_count=attempt_count+1, last_error_code=NULL, updated_at=? WHERE id=?""",
             (now, json.dumps(message_ids), now, delivery_id),
+        )
+        self.connection.commit()
+
+    def record_agenda_delivery_progress(self, delivery_id: int, message_ids: list[str]) -> None:
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            "UPDATE agenda_deliveries SET discord_message_ids_json=?, updated_at=? WHERE id=?",
+            (json.dumps(message_ids), now, delivery_id),
         )
         self.connection.commit()
 

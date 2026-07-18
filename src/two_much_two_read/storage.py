@@ -139,6 +139,18 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def items_for_messages(self, message_ids: list[int], limit: int) -> list[dict[str, object]]:
+        if not message_ids:
+            return []
+        placeholders = ",".join("?" for _ in message_ids)
+        rows = self.connection.execute(
+            f"""SELECT i.*, m.received_at FROM items i JOIN messages m ON m.id=i.message_id
+            WHERE m.state='processed' AND i.message_id IN ({placeholders})
+            ORDER BY m.received_at DESC LIMIT ?""",
+            (*message_ids, limit),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def save_digest(self, digest_key: str, period_start: str, period_end: str, timezone: str, content: str) -> int | None:
         now = datetime.now(UTC).isoformat()
         cursor = self.connection.execute(
@@ -196,6 +208,14 @@ class Database:
             """UPDATE digests SET state='delivered', delivered_at=?, discord_message_ids_json=?,
             delivery_attempt_count=delivery_attempt_count+1, last_error_code=NULL, updated_at=? WHERE id=?""",
             (now, json.dumps(message_ids), now, digest_id),
+        )
+        self.connection.commit()
+
+    def record_delivery_progress(self, digest_id: int, message_ids: list[str]) -> None:
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            "UPDATE digests SET discord_message_ids_json=?, updated_at=? WHERE id=?",
+            (json.dumps(message_ids), now, digest_id),
         )
         self.connection.commit()
 

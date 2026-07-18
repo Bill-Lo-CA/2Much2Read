@@ -25,6 +25,8 @@ def test_render_reminder_disables_mentions() -> None:
 
     rendered = render_reminder(candidate)
 
+    assert rendered.startswith("```text\n2busy1miss reminder · 5m before\nTIME        | EVENT")
+    assert rendered.endswith("\n```")
     assert "@everyone" not in rendered
     assert "@here" not in rendered
 

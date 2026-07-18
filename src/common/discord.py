@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from collections.abc import Callable
 
 import httpx
 
@@ -39,11 +40,20 @@ def chunk_text(text: str, limit: int = 2000) -> list[str]:
     return [f"({index}/{total}) {opener}\n{chunk}\n```" for index, chunk in enumerate(chunks, 1)]
 
 
-def deliver(webhook_url: str, content: str, username: str) -> list[str]:
+def deliver(
+    webhook_url: str,
+    content: str,
+    username: str,
+    message_ids: list[str] | None = None,
+    on_progress: Callable[[list[str]], None] | None = None,
+) -> list[str]:
     if not webhook_url:
         raise ValueError("DISCORD_WEBHOOK_URL is required")
-    message_ids: list[str] = []
-    for chunk in chunk_text(content):
+    message_ids = list(message_ids or [])
+    chunks = chunk_text(content)
+    if len(message_ids) > len(chunks):
+        raise ValueError("stored Discord delivery progress exceeds message chunks")
+    for chunk in chunks[len(message_ids) :]:
         for attempt in range(4):
             response = httpx.post(
                 webhook_url,
@@ -59,6 +69,8 @@ def deliver(webhook_url: str, content: str, username: str) -> list[str]:
                 continue
             response.raise_for_status()
             message_ids.append(str(response.json()["id"]))
+            if on_progress is not None:
+                on_progress(message_ids)
             break
         else:
             raise RuntimeError("DISCORD_DELIVERY_FAILED")
