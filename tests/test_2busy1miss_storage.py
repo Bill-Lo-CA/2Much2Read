@@ -60,7 +60,7 @@ def test_attempt_progress_is_preserved_and_unmatched_jobs_are_cancelled(tmp_path
     database.fail_delivery(attempt_id)
     row = database.pending_attempts()[0]
     assert row["discord_message_ids_json"] == '["chunk-1"]'
-    assert database.cancel_unmatched_attempts([], item.reminder_time, item.event.start) == 1
+    assert database.cancel_unmatched_attempts([], [item.event], item.reminder_time, item.event.start) == 1
     assert database.attempt_state(attempt_id) == "cancelled"
     database.close()
 

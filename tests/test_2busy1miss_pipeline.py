@@ -162,6 +162,49 @@ def test_next_day_agenda_includes_overlapping_events(tmp_path: Path, monkeypatch
     assert [item["title"] for item in result["events"]] == ["overlap", "within-day"]
 
 
+def test_resync_cancels_overdue_job_after_an_event_changes(tmp_path: Path) -> None:
+    timezone = ZoneInfo("America/Montreal")
+    config = RemindersConfig(calendars=[{"id": "primary"}], default_rules=[ReminderSpec(id="default-5m", before="5m")])
+    database = Database(tmp_path / "reminders.sqlite3")
+    original = pipeline.CalendarEvent(
+        "primary",
+        "Main",
+        "event",
+        "instance",
+        "Original",
+        "",
+        datetime(2026, 7, 9, 10, tzinfo=timezone),
+        datetime(2026, 7, 9, 11, tzinfo=timezone),
+        False,
+    )
+    old_attempt = database.create_attempt(
+        ReminderCandidate(original, "default-5m", "5m", datetime(2026, 7, 9, 9, 55, tzinfo=timezone)), "old content"
+    )
+    assert old_attempt is not None
+    database.fail_delivery(old_attempt)
+    updated = pipeline.CalendarEvent(
+        "primary",
+        "Main",
+        "event",
+        "instance",
+        "Updated",
+        "",
+        datetime(2026, 7, 9, 10, 15, tzinfo=timezone),
+        datetime(2026, 7, 9, 11, 15, tzinfo=timezone),
+        False,
+    )
+    now = datetime(2026, 7, 9, 9, 56, tzinfo=timezone)
+
+    created, cancelled = pipeline._sync_scheduled_reminders(
+        database, config, [updated], now, datetime(2026, 7, 9, 12, tzinfo=timezone)
+    )
+
+    assert (created, cancelled) == (1, 1)
+    assert database.attempt_state(old_attempt) == "cancelled"
+    assert database.due_attempts(now) == []
+    database.close()
+
+
 def test_retry_agenda_delivers_only_the_current_destination(tmp_path: Path, monkeypatch) -> None:
     timezone = "America/Montreal"
     config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone)

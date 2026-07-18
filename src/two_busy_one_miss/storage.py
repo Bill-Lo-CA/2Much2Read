@@ -200,7 +200,9 @@ class Database:
             (now.isoformat(),),
         ).fetchall()
 
-    def cancel_unmatched_attempts(self, candidates: list[ReminderCandidate], window_start: datetime, window_end: datetime) -> int:
+    def cancel_unmatched_attempts(
+        self, candidates: list[ReminderCandidate], events: list[CalendarEvent], window_start: datetime, window_end: datetime
+    ) -> int:
         expected = {
             (
                 candidate.event.calendar_id,
@@ -211,11 +213,18 @@ class Database:
             )
             for candidate in candidates
         }
-        rows = self.connection.execute(
-            """SELECT id,calendar_id,event_id,instance_id,rule_id,reminder_at FROM reminder_attempts
-            WHERE state IN ('pending','failed') AND reminder_at>=? AND reminder_at<=?""",
-            (window_start.isoformat(), window_end.isoformat()),
-        ).fetchall()
+        synced_events = tuple({(event.calendar_id, event.event_id, event.instance_id) for event in events})
+        query = """SELECT id,calendar_id,event_id,instance_id,rule_id,reminder_at FROM reminder_attempts
+            WHERE state IN ('pending','failed') AND reminder_at>=? AND reminder_at<=?"""
+        parameters: list[str] = [window_start.isoformat(), window_end.isoformat()]
+        if synced_events:
+            event_matches = " OR ".join("(calendar_id=? AND event_id=? AND instance_id=?)" for _ in synced_events)
+            query = f"""SELECT id,calendar_id,event_id,instance_id,rule_id,reminder_at FROM reminder_attempts
+                WHERE state IN ('pending','failed') AND (
+                    (reminder_at>=? AND reminder_at<=?) OR (reminder_at<? AND ({event_matches}))
+                )"""
+            parameters.extend([window_start.isoformat(), *(value for event in synced_events for value in event)])
+        rows = self.connection.execute(query, parameters).fetchall()
         cancelled = [
             int(row["id"])
             for row in rows

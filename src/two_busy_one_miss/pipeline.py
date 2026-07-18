@@ -88,7 +88,7 @@ def _sync_scheduled_reminders(
 ) -> tuple[int, int]:
     candidates = schedule_reminders(config, events)
     created = sum(database.create_attempt(candidate, render_reminder(candidate)) is not None for candidate in candidates)
-    return created, database.cancel_unmatched_attempts(candidates, window_start, window_end)
+    return created, database.cancel_unmatched_attempts(candidates, events, window_start, window_end)
 
 
 def _dispatch_due_reminders(database: Database, settings: Settings, now: datetime) -> tuple[int, int]:
