@@ -111,8 +111,9 @@ def agenda_command(
 def agenda_next_day_command(
     dry_run: Annotated[bool, typer.Option()] = False,
     force: Annotated[bool, typer.Option()] = False,
+    scheduled: Annotated[bool, typer.Option()] = False,
 ) -> None:
-    emit(next_day_agenda(Settings(), dry_run, force))
+    emit(next_day_agenda(Settings(), dry_run, force, scheduled=scheduled))
 
 
 @app.command("agenda-retry")

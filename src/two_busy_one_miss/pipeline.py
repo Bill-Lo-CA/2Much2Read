@@ -95,10 +95,13 @@ def agenda(settings: Settings, day: date, dry_run: bool) -> dict[str, object]:
     return {"status": "ok", "sent": 1, "discord_message_ids": message_ids, "events": len(events)}
 
 
-def next_day_agenda(settings: Settings, dry_run: bool, force: bool) -> dict[str, object]:
+def next_day_agenda(settings: Settings, dry_run: bool, force: bool, *, scheduled: bool = False) -> dict[str, object]:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
-    day = datetime.now(timezone).date() + timedelta(days=1)
+    now = datetime.now(timezone)
+    day = now.date() + timedelta(days=1)
+    if scheduled and now < datetime.combine(now.date(), time(21), timezone):
+        return {"status": "ok", "day": day.isoformat(), "sent": 0, "skipped": 1, "reason": "before_schedule"}
     start = datetime.combine(day, time.min, timezone)
     end = datetime.combine(day + timedelta(days=1), time.min, timezone)
     events = list_events_between(settings, config, start, end)

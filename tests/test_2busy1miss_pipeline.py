@@ -70,14 +70,45 @@ def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkey
     monkeypatch.setattr(pipeline, "list_events_between", list_events)
     monkeypatch.setattr(pipeline, "deliver", deliver)
 
-    assert pipeline.next_day_agenda(settings, dry_run=False, force=False)["day"] == "2026-03-09"
-    assert pipeline.next_day_agenda(settings, dry_run=False, force=False)["skipped"] == 1
-    assert pipeline.next_day_agenda(settings, dry_run=False, force=True)["sent"] == 1
+    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True)["day"] == "2026-03-09"
+    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True)["skipped"] == 1
+    assert pipeline.next_day_agenda(settings, dry_run=False, force=True, scheduled=True)["sent"] == 1
     assert deliveries == [render_agenda(date(2026, 3, 9), [])] * 2
     assert windows[0] == (
         datetime(2026, 3, 9, 0, tzinfo=timezone),
         datetime(2026, 3, 10, 0, tzinfo=timezone),
     )
+
+
+def test_scheduled_next_day_agenda_before_2100_is_noop(tmp_path: Path, monkeypatch) -> None:
+    timezone = ZoneInfo("America/Montreal")
+    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    settings = Settings(database_path=tmp_path / "reminders.sqlite3", lock_path=tmp_path / "reminders.lock")
+    calendar = MagicMock()
+    database = MagicMock()
+    deliver = MagicMock()
+
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return cls(2026, 3, 8, 8, tzinfo=tz)
+
+    monkeypatch.setattr(pipeline, "datetime", FixedDatetime)
+    monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
+    monkeypatch.setattr(pipeline, "list_events_between", calendar)
+    monkeypatch.setattr(pipeline, "Database", database)
+    monkeypatch.setattr(pipeline, "deliver", deliver)
+
+    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True) == {
+        "status": "ok",
+        "day": "2026-03-09",
+        "sent": 0,
+        "skipped": 1,
+        "reason": "before_schedule",
+    }
+    calendar.assert_not_called()
+    database.assert_not_called()
+    deliver.assert_not_called()
 
 
 def test_next_day_agenda_dry_run_skips_database_and_discord(tmp_path: Path, monkeypatch) -> None:
