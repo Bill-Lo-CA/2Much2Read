@@ -19,11 +19,12 @@ def _split_text(text: str, limit: int) -> list[str]:
     return chunks
 
 
-def _fenced_block(text: str) -> tuple[str, str] | None:
+def _fenced_block(text: str) -> tuple[str, str, str] | None:
     opener, separator, body = text.partition("\n")
-    if not separator or not opener.startswith("```") or not body.endswith("\n```"):
+    closing = body.rfind("\n```")
+    if not separator or not opener.startswith("```") or closing < 0:
         return None
-    return opener, body.removesuffix("\n```")
+    return opener, body[:closing], body[closing + len("\n```") :].lstrip()
 
 
 def chunk_text(text: str, limit: int = 2000) -> list[str]:
@@ -34,10 +35,14 @@ def chunk_text(text: str, limit: int = 2000) -> list[str]:
         chunks = _split_text(text, limit - 12)
         total = len(chunks)
         return [f"({index}/{total}) {chunk}" for index, chunk in enumerate(chunks, 1)]
-    opener, body = fenced
+    opener, body, footer = fenced
     chunks = _split_text(body, limit - len(opener) - len("\n```") - 12)
-    total = len(chunks)
-    return [f"({index}/{total}) {opener}\n{chunk}\n```" for index, chunk in enumerate(chunks, 1)]
+    footer_chunks = _split_text(footer, limit - 12) if footer else []
+    total = len(chunks) + len(footer_chunks)
+    return [
+        *(f"({index}/{total}) {opener}\n{chunk}\n```" for index, chunk in enumerate(chunks, 1)),
+        *(f"({index}/{total}) {chunk}" for index, chunk in enumerate(footer_chunks, len(chunks) + 1)),
+    ]
 
 
 def deliver(

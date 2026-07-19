@@ -63,6 +63,29 @@ def test_render_agenda_lists_events_and_disables_mentions() -> None:
     assert "@here" not in rendered
 
 
+def test_render_calendar_urls_outside_markdown_tables() -> None:
+    timezone = ZoneInfo("America/Montreal")
+    start = datetime(2026, 7, 9, 7, 0, tzinfo=timezone)
+    event = CalendarEvent(
+        calendar_id="primary",
+        calendar_name="Main https://calendar.example/view",
+        event_id="event-1",
+        instance_id="event-1",
+        title="Review https://docs.example/brief",
+        location="Meet https://meet.example/join.",
+        start=start,
+        end=start + timedelta(hours=1),
+        all_day=False,
+    )
+    links = "<https://docs.example/brief>\n<https://calendar.example/view>\n<https://meet.example/join>"
+
+    for rendered in (
+        render_agenda(date(2026, 7, 9), [event]),
+        render_reminder(ReminderCandidate(event, "default-5m", "5m", start)),
+    ):
+        assert rendered.endswith(f"```\n{links}")
+
+
 def test_render_agenda_marks_events_crossing_the_day_boundary() -> None:
     timezone = ZoneInfo("America/Montreal")
     day = date(2026, 7, 9)

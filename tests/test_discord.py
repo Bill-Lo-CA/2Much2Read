@@ -18,6 +18,21 @@ def test_chunk_text_balances_long_fenced_blocks() -> None:
     )
 
 
+def test_chunk_text_keeps_fences_when_links_follow() -> None:
+    body = "\n".join(f"09:{index:02d} | Event {index}" for index in range(20))
+    content = f"```text\n{body}\n```\n<https://calendar.example/event>"
+
+    chunks = chunk_text(content, limit=80)
+    fenced_chunks = chunks[:-1]
+
+    assert len(chunks) > 2
+    assert all(len(chunk) <= 80 for chunk in chunks)
+    assert all(chunk.startswith(f"({index}/{len(chunks)}) ```text\n") for index, chunk in enumerate(fenced_chunks, 1))
+    assert all(chunk.endswith("\n```") and chunk.count("```") == 2 for chunk in fenced_chunks)
+    assert chunks[-1].endswith("<https://calendar.example/event>")
+    assert "\n".join("\n".join(chunk.splitlines()[1:-1]) for chunk in fenced_chunks) == body
+
+
 @respx.mock
 def test_disables_mentions() -> None:
     route = respx.post("https://discord.example/webhook").mock(return_value=httpx.Response(200, json={"id": "123"}))
