@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime, time, timedelta
 
 from .google_calendar import CalendarEvent
 from .rules import ReminderCandidate
+
+URL = re.compile(r"https?://[^\s<>()>]+")
 
 
 def _when(value: datetime) -> str:
@@ -25,11 +28,21 @@ def render_reminder(candidate: ReminderCandidate) -> str:
         lines.append(f"{'':<11} | Calendar: {_agenda_cell(event.calendar_name)}")
     if event.location:
         lines.append(f"{'':<11} | Location: {_agenda_cell(event.location)}")
-    return "\n".join([*lines, "```"])
+    return _with_links(lines, [event])
 
 
 def _agenda_cell(value: str) -> str:
     return " ".join(value.replace("@", "@\u200b").replace("`", "ˋ").split())
+
+
+def _with_links(lines: list[str], events: list[CalendarEvent]) -> str:
+    links = dict.fromkeys(
+        url.rstrip(".,;:!?")
+        for event in events
+        for value in (event.title, event.calendar_name or "", event.location)
+        for url in URL.findall(value)
+    )
+    return "\n".join([*lines, "```", *(f"<{url}>" for url in links)])
 
 
 def _agenda_when(day: date, event: CalendarEvent) -> str:
@@ -52,7 +65,7 @@ def render_agenda(day: date, events: list[CalendarEvent]) -> str:
         "------------+-------------------------------------------",
     ]
     if not events:
-        return "\n".join([*lines, f"{'':<11} | No events", "```"])
+        return _with_links([*lines, f"{'':<11} | No events"], events)
     for event in sorted(events, key=lambda item: (item.start, item.calendar_id, item.instance_id)):
         when = _agenda_when(day, event)
         summary = _agenda_cell(event.title)
@@ -61,4 +74,4 @@ def render_agenda(day: date, events: list[CalendarEvent]) -> str:
         lines.append(f"{when:<11} | {summary}")
         if event.location:
             lines.append(f"{'':<11} | {_agenda_cell(event.location)}")
-    return "\n".join([*lines, "```"])
+    return _with_links(lines, events)
