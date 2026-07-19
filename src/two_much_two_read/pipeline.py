@@ -81,6 +81,9 @@ def run_pipeline(
     delivered = 0
     try:
         with ProcessLock(settings.lock_path):
+            database = Database(Path(":memory:") if dry_run else settings.database_path)
+            if not dry_run:
+                run_id = database.start_run("newsletter_digest")
             creds = credentials(
                 settings.gmail_credentials_path,
                 settings.gmail_token_path,
@@ -95,9 +98,6 @@ def run_pipeline(
                 settings.ollama_num_ctx,
                 settings.ollama_keep_alive,
             )
-            database = Database(Path(":memory:") if dry_run else settings.database_path)
-            if not dry_run:
-                run_id = database.start_run("newsletter_digest")
             for source in sources:
                 processed_label = "NewsletterBot/Processed"
                 failed_label = "NewsletterBot/Failed"

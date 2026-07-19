@@ -68,6 +68,31 @@ def test_empty_news_day_records_no_content_run(tmp_path: Path, monkeypatch: pyte
     database.close()
 
 
+def test_credentials_failure_records_a_failed_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "credentials",
+        lambda *args: (_ for _ in ()).throw(ValueError("AUTH_REAUTH_REQUIRED: run '2much2read auth gmail'")),
+    )
+
+    with pytest.raises(ValueError, match="AUTH_REAUTH_REQUIRED"):
+        run_pipeline(settings, no_deliver=True)
+
+    database = Database(settings.database_path)
+    row = database.connection.execute(
+        "SELECT run_type,status,discovered_count,processed_count,failed_count,delivered_digest_count,error_summary FROM runs"
+    ).fetchone()
+    assert tuple(row) == ("newsletter_digest", "failed", 0, 0, 0, 0, "ValueError")
+    database.close()
+
+
 def test_deliver_digest_only_sends_selected_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     database = Database(tmp_path / "test.sqlite3")
     first_id = database.save_digest("daily:1", "start", "end", "UTC", "old digest")
