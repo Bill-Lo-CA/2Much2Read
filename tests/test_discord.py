@@ -1,7 +1,7 @@
 import httpx
 import respx
 
-from common.discord import chunk_text, deliver
+from two_read_runtime.discord import chunk_text, deliver
 
 
 def test_chunk_text_balances_long_fenced_blocks() -> None:

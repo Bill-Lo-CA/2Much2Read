@@ -6,8 +6,8 @@ from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 
-from common.discord import deliver
-from common.locking import ProcessLock
+from two_read_runtime.discord import deliver
+from two_read_runtime.locking import ProcessLock
 
 from .config import RemindersConfig, Settings, load_reminders
 from .google_calendar import CalendarClient, CalendarEvent, credentials

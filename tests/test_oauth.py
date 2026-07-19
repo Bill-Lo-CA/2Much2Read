@@ -4,9 +4,9 @@ from unittest.mock import MagicMock
 import pytest
 from google.auth.exceptions import RefreshError
 
-from common import oauth
 from two_busy_one_miss import google_calendar
 from two_much_two_read import gmail
+from two_read_runtime import oauth
 
 
 def test_noninteractive_invalid_token_requires_explicit_reauthorization(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

@@ -9,8 +9,8 @@ from email.utils import parseaddr
 import httpx
 from pydantic import BaseModel, Field, model_validator
 
-from common.locking import ProcessLock
-from common.oauth import token_status
+from two_read_runtime.locking import ProcessLock
+from two_read_runtime.oauth import token_status
 
 from .config import (
     ExcludedSubscription,

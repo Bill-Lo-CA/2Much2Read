@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from common.locking import ProcessLock
+from two_read_runtime.locking import ProcessLock
 
 
 def test_lock_contends_but_stale_file_does_not_block(tmp_path: Path) -> None:
@@ -25,7 +25,7 @@ def test_lock_is_released_after_holder_exits_without_cleanup(tmp_path: Path) -> 
     code = (
         "import os, sys\n"
         "from pathlib import Path\n"
-        "from common.locking import ProcessLock\n"
+        "from two_read_runtime.locking import ProcessLock\n"
         "ProcessLock(Path(sys.argv[1])).__enter__()\n"
         "os._exit(0)\n"
     )

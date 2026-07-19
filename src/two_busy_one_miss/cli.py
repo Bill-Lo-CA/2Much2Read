@@ -9,9 +9,9 @@ from typing import Annotated
 import typer
 from pydantic import BaseModel
 
-from common.discord import deliver
-from common.locking import ProcessLock
-from common.oauth import token_status
+from two_read_runtime.discord import deliver
+from two_read_runtime.locking import ProcessLock
+from two_read_runtime.oauth import token_status
 
 from .config import Settings, load_reminders
 from .google_calendar import credentials

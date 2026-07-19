@@ -181,6 +181,25 @@ class Database:
         ).fetchone()
         return cast(sqlite3.Row | None, row)
 
+    def start_run(self, run_type: str) -> int:
+        cursor = self.connection.execute(
+            "INSERT INTO runs(run_type,started_at,status) VALUES(?,?,?)",
+            (run_type, datetime.now(UTC).isoformat(), "running"),
+        )
+        self.connection.commit()
+        assert cursor.lastrowid is not None
+        return int(cursor.lastrowid)
+
+    def finish_run(
+        self, run_id: int, status: str, discovered: int, processed: int, failed: int, delivered: int, error_summary: str | None
+    ) -> None:
+        self.connection.execute(
+            """UPDATE runs SET finished_at=?,status=?,discovered_count=?,processed_count=?,failed_count=?,
+            delivered_digest_count=?,error_summary=? WHERE id=?""",
+            (datetime.now(UTC).isoformat(), status, discovered, processed, failed, delivered, error_summary, run_id),
+        )
+        self.connection.commit()
+
     def counts(self) -> dict[str, int]:
         return {
             table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])

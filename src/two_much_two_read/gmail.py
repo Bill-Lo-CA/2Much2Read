@@ -8,7 +8,7 @@ from typing import Any
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
 
-from common.oauth import load_credentials
+from two_read_runtime.oauth import load_credentials
 
 from .config import Source
 
