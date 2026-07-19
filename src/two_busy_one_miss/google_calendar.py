@@ -53,13 +53,7 @@ def _event_links(item: dict[str, Any]) -> tuple[str, ...]:
     conference = item.get("conferenceData") or {}
     values = [item.get("htmlLink"), item.get("hangoutLink"), item.get("description")]
     values.extend(entry.get("uri") for entry in conference.get("entryPoints", []))
-    return tuple(
-        dict.fromkeys(
-            url.rstrip(".,;:!?")
-            for value in values
-            for url in URL.findall(str(value or ""))
-        )
-    )
+    return tuple(dict.fromkeys(url.rstrip(".,;:!?") for value in values for url in URL.findall(str(value or ""))))
 
 
 class CalendarClient:
