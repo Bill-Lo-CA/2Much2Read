@@ -33,6 +33,15 @@ def test_chunk_text_keeps_fences_when_links_follow() -> None:
     assert "\n".join("\n".join(chunk.splitlines()[1:-1]) for chunk in fenced_chunks) == body
 
 
+def test_chunk_text_keeps_long_link_footers_outside_fences() -> None:
+    links = "\n".join(f"<https://calendar.example/event/{index}>" for index in range(100))
+    chunks = chunk_text(f"```text\n09:00 | Event\n```\n{links}")
+
+    assert all(len(chunk) <= 2000 for chunk in chunks)
+    assert chunks[0].endswith("\n```")
+    assert "\n".join(chunk.removeprefix(f"({index}/{len(chunks)}) ") for index, chunk in enumerate(chunks[1:], 2)) == links
+
+
 @respx.mock
 def test_disables_mentions() -> None:
     route = respx.post("https://discord.example/webhook").mock(return_value=httpx.Response(200, json={"id": "123"}))
