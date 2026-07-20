@@ -4,6 +4,7 @@ import os
 import re
 import stat
 import tempfile
+from contextlib import suppress
 from pathlib import Path
 from typing import Any
 
@@ -138,20 +139,69 @@ def load_excluded_subscriptions(path: Path) -> ExcludedSubscriptions:
     return ExcludedSubscriptions.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
 
 
-def replace_file(path: Path, content: str, mode: int) -> None:
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
-        handle.write(content)
-        temporary = Path(handle.name)
+def _temporary_file(path: Path, content: bytes, mode: int) -> Path:
+    descriptor, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temporary = Path(temporary_name)
     try:
-        os.chmod(temporary, mode)
+        os.fchmod(descriptor, mode)
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+    except Exception:
+        with suppress(OSError):
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+        raise
+    return temporary
+
+
+def replace_file(path: Path, content: str, mode: int) -> None:
+    temporary = _temporary_file(path, content.encode(), mode)
+    try:
         os.replace(temporary, path)
     finally:
         temporary.unlink(missing_ok=True)
 
 
-def append_sources(path: Path, additions: list[Source]) -> None:
+def replace_files(replacements: list[tuple[Path, str, int]]) -> None:
+    originals = {
+        path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) if path.exists() else None for path, _, _ in replacements
+    }
+    staged: list[tuple[Path, Path]] = []
+    try:
+        for path, content, mode in replacements:
+            staged.append((path, _temporary_file(path, content.encode(), mode)))
+    except Exception:
+        for _, temporary in staged:
+            temporary.unlink(missing_ok=True)
+        raise
+    replaced: list[Path] = []
+    try:
+        for path, temporary in staged:
+            os.replace(temporary, path)
+            replaced.append(path)
+    except Exception:
+        for path in reversed(replaced):
+            original = originals[path]
+            if original is None:
+                path.unlink(missing_ok=True)
+                continue
+            original_content, mode = original
+            temporary = _temporary_file(path, original_content, mode)
+            try:
+                os.replace(temporary, path)
+            finally:
+                temporary.unlink(missing_ok=True)
+        raise
+    finally:
+        for _, temporary in staged:
+            temporary.unlink(missing_ok=True)
+
+
+def _appended_sources_content(path: Path, additions: list[Source]) -> tuple[str, int] | None:
     if not additions:
-        return
+        return None
     original = path.read_text(encoding="utf-8")
     if not re.search(r"(?m)^sources:\s*$", original):
         raise ValueError("sources configuration must use a top-level block-style 'sources:' list")
@@ -165,12 +215,17 @@ def append_sources(path: Path, additions: list[Source]) -> None:
     ]
     updated = original.rstrip() + "\n" + "\n".join(rendered) + "\n"
     Sources.model_validate(yaml.safe_load(updated))
-    replace_file(path, updated, stat.S_IMODE(path.stat().st_mode))
+    return updated, stat.S_IMODE(path.stat().st_mode)
 
 
-def append_excluded_subscriptions(path: Path, additions: list[ExcludedSubscription]) -> None:
+def append_sources(path: Path, additions: list[Source]) -> None:
+    if update := _appended_sources_content(path, additions):
+        replace_file(path, *update)
+
+
+def _appended_excluded_subscriptions_content(path: Path, additions: list[ExcludedSubscription]) -> str | None:
     if not additions:
-        return
+        return None
     existing = load_excluded_subscriptions(path).excluded_subscriptions
     by_key = {item.key: item for item in existing}
     by_key.update((item.key, item) for item in additions)
@@ -179,4 +234,21 @@ def append_excluded_subscriptions(path: Path, additions: list[ExcludedSubscripti
         allow_unicode=True,
         sort_keys=False,
     )
-    replace_file(path, content, 0o600)
+    return content
+
+
+def append_excluded_subscriptions(path: Path, additions: list[ExcludedSubscription]) -> None:
+    if content := _appended_excluded_subscriptions_content(path, additions):
+        replace_file(path, content, 0o600)
+
+
+def update_subscription_files(
+    sources_path: Path, additions: list[Source], excluded_path: Path, excluded_additions: list[ExcludedSubscription]
+) -> None:
+    replacements: list[tuple[Path, str, int]] = []
+    if source_update := _appended_sources_content(sources_path, additions):
+        replacements.append((sources_path, *source_update))
+    if excluded_update := _appended_excluded_subscriptions_content(excluded_path, excluded_additions):
+        replacements.append((excluded_path, excluded_update, 0o600))
+    if replacements:
+        replace_files(replacements)

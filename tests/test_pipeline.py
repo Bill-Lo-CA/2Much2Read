@@ -1,3 +1,4 @@
+import sqlite3
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -129,9 +130,94 @@ def test_retry_delivery_holds_process_lock(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr(pipeline, "deliver", fake_deliver)
 
-    assert pipeline.retry_delivery(settings) == 1
+    assert pipeline.retry_delivery(settings) == {"delivered": 1, "failed": 0}
     process_lock.assert_called_once_with(settings.lock_path)
     database.finish_delivery.assert_called_once_with(1, ["discord-id"])
+
+
+def test_retry_delivery_continues_after_a_failed_digest(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
+    database = MagicMock()
+    database.pending_digests.return_value = [
+        {"id": 1, "rendered_content": "bad", "discord_message_ids_json": None},
+        {"id": 2, "rendered_content": "good", "discord_message_ids_json": None},
+    ]
+
+    def fake_deliver(*args: object) -> list[str]:
+        if args[1] == "bad":
+            raise RuntimeError("delivery failed")
+        return ["discord-id"]
+
+    monkeypatch.setattr(pipeline, "deliver", fake_deliver)
+
+    assert pipeline.retry_delivery(settings, database) == {"delivered": 1, "failed": 1}
+    database.fail_delivery.assert_called_once_with(1)
+    database.finish_delivery.assert_called_once_with(2, ["discord-id"])
+
+
+def test_retry_delivery_stops_when_recording_a_failure_hits_the_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
+    database = MagicMock()
+    database.pending_digests.return_value = [
+        {"id": 1, "rendered_content": "bad", "discord_message_ids_json": None},
+        {"id": 2, "rendered_content": "good", "discord_message_ids_json": None},
+    ]
+    database.fail_delivery.side_effect = sqlite3.OperationalError("database unavailable")
+    monkeypatch.setattr(pipeline, "deliver", lambda *args: (_ for _ in ()).throw(RuntimeError("delivery failed")))
+
+    with pytest.raises(sqlite3.OperationalError, match="database unavailable"):
+        pipeline.retry_delivery(settings, database)
+
+    assert database.finish_delivery.call_count == 0
+
+
+def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n"
+        "  - id: first\n    name: First\n    gmail_query: from:first@example.com\n"
+        "  - id: second\n    name: Second\n    gmail_query: from:second@example.com\n",
+        encoding="utf-8",
+    )
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    list_calls: list[int] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+        def list_messages(self, query: str, limit: int) -> list[str]:
+            list_calls.append(limit)
+            return ["first-1", "first-2"] if "first@example.com" in query else ["second-1"]
+
+        def get_message(self, message_id: str) -> dict[str, object]:
+            return {"internalDate": "0", "threadId": message_id, "payload": {"body": message_id}}
+
+        def add_labels(self, message_id: str, labels: list[str]) -> None:
+            pass
+
+    class FakeOllamaClient:
+        def __init__(self, *args: object) -> None:
+            pass
+
+        def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
+            return EmailExtraction(
+                source_id=source_id, newsletter_title="Test", newsletter_date=None, overview_zh_tw="摘要", items=[]
+            )
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda credentials: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "OllamaClient", FakeOllamaClient)
+    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+
+    result = run_pipeline(settings, max_messages=3, no_deliver=True)
+
+    assert list_calls == [3, 1]
+    assert result["processed"] == 3
 
 
 def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

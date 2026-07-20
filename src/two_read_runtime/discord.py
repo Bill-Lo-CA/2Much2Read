@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Callable
 
 import httpx
+
+
+def parse_message_ids(value: object) -> list[str]:
+    if value is None:
+        return []
+    try:
+        parsed = json.loads(str(value))
+    except json.JSONDecodeError as error:
+        raise ValueError("DISCORD_MESSAGE_IDS_CORRUPT: expected a JSON array of strings") from error
+    if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
+        raise ValueError("DISCORD_MESSAGE_IDS_CORRUPT: expected a JSON array of strings")
+    return parsed
 
 
 def _split_text(text: str, limit: int) -> list[str]:

@@ -2,7 +2,7 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
-from google.auth.exceptions import RefreshError
+from google.auth.exceptions import RefreshError, TransportError
 
 from two_busy_one_miss import google_calendar
 from two_much_two_read import gmail
@@ -41,6 +41,24 @@ def test_refresh_failure_requires_reauthorization_without_overwriting_token(
 
     with pytest.raises(ValueError, match="AUTH_REAUTH_REQUIRED.*2busy1miss auth calendar"):
         google_calendar.credentials(credentials_path, token_path)
+
+    assert token_path.read_text(encoding="utf-8") == "original"
+
+
+def test_refresh_transport_failure_is_retryable_without_overwriting_token(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    credentials_path = tmp_path / "client.json"
+    token_path = tmp_path / "token.json"
+    credentials_path.write_text("{}", encoding="utf-8")
+    token_path.write_text("original", encoding="utf-8")
+    credentials = MagicMock(expired=True, refresh_token="refresh", valid=False)
+    credentials.has_scopes.return_value = True
+    credentials.refresh.side_effect = TransportError("offline")
+    monkeypatch.setattr(oauth.Credentials, "from_authorized_user_file", MagicMock(return_value=credentials))
+
+    with pytest.raises(ValueError, match="AUTH_REFRESH_UNAVAILABLE"):
+        gmail.credentials(credentials_path, token_path)
 
     assert token_path.read_text(encoding="utf-8") == "original"
 

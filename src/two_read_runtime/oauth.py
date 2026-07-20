@@ -4,7 +4,7 @@ import os
 import tempfile
 from pathlib import Path
 
-from google.auth.exceptions import RefreshError
+from google.auth.exceptions import RefreshError, TransportError
 from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-untyped]
@@ -60,7 +60,9 @@ def load_credentials(
     if credentials and credentials.expired and credentials.refresh_token:
         try:
             credentials.refresh(Request())  # type: ignore[no-untyped-call]
-        except (RefreshError, OSError, ValueError):
+        except (TransportError, OSError) as error:
+            raise ValueError("AUTH_REFRESH_UNAVAILABLE: retry later") from error
+        except (RefreshError, ValueError):
             credentials = None
         else:
             _write_token(token_path, credentials)

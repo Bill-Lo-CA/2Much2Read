@@ -51,10 +51,16 @@ def test_retry_delivery_holds_process_lock(tmp_path: Path, monkeypatch) -> None:
     database.due_attempts.return_value = [
         {
             "id": 1,
-            "content": "content",
+            "content": "bad",
             "event_start_at": "2099-01-01T10:00:00+00:00",
             "discord_message_ids_json": None,
-        }
+        },
+        {
+            "id": 2,
+            "content": "good",
+            "event_start_at": "2099-01-01T10:00:00+00:00",
+            "discord_message_ids_json": None,
+        },
     ]
     lock = MagicMock()
     process_lock = MagicMock(return_value=lock)
@@ -64,13 +70,16 @@ def test_retry_delivery_holds_process_lock(tmp_path: Path, monkeypatch) -> None:
 
     def fake_deliver(*args: object) -> list[str]:
         assert lock.__enter__.called
+        if args[1] == "bad":
+            raise RuntimeError("delivery failed")
         return ["discord-id"]
 
     monkeypatch.setattr(pipeline, "deliver", fake_deliver)
 
-    assert pipeline.retry_delivery(settings) == {"status": "ok", "delivered": 1, "expired": 0}
+    assert pipeline.retry_delivery(settings) == {"status": "ok", "delivered": 1, "failed": 1, "expired": 0}
     process_lock.assert_called_once_with(settings.lock_path)
-    database.finish_delivery.assert_called_once_with(1, ["discord-id"])
+    database.fail_delivery.assert_called_once_with(1)
+    database.finish_delivery.assert_called_once_with(2, ["discord-id"])
 
 
 def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkeypatch) -> None:
@@ -247,7 +256,7 @@ def test_retry_agenda_delivers_only_the_current_destination(tmp_path: Path, monk
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["discord-id"])
 
-    assert pipeline.retry_agenda(settings, day) == {"status": "ok", "day": "2026-07-09", "delivered": 1}
+    assert pipeline.retry_agenda(settings, day) == {"status": "ok", "day": "2026-07-09", "delivered": 1, "failed": 0}
 
 
 def test_run_reads_scheduled_jobs_without_calendar_and_expires_started_events(tmp_path: Path, monkeypatch) -> None:
@@ -279,7 +288,7 @@ def test_run_reads_scheduled_jobs_without_calendar_and_expires_started_events(tm
     monkeypatch.setattr(pipeline, "list_events_between", lambda *args: (_ for _ in ()).throw(AssertionError("no Calendar read")))
     monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: delivered.append(str(args[1])) or ["1"])
 
-    assert pipeline.run(settings, dry_run=False) == {"status": "ok", "sent": 1, "expired": 1}
+    assert pipeline.run(settings, dry_run=False) == {"status": "ok", "sent": 1, "failed": 0, "expired": 1}
     assert delivered == ["future"]
     database = Database(settings.database_path)
     assert database.attempt_state(future_id) == "delivered"

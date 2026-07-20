@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import hashlib
-import os
 import re
 from collections.abc import Callable
 from email.utils import parseaddr
@@ -11,17 +10,17 @@ from pydantic import BaseModel, Field, model_validator
 
 from two_read_runtime.locking import ProcessLock
 from two_read_runtime.oauth import token_status
+from two_read_runtime.paths import directory_is_creatable
 
 from .config import (
     ExcludedSubscription,
     GmailFilter,
     Settings,
     Source,
-    append_excluded_subscriptions,
-    append_sources,
     excluded_subscriptions_path,
     load_excluded_subscriptions,
     load_sources,
+    update_subscription_files,
 )
 from .gmail import FilterStatus, GmailClient, credentials, display_id
 from .mime import extract_gmail_payload
@@ -158,6 +157,11 @@ def message_headers(message: dict[str, object]) -> dict[str, str]:
     payload = message.get("payload", {})
     headers = payload.get("headers", []) if isinstance(payload, dict) else []
     return {str(item.get("name", "")).lower(): str(item.get("value", "")) for item in headers if isinstance(item, dict)}
+
+
+def _model_name(value: str) -> str:
+    value = value.strip()
+    return value if ":" in value.rsplit("/", 1)[-1] else f"{value}:latest"
 
 
 def normalized_name(value: str) -> str:
@@ -442,8 +446,9 @@ def sync_subscriptions(settings: Settings, limit: int, apply: bool, choose_categ
                 }
             )
         )
-    append_excluded_subscriptions(excluded_subscriptions_path(settings.sources_config_path), excluded)
-    append_sources(settings.sources_config_path, selected)
+    update_subscription_files(
+        settings.sources_config_path, selected, excluded_subscriptions_path(settings.sources_config_path), excluded
+    )
     return SubscriptionSyncResult(status="partial" if ambiguous else "applied", sources=selected, ambiguous=ambiguous)
 
 
@@ -491,12 +496,14 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
         settings.gmail_token_path,
         ("https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.settings.basic"),
     )
-    checks["database_directory"] = "ok" if os.access(settings.database_path.parent, os.W_OK) else "not_writable"
+    checks["database_directory"] = "ok" if directory_is_creatable(settings.database_path.parent) else "not_writable"
     try:
         response = httpx.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags", timeout=5)
         response.raise_for_status()
-        models = [model.get("name") for model in response.json().get("models", [])]
-        checks["ollama"] = "ok" if settings.ollama_model in models else "model_missing"
+        models = [model.get("name") for model in response.json().get("models", []) if isinstance(model, dict)]
+        checks["ollama"] = (
+            "ok" if _model_name(settings.ollama_model) in {_model_name(str(model)) for model in models} else "model_missing"
+        )
     except Exception:
         checks["ollama"] = "unreachable"
     checks["discord"] = "configured" if settings.discord_webhook_url else "missing"
