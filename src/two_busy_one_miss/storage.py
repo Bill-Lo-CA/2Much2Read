@@ -34,7 +34,6 @@ CREATE TABLE IF NOT EXISTS reminder_attempts(
 
 SCHEMA = (
     """
-CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS events(
   id INTEGER PRIMARY KEY,
   calendar_id TEXT NOT NULL,
@@ -67,7 +66,6 @@ CREATE TABLE IF NOT EXISTS agenda_deliveries(
   updated_at TEXT NOT NULL,
   UNIQUE(agenda_day, timezone, destination_hash)
 );
-INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(1, datetime('now'));
 """
 )
 
@@ -85,24 +83,6 @@ class Database:
             self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.execute("PRAGMA foreign_keys=ON")
             self.connection.executescript(SCHEMA)
-            self._migrate_reminder_attempts()
-
-    def _migrate_reminder_attempts(self) -> None:
-        row = self.connection.execute("SELECT sql FROM sqlite_master WHERE type='table' AND name='reminder_attempts'").fetchone()
-        if row is None or "'expired'" in str(row["sql"]):
-            return
-        with self.connection:
-            self.connection.execute("ALTER TABLE reminder_attempts RENAME TO reminder_attempts_legacy")
-            self.connection.executescript(REMINDER_ATTEMPTS_SCHEMA)
-            self.connection.execute(
-                """INSERT INTO reminder_attempts
-                (id,event_row_id,calendar_id,event_id,instance_id,rule_id,reminder_at,content,state,attempt_count,
-                 discord_message_ids_json,delivered_at,last_error_code,created_at,updated_at)
-                SELECT id,event_row_id,calendar_id,event_id,instance_id,rule_id,reminder_at,content,state,attempt_count,
-                       discord_message_ids_json,delivered_at,last_error_code,created_at,updated_at
-                FROM reminder_attempts_legacy"""
-            )
-            self.connection.execute("DROP TABLE reminder_attempts_legacy")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

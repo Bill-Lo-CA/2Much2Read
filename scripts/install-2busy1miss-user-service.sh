@@ -32,35 +32,31 @@ if [ -n "$calendar_client_secret" ] && [ ! -f "$calendar_client_secret" ]; then
 fi
 
 exe="$repo_dir/.venv/bin/2busy1miss"
-python="$repo_dir/.venv/bin/python"
-[ -x "$exe" ] && [ -x "$python" ] || {
+[ -x "$exe" ] || {
   printf '%s\n' "2busy1miss executable not found; run uv sync first" >&2
   exit 1
 }
 
-systemctl --user disable --now 2busy1miss.timer 2busy1miss-agenda.timer 2>/dev/null || true
-for service in 2busy1miss.service 2busy1miss-agenda.service; do
+systemctl --user disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer 2>/dev/null || true
+for service in 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service; do
   if systemctl --user is-active --quiet "$service"; then
-    printf '%s\n' "stop $service before migrating its files" >&2
+    printf '%s\n' "stop $service before installing" >&2
     exit 1
   fi
 done
-if [ -n "$calendar_client_secret" ]; then
-  "$python" -m two_much_two_read.migrate calendar \
-    --legacy-env "$HOME/.config/2busy1miss/2busy1miss.env" \
-    --calendar-client-secret "$calendar_client_secret"
-else
-  "$python" -m two_much_two_read.migrate calendar --legacy-env "$HOME/.config/2busy1miss/2busy1miss.env"
-fi
 
-config_dir="$HOME/.config/2much2read"
-data_dir="$HOME/.local/share/2much2read"
+config_dir="$HOME/.config/2much2read-runtime"
+data_dir="$HOME/.local/share/2much2read-runtime"
 systemd_dir="$HOME/.config/systemd/user"
 env_file="$config_dir/.2busy1miss.env"
 reminders_file="$config_dir/reminders.yaml"
 
 mkdir -p "$config_dir" "$data_dir" "$systemd_dir"
 chmod 700 "$config_dir" "$data_dir"
+if [ -n "$calendar_client_secret" ] && [ ! -f "$config_dir/calendar-client-secret.json" ]; then
+  cp "$calendar_client_secret" "$config_dir/calendar-client-secret.json"
+  chmod 600 "$config_dir/calendar-client-secret.json"
+fi
 
 if [ ! -f "$env_file" ]; then
   cp config/2busy1miss.env.example "$env_file"
@@ -72,10 +68,10 @@ if [ ! -f "$reminders_file" ]; then
   chmod 600 "$reminders_file"
 fi
 
-sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss.service > "$systemd_dir/2busy1miss.service"
-cp deploy/systemd/2busy1miss.timer "$systemd_dir/2busy1miss.timer"
-sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss-agenda.service > "$systemd_dir/2busy1miss-agenda.service"
-cp deploy/systemd/2busy1miss-agenda.timer "$systemd_dir/2busy1miss-agenda.timer"
+sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss-runtime.service > "$systemd_dir/2busy1miss-runtime.service"
+cp deploy/systemd/2busy1miss-runtime.timer "$systemd_dir/2busy1miss-runtime.timer"
+sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss-runtime-agenda.service > "$systemd_dir/2busy1miss-runtime-agenda.service"
+cp deploy/systemd/2busy1miss-runtime-agenda.timer "$systemd_dir/2busy1miss-runtime-agenda.timer"
 
 systemctl --user daemon-reload
 
@@ -86,6 +82,6 @@ printf '%s\n' \
   "Check setup: cd $repo_dir && uv run 2busy1miss doctor" \
   "Dry run: cd $repo_dir && uv run 2busy1miss run --dry-run" \
   "Agenda dry run: cd $repo_dir && uv run 2busy1miss agenda-next-day --dry-run" \
-  "Enable reminders when ready: systemctl --user enable --now 2busy1miss.timer" \
-  "Enable agenda when ready: systemctl --user enable --now 2busy1miss-agenda.timer" \
-  "Logs: journalctl --user -u 2busy1miss.service"
+  "Enable reminders when ready: systemctl --user enable --now 2busy1miss-runtime.timer" \
+  "Enable agenda when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer" \
+  "Logs: journalctl --user -u 2busy1miss-runtime.service"

@@ -1,4 +1,3 @@
-import sqlite3
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -76,34 +75,6 @@ def test_resync_updates_pending_attempt_content(tmp_path: Path) -> None:
     row = database.pending_attempts()[0]
     assert row["content"] == "new content"
     assert row["discord_message_ids_json"] is None
-    database.close()
-
-
-def test_migrates_legacy_reminder_attempt_states(tmp_path: Path) -> None:
-    path = tmp_path / "legacy.sqlite3"
-    connection = sqlite3.connect(path)
-    connection.executescript(
-        """
-CREATE TABLE events(id INTEGER PRIMARY KEY);
-INSERT INTO events(id) VALUES(1);
-CREATE TABLE reminder_attempts(
-  id INTEGER PRIMARY KEY, event_row_id INTEGER NOT NULL, calendar_id TEXT NOT NULL, event_id TEXT NOT NULL,
-  instance_id TEXT NOT NULL, rule_id TEXT NOT NULL, reminder_at TEXT NOT NULL, content TEXT NOT NULL,
-  state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed')), attempt_count INTEGER NOT NULL DEFAULT 0,
-  discord_message_ids_json TEXT, delivered_at TEXT, last_error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-);
-INSERT INTO reminder_attempts
-(event_row_id,calendar_id,event_id,instance_id,rule_id,reminder_at,content,state,created_at,updated_at)
-VALUES(1,'primary','event','instance','rule','2026-07-08T09:55:00+00:00','message','failed','now','now');
-"""
-    )
-    connection.close()
-
-    database = Database(path)
-
-    assert database.attempt_state(1) == "failed"
-    database.expire_attempt(1)
-    assert database.attempt_state(1) == "expired"
     database.close()
 
 

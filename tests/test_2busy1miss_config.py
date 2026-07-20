@@ -89,7 +89,7 @@ calendars:
 
 def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
-    app_config = home / ".config" / "2much2read"
+    app_config = home / ".config" / "2much2read-runtime"
     app_config.mkdir(parents=True)
     (tmp_path / ".env").write_text(
         "DISCORD_WEBHOOK_URL=https://newsletter.example/webhook\nDATABASE_PATH=newsletter.sqlite3\n",
@@ -108,28 +108,3 @@ def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, mo
 
     assert settings.discord_webhook_url == "https://busy.example/webhook"
     assert settings.database_path == Path("/tmp/2busy1miss.sqlite3")
-
-
-def test_settings_keep_legacy_delivery_state_until_new_database_exists(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    home = tmp_path / "home"
-    legacy_data = home / ".local" / "share" / "2busy1miss"
-    legacy_data.mkdir(parents=True)
-    legacy_database = legacy_data / "2busy1miss.sqlite3"
-    legacy_database.touch()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("DATABASE_PATH", raising=False)
-    monkeypatch.delenv("LOCK_PATH", raising=False)
-
-    settings = Settings()
-
-    assert settings.database_path == legacy_database
-    assert settings.lock_path == legacy_data / "2busy1miss.lock"
-
-    new_database = home / ".local" / "share" / "2much2read" / "2busy1miss.sqlite3"
-    new_database.parent.mkdir(parents=True)
-    new_database.touch()
-
-    settings = Settings()
-
-    assert settings.database_path == new_database
-    assert settings.lock_path == new_database.with_suffix(".lock")

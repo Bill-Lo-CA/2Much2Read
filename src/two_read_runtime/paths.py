@@ -5,11 +5,11 @@ from pathlib import Path
 
 
 def config_dir() -> Path:
-    return Path.home() / ".config" / "2much2read"
+    return Path.home() / ".config" / "2much2read-runtime"
 
 
 def data_dir() -> Path:
-    return Path.home() / ".local" / "share" / "2much2read"
+    return Path.home() / ".local" / "share" / "2much2read-runtime"
 
 
 def env_file(application: str) -> Path:
