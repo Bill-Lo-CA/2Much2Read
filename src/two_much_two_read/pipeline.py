@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from two_read_runtime.discord import deliver
+from two_read_runtime.discord import deliver, delivery_error_code, parse_message_ids
 from two_read_runtime.locking import ProcessLock
 
 from .config import Settings, load_sources
@@ -49,7 +49,7 @@ def _message_ids(row: sqlite3.Row) -> list[str]:
         value = row["discord_message_ids_json"]
     except KeyError:
         return []
-    return [str(item) for item in json.loads(str(value))] if value else []
+    return parse_message_ids(value)
 
 
 def run_pipeline(
@@ -98,14 +98,18 @@ def run_pipeline(
                 settings.ollama_num_ctx,
                 settings.ollama_keep_alive,
             )
+            remaining = max_messages or settings.gmail_max_messages_per_run
             for source in sources:
+                if remaining <= 0:
+                    break
                 processed_label = "NewsletterBot/Processed"
                 failed_label = "NewsletterBot/Failed"
                 query = f"({source.gmail_query}) newer_than:{settings.gmail_lookback_days}d"
                 if not force:
                     query += f' -label:"{processed_label}" -label:"{failed_label}"'
-                limit = max_messages or settings.gmail_max_messages_per_run
-                for gmail_id in gmail.list_messages(query, limit):
+                gmail_ids = gmail.list_messages(query, remaining)
+                remaining -= len(gmail_ids)
+                for gmail_id in gmail_ids:
                     message = gmail.get_message(gmail_id)
                     payload = message.get("payload")
                     if not isinstance(payload, dict):
@@ -184,10 +188,12 @@ def run_pipeline(
             database.close()
 
 
-def retry_delivery(settings: Settings, database: Database | None = None) -> int:
+def retry_delivery(settings: Settings, database: Database | None = None) -> dict[str, object]:
     owned = database is None
     active_database = database
     delivered = 0
+    failed = 0
+    failed_by_error_code: dict[str, int] = {}
     try:
         with ProcessLock(settings.lock_path):
             active_database = active_database or Database(settings.database_path)
@@ -208,13 +214,17 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> int:
                     )
                     active_database.finish_delivery(digest_id, ids)
                     delivered += 1
-                except Exception:
-                    active_database.fail_delivery(int(digest["id"]))
+                except sqlite3.Error:
                     raise
+                except Exception as error:
+                    error_code = delivery_error_code(error)
+                    active_database.fail_delivery(int(digest["id"]), error_code)
+                    failed += 1
+                    failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
     finally:
         if owned and active_database is not None:
             active_database.close()
-    return delivered
+    return {"delivered": delivered, "failed": failed, "failed_by_error_code": failed_by_error_code}
 
 
 def deliver_digest(settings: Settings, database: Database, digest_id: int) -> None:
@@ -234,6 +244,6 @@ def deliver_digest(settings: Settings, database: Database, digest_id: int) -> No
             save_progress,
         )
         database.finish_delivery(digest_id, ids)
-    except Exception:
-        database.fail_delivery(digest_id)
+    except Exception as error:
+        database.fail_delivery(digest_id, delivery_error_code(error))
         raise

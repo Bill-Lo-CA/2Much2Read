@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Annotated
@@ -12,6 +11,7 @@ from pydantic import BaseModel
 from two_read_runtime.discord import deliver
 from two_read_runtime.locking import ProcessLock
 from two_read_runtime.oauth import token_status
+from two_read_runtime.paths import directory_is_creatable
 
 from .config import Settings, load_reminders
 from .google_calendar import credentials
@@ -70,8 +70,7 @@ def doctor(send_test: Annotated[bool, typer.Option()] = False) -> None:
         settings.google_calendar_token_path,
         ("https://www.googleapis.com/auth/calendar.readonly",),
     )
-    parent = settings.database_path.parent
-    checks["database_directory"] = "ok" if parent.exists() and os.access(parent, os.W_OK) else "not_writable"
+    checks["database_directory"] = "ok" if directory_is_creatable(settings.database_path.parent) else "not_writable"
     checks["discord"] = "configured" if settings.discord_webhook_url else "missing"
     if send_test and settings.discord_webhook_url:
         deliver(settings.discord_webhook_url, "2busy1miss connectivity test", settings.discord_username)

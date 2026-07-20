@@ -2,7 +2,8 @@ from pathlib import Path
 
 import pytest
 
-from two_much_two_read.config import Settings, load_sources
+from two_much_two_read import config
+from two_much_two_read.config import ExcludedSubscription, Settings, Source, load_sources, update_subscription_files
 
 
 def test_rejects_duplicate_source_ids(tmp_path: Path) -> None:
@@ -95,3 +96,35 @@ def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, mo
 
     assert settings.discord_webhook_url == "https://digest.example/webhook"
     assert settings.database_path == Path("/tmp/2much2read.sqlite3")
+
+
+def test_subscription_file_update_restores_both_files_when_second_replace_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    excluded_path = tmp_path / "excluded-subscriptions.yaml"
+    original_sources = "sources:\n  - id: existing\n    name: Existing\n    gmail_query: from:existing@example.com\n"
+    original_excluded = (
+        "excluded_subscriptions:\n  - key: existing\n    id: existing\n    name: Existing\n    sender: existing@example.com\n"
+    )
+    sources_path.write_text(original_sources, encoding="utf-8")
+    excluded_path.write_text(original_excluded, encoding="utf-8")
+    original_replace = config.os.replace
+
+    def fail_excluded_replace(source: str | Path, destination: str | Path) -> None:
+        if Path(destination) == excluded_path:
+            raise OSError("simulated replace failure")
+        original_replace(source, destination)
+
+    monkeypatch.setattr(config.os, "replace", fail_excluded_replace)
+
+    with pytest.raises(OSError, match="simulated replace failure"):
+        update_subscription_files(
+            sources_path,
+            [Source(id="new", name="New", gmail_query="from:new@example.com")],
+            excluded_path,
+            [ExcludedSubscription(key="new", id="new", name="New", sender="new@example.com")],
+        )
+
+    assert sources_path.read_text(encoding="utf-8") == original_sources
+    assert excluded_path.read_text(encoding="utf-8") == original_excluded

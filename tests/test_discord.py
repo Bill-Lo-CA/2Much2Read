@@ -1,7 +1,22 @@
 import httpx
+import pytest
 import respx
 
-from two_read_runtime.discord import chunk_text, deliver
+from two_read_runtime.discord import chunk_text, deliver, parse_message_ids
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(None, []), ("[]", []), ('["one", "two"]', ["one", "two"])],
+)
+def test_parses_stored_message_ids(value: object, expected: list[str]) -> None:
+    assert parse_message_ids(value) == expected
+
+
+@pytest.mark.parametrize("value", ["not json", "{}", "[1]"])
+def test_rejects_corrupt_stored_message_ids(value: str) -> None:
+    with pytest.raises(ValueError, match="DISCORD_MESSAGE_IDS_CORRUPT"):
+        parse_message_ids(value)
 
 
 def test_chunk_text_balances_long_fenced_blocks() -> None:

@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import json
 import sqlite3
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 
-from two_read_runtime.discord import deliver
+from two_read_runtime.discord import deliver, delivery_error_code, parse_message_ids
 from two_read_runtime.locking import ProcessLock
 
 from .config import RemindersConfig, Settings, load_reminders
@@ -76,7 +75,7 @@ def _message_ids(row: sqlite3.Row) -> list[str]:
         value = row["discord_message_ids_json"]
     except KeyError:
         return []
-    return [str(item) for item in json.loads(str(value))] if value else []
+    return parse_message_ids(value)
 
 
 def _sync_scheduled_reminders(
@@ -91,9 +90,11 @@ def _sync_scheduled_reminders(
     return created, database.cancel_unmatched_attempts(candidates, events, window_start, window_end)
 
 
-def _dispatch_due_reminders(database: Database, settings: Settings, now: datetime) -> tuple[int, int]:
+def _dispatch_due_reminders(database: Database, settings: Settings, now: datetime) -> tuple[int, int, int, dict[str, int]]:
     sent = 0
+    failed = 0
     expired = 0
+    failed_by_error_code: dict[str, int] = {}
     for attempt in database.due_attempts(now):
         attempt_id = int(attempt["id"])
         if datetime.fromisoformat(str(attempt["event_start_at"])) <= now:
@@ -114,10 +115,14 @@ def _dispatch_due_reminders(database: Database, settings: Settings, now: datetim
             )
             database.finish_delivery(attempt_id, message_ids)
             sent += 1
-        except Exception:
-            database.fail_delivery(attempt_id)
+        except sqlite3.Error:
             raise
-    return sent, expired
+        except Exception as error:
+            error_code = delivery_error_code(error)
+            database.fail_delivery(attempt_id, error_code)
+            failed += 1
+            failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
+    return sent, failed, expired, failed_by_error_code
 
 
 def discover(settings: Settings, days: int) -> dict[str, object]:
@@ -196,8 +201,8 @@ def next_day_agenda(settings: Settings, dry_run: bool, force: bool, *, scheduled
                     on_progress=save_progress,
                 )
                 database.finish_agenda_delivery(delivery_id, message_ids)
-            except Exception:
-                database.fail_agenda_delivery(delivery_id)
+            except Exception as error:
+                database.fail_agenda_delivery(delivery_id, delivery_error_code(error))
                 raise
         finally:
             database.close()
@@ -216,6 +221,8 @@ def retry_agenda(settings: Settings, day: date) -> dict[str, object]:
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
     destination_hash = sha256(settings.discord_webhook_url.encode()).hexdigest()
     delivered = 0
+    failed = 0
+    failed_by_error_code: dict[str, int] = {}
     with ProcessLock(settings.lock_path):
         database = Database(settings.database_path)
         try:
@@ -235,12 +242,22 @@ def retry_agenda(settings: Settings, day: date) -> dict[str, object]:
                     )
                     database.finish_agenda_delivery(delivery_id, message_ids)
                     delivered += 1
-                except Exception:
-                    database.fail_agenda_delivery(delivery_id)
+                except sqlite3.Error:
                     raise
+                except Exception as error:
+                    error_code = delivery_error_code(error)
+                    database.fail_agenda_delivery(delivery_id, error_code)
+                    failed += 1
+                    failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
         finally:
             database.close()
-    return {"status": "ok", "day": day.isoformat(), "delivered": delivered}
+    return {
+        "status": "ok",
+        "day": day.isoformat(),
+        "delivered": delivered,
+        "failed": failed,
+        "failed_by_error_code": failed_by_error_code,
+    }
 
 
 def run(settings: Settings, dry_run: bool) -> dict[str, object]:
@@ -254,10 +271,16 @@ def run(settings: Settings, dry_run: bool) -> dict[str, object]:
         if dry_run:
             return {"status": "ok", "due": [str(row["content"]) for row in database.due_attempts(now)]}
         with ProcessLock(settings.lock_path):
-            sent, expired = _dispatch_due_reminders(database, settings, now)
+            sent, failed, expired, failed_by_error_code = _dispatch_due_reminders(database, settings, now)
     finally:
         database.close()
-    return {"status": "ok", "sent": sent, "expired": expired}
+    return {
+        "status": "ok",
+        "sent": sent,
+        "failed": failed,
+        "failed_by_error_code": failed_by_error_code,
+        "expired": expired,
+    }
 
 
 def retry_delivery(settings: Settings) -> dict[str, object]:
@@ -266,7 +289,13 @@ def retry_delivery(settings: Settings) -> dict[str, object]:
     database = Database(settings.database_path)
     try:
         with ProcessLock(settings.lock_path):
-            delivered, expired = _dispatch_due_reminders(database, settings, now)
+            delivered, failed, expired, failed_by_error_code = _dispatch_due_reminders(database, settings, now)
     finally:
         database.close()
-    return {"status": "ok", "delivered": delivered, "expired": expired}
+    return {
+        "status": "ok",
+        "delivered": delivered,
+        "failed": failed,
+        "failed_by_error_code": failed_by_error_code,
+        "expired": expired,
+    }

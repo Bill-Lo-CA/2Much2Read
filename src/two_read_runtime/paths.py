@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 
@@ -13,3 +14,10 @@ def data_dir() -> Path:
 
 def env_file(application: str) -> Path:
     return config_dir() / f".{application}.env"
+
+
+def directory_is_creatable(path: Path) -> bool:
+    parent = path
+    while not parent.exists() and parent != parent.parent:
+        parent = parent.parent
+    return parent.is_dir() and os.access(parent, os.W_OK | os.X_OK)
