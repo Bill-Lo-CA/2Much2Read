@@ -1,7 +1,7 @@
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from two_busy_one_miss.google_calendar import CalendarEvent
+from two_busy_one_miss.google_calendar import CalendarEvent, _event_links
 from two_busy_one_miss.renderer import render_agenda, render_reminder
 from two_busy_one_miss.rules import ReminderCandidate
 from two_read_runtime.discord import chunk_text
@@ -76,14 +76,34 @@ def test_render_calendar_urls_outside_markdown_tables() -> None:
         start=start,
         end=start + timedelta(hours=1),
         all_day=False,
+        links=("https://calendar.example/event",),
     )
-    links = "<https://docs.example/brief>\n<https://calendar.example/view>\n<https://meet.example/join>"
+    links = (
+        "<https://docs.example/brief>\n<https://calendar.example/view>\n<https://meet.example/join>\n"
+        "<https://calendar.example/event>"
+    )
 
     for rendered in (
         render_agenda(date(2026, 7, 9), [event]),
         render_reminder(ReminderCandidate(event, "default-5m", "5m", start)),
     ):
         assert rendered.endswith(f"```\n{links}")
+
+
+def test_calendar_event_links_include_event_meeting_and_description_urls() -> None:
+    assert _event_links(
+        {
+            "htmlLink": "https://calendar.example/event",
+            "hangoutLink": "https://meet.google.com/abc-defg-hij",
+            "description": "Notes: https://docs.example/brief.",
+            "conferenceData": {"entryPoints": [{"uri": "https://zoom.example/join"}]},
+        }
+    ) == (
+        "https://calendar.example/event",
+        "https://meet.google.com/abc-defg-hij",
+        "https://docs.example/brief",
+        "https://zoom.example/join",
+    )
 
 
 def test_render_agenda_marks_events_crossing_the_day_boundary() -> None:

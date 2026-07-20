@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from datetime import date, datetime, time
 from pathlib import Path
@@ -12,6 +13,7 @@ from googleapiclient.discovery import build  # type: ignore[import-untyped]
 from two_read_runtime.oauth import load_credentials
 
 SCOPES = ("https://www.googleapis.com/auth/calendar.readonly",)
+URL = re.compile(r"https?://[^\s<>()>]+")
 
 
 @dataclass(frozen=True)
@@ -25,6 +27,7 @@ class CalendarEvent:
     start: datetime
     end: datetime
     all_day: bool
+    links: tuple[str, ...] = ()
 
 
 def credentials(credentials_path: Path, token_path: Path, port: int = 8765, *, interactive: bool = False) -> Credentials:
@@ -44,6 +47,13 @@ def _parse_datetime(value: str, timezone: ZoneInfo) -> datetime:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
         return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone)
     return datetime.combine(date.fromisoformat(value), time.min, timezone)
+
+
+def _event_links(item: dict[str, Any]) -> tuple[str, ...]:
+    conference = item.get("conferenceData") or {}
+    values = [item.get("htmlLink"), item.get("hangoutLink"), item.get("description")]
+    values.extend(entry.get("uri") for entry in conference.get("entryPoints", []))
+    return tuple(dict.fromkeys(url.rstrip(".,;:!?") for value in values for url in URL.findall(str(value or ""))))
 
 
 class CalendarClient:
@@ -73,6 +83,7 @@ class CalendarClient:
                     timeMax=time_max.isoformat(),
                     singleEvents=True,
                     orderBy="startTime",
+                    conferenceDataVersion=1,
                     pageToken=page_token,
                 )
                 .execute()
@@ -97,6 +108,7 @@ class CalendarClient:
                         start=_parse_datetime(str(start_raw), self.timezone),
                         end=_parse_datetime(str(end_raw), self.timezone),
                         all_day="date" in start_data,
+                        links=_event_links(item),
                     )
                 )
             page_token = result.get("nextPageToken")

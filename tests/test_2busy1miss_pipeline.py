@@ -6,6 +6,7 @@ from zoneinfo import ZoneInfo
 
 from two_busy_one_miss import pipeline
 from two_busy_one_miss.config import EventMatch, RemindersConfig, ReminderSpec, RuleConfig, Settings
+from two_busy_one_miss.google_calendar import CalendarClient
 from two_busy_one_miss.pipeline import event_query_lookahead
 from two_busy_one_miss.renderer import render_agenda
 from two_busy_one_miss.rules import ReminderCandidate
@@ -20,6 +21,27 @@ def test_event_query_lookahead_covers_longest_reminder() -> None:
     )
 
     assert event_query_lookahead(config, 7) == timedelta(days=10)
+
+
+def test_calendar_client_requests_conference_data() -> None:
+    timezone = ZoneInfo("America/Montreal")
+    client = CalendarClient.__new__(CalendarClient)
+    client.service = MagicMock()
+    client.timezone = timezone
+    client.service.events.return_value.list.return_value.execute.return_value = {"items": []}
+    start = datetime(2026, 7, 9, 10, tzinfo=timezone)
+    end = start + timedelta(hours=1)
+
+    assert client.list_events("primary", "Main", start, end) == []
+    client.service.events.return_value.list.assert_called_once_with(
+        calendarId="primary",
+        timeMin=start.isoformat(),
+        timeMax=end.isoformat(),
+        singleEvents=True,
+        orderBy="startTime",
+        conferenceDataVersion=1,
+        pageToken=None,
+    )
 
 
 def test_retry_delivery_holds_process_lock(tmp_path: Path, monkeypatch) -> None:

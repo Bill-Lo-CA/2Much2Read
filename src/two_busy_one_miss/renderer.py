@@ -39,7 +39,7 @@ def _with_links(lines: list[str], events: list[CalendarEvent]) -> str:
     links = dict.fromkeys(
         url.rstrip(".,;:!?")
         for event in events
-        for value in (event.title, event.calendar_name or "", event.location)
+        for value in (event.title, event.calendar_name or "", event.location, *event.links)
         for url in URL.findall(value)
     )
     return "\n".join([*lines, "```", *(f"<{url}>" for url in links)])
