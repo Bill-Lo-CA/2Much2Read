@@ -1,11 +1,11 @@
 [Unit]
-Description=2busy1miss Calendar Reminders
+Description=2much2read Gmail Digest
 After=network-online.target
 
 [Service]
 Type=oneshot
-EnvironmentFile=%h/.config/2much2read/.2busy1miss.env
+EnvironmentFile=%h/.config/2much2read-runtime/.2much2read.env
 ExecStart=__EXECUTABLE__ run
-TimeoutStartSec=5min
+TimeoutStartSec=30min
 NoNewPrivileges=true
 PrivateTmp=true

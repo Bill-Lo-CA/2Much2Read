@@ -13,7 +13,7 @@ They are separate commands, OAuth clients, OAuth tokens, YAML files, SQLite data
 Both tools use one private root, not the repository `.env`:
 
 ```text
-~/.config/2much2read/
+~/.config/2much2read-runtime/
   .2much2read.env
   .2busy1miss.env
   gmail-client-secret.json
@@ -23,12 +23,16 @@ Both tools use one private root, not the repository `.env`:
   sources.yaml
   reminders.yaml
 
-~/.local/share/2much2read/
+~/.local/share/2much2read-runtime/
   2much2read.sqlite3
   2busy1miss.sqlite3
 ```
 
 The two environment files may contain duplicate variable names because each command and systemd unit loads only its own file. Do not source both files in one shell. The installers set both runtime directories to mode `0700`, set copied environment/YAML files, OAuth credentials/tokens, and lock files to `0600`, and keep SQLite databases inside the protected data directory.
+
+## Destructive reset
+
+Existing 2Much2Read, newsletter-digest, and 2busy1miss runtime data is unsupported and is not migrated. Before installing this version, run `sh scripts/legacy_cleanup.sh`; it permanently deletes all listed configuration, OAuth credentials, tokens, and SQLite data. It removes exactly these legacy locations: `~/.config/2Much2Read`, `~/.config/2much2read`, `~/.config/newsletter-digest`, `~/.config/2busy1miss`, their matching `~/.local/share/` directories, the checkout `.env`, and the `newsletter-digest`, `2much2read`, and `2busy1miss` user unit files. The new `2much2read-runtime` roots and `*-runtime` units are not cleanup targets, so the script is safe to run again.
 
 ## 2much2read
 
@@ -46,10 +50,10 @@ uv run 2much2read run --dry-run
 uv run 2much2read run
 ```
 
-The installer moves the supplied client credential to `gmail-client-secret.json`, copies `config/2much2read.env.example` and `sources.yaml` on first install, and leaves `2much2read.timer` stopped and disabled. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read/.2much2read.env`, authorize, run `doctor` and a dry run, then explicitly enable the timer when ready:
+The installer copies the supplied client credential to `gmail-client-secret.json`, copies `config/2much2read.env.example` and `sources.yaml` on first install, and leaves `2much2read-runtime.timer` stopped and disabled. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read-runtime/.2much2read.env`, authorize, run `doctor` and a dry run, then explicitly enable the timer when ready:
 
 ```bash
-systemctl --user enable --now 2much2read.timer
+systemctl --user enable --now 2much2read-runtime.timer
 ```
 
 Useful commands:
@@ -77,16 +81,16 @@ uv run 2busy1miss run --dry-run
 uv run 2busy1miss run
 ```
 
-The installer moves the supplied client credential to `calendar-client-secret.json`, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, and leaves both timers stopped and disabled. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read/.2busy1miss.env`, authorize, run `doctor` and a dry run, then explicitly enable each timer when ready:
+The installer copies the supplied client credential to `calendar-client-secret.json`, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, and leaves both timers stopped and disabled. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read-runtime/.2busy1miss.env`, authorize, run `doctor` and a dry run, then explicitly enable each timer when ready:
 
 ```bash
-systemctl --user enable --now 2busy1miss.timer
-systemctl --user enable --now 2busy1miss-agenda.timer
+systemctl --user enable --now 2busy1miss-runtime.timer
+systemctl --user enable --now 2busy1miss-runtime-agenda.timer
 ```
 
 `REMINDER_LOOKAHEAD_DAYS` in `.2busy1miss.env` controls the Calendar sync horizon
 (default: 7; maximum: 366). The 21:00 agenda job reads that horizon and writes
-one-time reminder jobs to SQLite. `2busy1miss.timer` runs every minute and only
+one-time reminder jobs to SQLite. `2busy1miss-runtime.timer` runs every minute and only
 dispatches those local jobs. To refresh jobs after adding or changing an event,
 run `uv run 2busy1miss agenda-next-day`; an already delivered agenda is skipped,
 but reminder jobs are reconciled.
@@ -103,7 +107,7 @@ uv run 2busy1miss agenda-retry 2026-07-16
 uv run 2busy1miss retry-delivery
 ```
 
-`2busy1miss-agenda.timer` runs at 21:00 in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone and synchronizes the configured reminder horizon. Its persistent catch-up is ignored before 21:00 in that timezone, so a morning startup cannot send the next day's agenda early. Normal `agenda-next-day` runs are de-duplicated by date, timezone, and Discord destination; `--force` is the explicit resend path. Empty days are sent as `No events`. Reminder messages use the same Markdown code-block style as agendas; a retry after an event starts marks the job `expired` instead of sending it.
+`2busy1miss-runtime-agenda.timer` runs at 21:00 in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone and synchronizes the configured reminder horizon. Its persistent catch-up is ignored before 21:00 in that timezone, so a morning startup cannot send the next day's agenda early. Normal `agenda-next-day` runs are de-duplicated by date, timezone, and Discord destination; `--force` is the explicit resend path. Empty days are sent as `No events`. Reminder messages use the same Markdown code-block style as agendas; a retry after an event starts marks the job `expired` instead of sending it.
 
 ## Delivery behavior
 
@@ -136,18 +140,17 @@ a new name, restore the backup at the configured path with mode `0600`, then run
 `doctor` and a dry run before enabling a timer.
 
 ```bash
-sqlite3 ~/.local/share/2much2read/2much2read.sqlite3 \
+sqlite3 ~/.local/share/2much2read-runtime/2much2read.sqlite3 \
   ".backup '/secure-backups/2much2read.sqlite3'"
-sqlite3 ~/.local/share/2much2read/2busy1miss.sqlite3 \
+sqlite3 ~/.local/share/2much2read-runtime/2busy1miss.sqlite3 \
   ".backup '/secure-backups/2busy1miss.sqlite3'"
 ```
 
 Inspect timers and recent failures without sending work:
 
 ```bash
-systemctl --user list-timers '2much2read*' '2busy1miss*'
-systemctl --user status 2much2read.timer 2busy1miss.timer 2busy1miss-agenda.timer
-journalctl --user -u 2much2read.service -u 2busy1miss.service -u 2busy1miss-agenda.service -n 100 --no-pager
+systemctl --user status 2much2read-runtime.timer 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer
+journalctl --user -u 2much2read-runtime.service -u 2busy1miss-runtime.service -u 2busy1miss-runtime-agenda.service -n 100 --no-pager
 ```
 
 `LOCK_CONTENDED` means another local run is active; retry after it finishes.
