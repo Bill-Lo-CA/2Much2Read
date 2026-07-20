@@ -80,7 +80,7 @@ def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, mo
     app_config = home / ".config" / "2much2read"
     app_config.mkdir(parents=True)
     (tmp_path / ".env").write_text(
-        "DISCORD_WEBHOOK_URL=https://legacy.example/webhook\nDATABASE_PATH=legacy.sqlite3\n",
+        "DISCORD_WEBHOOK_URL=https://ignored.example/webhook\nDATABASE_PATH=ignored.sqlite3\n",
         encoding="utf-8",
     )
     (app_config / ".2much2read.env").write_text(

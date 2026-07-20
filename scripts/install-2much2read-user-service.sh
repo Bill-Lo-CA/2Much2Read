@@ -32,31 +32,15 @@ if [ -n "$gmail_client_secret" ] && [ ! -f "$gmail_client_secret" ]; then
 fi
 
 exe="$repo_dir/.venv/bin/2much2read"
-python="$repo_dir/.venv/bin/python"
-[ -x "$exe" ] && [ -x "$python" ] || {
+[ -x "$exe" ] || {
   printf '%s\n' "2much2read executable not found; run uv sync first" >&2
   exit 1
 }
 
-for timer in newsletter-digest.timer 2much2read.timer; do
-  systemctl --user disable --now "$timer" 2>/dev/null || true
-done
-for service in newsletter-digest.service 2much2read.service; do
-  if systemctl --user is-active --quiet "$service"; then
-    printf '%s\n' "stop $service before migrating runtime files" >&2
-    exit 1
-  fi
-done
-
-if [ -n "$gmail_client_secret" ]; then
-  "$python" -m two_much_two_read.migrate newsletter \
-    --legacy-env "$HOME/.config/newsletter-digest/newsletter-digest.env" \
-    --legacy-env "$repo_dir/.env" \
-    --gmail-client-secret "$gmail_client_secret"
-else
-  "$python" -m two_much_two_read.migrate newsletter \
-    --legacy-env "$HOME/.config/newsletter-digest/newsletter-digest.env" \
-    --legacy-env "$repo_dir/.env"
+systemctl --user disable --now 2much2read.timer 2>/dev/null || true
+if systemctl --user is-active --quiet 2much2read.service; then
+  printf '%s\n' "stop 2much2read.service before installing" >&2
+  exit 1
 fi
 
 config_dir="$HOME/.config/2much2read"
@@ -67,6 +51,10 @@ sources_file="$config_dir/sources.yaml"
 
 mkdir -p "$config_dir" "$data_dir" "$systemd_dir"
 chmod 700 "$config_dir" "$data_dir"
+if [ -n "$gmail_client_secret" ] && [ ! -f "$config_dir/gmail-client-secret.json" ]; then
+  cp "$gmail_client_secret" "$config_dir/gmail-client-secret.json"
+  chmod 600 "$config_dir/gmail-client-secret.json"
+fi
 if [ ! -f "$env_file" ]; then
   cp config/2much2read.env.example "$env_file"
   chmod 600 "$env_file"

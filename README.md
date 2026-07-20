@@ -133,9 +133,7 @@ ssh -L 8765:127.0.0.1:8765 user@remote-host
 Use SQLite's backup command rather than copying a live database file. Stop the
 relevant timers and service before restoring; preserve the current database under
 a new name, restore the backup at the configured path with mode `0600`, then run
-`doctor` and a dry run before enabling a timer. The installers' runtime migration
-creates a `*.pre-migration-backup` beside each migrated SQLite database. Treat it
-as a backup and restore it using the same stopped-service procedure if needed.
+`doctor` and a dry run before enabling a timer.
 
 ```bash
 sqlite3 ~/.local/share/2much2read/2much2read.sqlite3 \

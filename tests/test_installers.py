@@ -6,13 +6,27 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    ("script", "timer", "service"),
+    ("script", "timer", "service", "secret_option", "secret_name"),
     [
-        ("install-2much2read-user-service.sh", "2much2read.timer", "2much2read.service"),
-        ("install-2busy1miss-user-service.sh", "2busy1miss.timer", "2busy1miss.service"),
+        (
+            "install-2much2read-user-service.sh",
+            "2much2read.timer",
+            "2much2read.service",
+            "--gmail-client-secret",
+            "gmail-client-secret.json",
+        ),
+        (
+            "install-2busy1miss-user-service.sh",
+            "2busy1miss.timer",
+            "2busy1miss.service",
+            "--calendar-client-secret",
+            "calendar-client-secret.json",
+        ),
     ],
 )
-def test_installers_leave_timers_disabled(tmp_path: Path, script: str, timer: str, service: str) -> None:
+def test_installers_leave_timers_disabled(
+    tmp_path: Path, script: str, timer: str, service: str, secret_option: str, secret_name: str
+) -> None:
     root = Path(__file__).parents[1]
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
@@ -28,14 +42,26 @@ def test_installers_leave_timers_disabled(tmp_path: Path, script: str, timer: st
         "PATH": f"{fake_bin}:{os.environ['PATH']}",
         "SYSTEMCTL_LOG": str(log),
     }
+    client_secret = tmp_path / "client-secret.json"
+    client_secret.write_text("client secret", encoding="utf-8")
 
-    result = subprocess.run(["sh", f"scripts/{script}"], cwd=root, env=environment, check=True, text=True, capture_output=True)
+    result = subprocess.run(
+        ["sh", f"scripts/{script}", secret_option, str(client_secret)],
+        cwd=root,
+        env=environment,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
 
     calls = log.read_text(encoding="utf-8")
     assert f"disable --now {timer}" in calls
     assert f"is-active --quiet {service}" in calls
     assert "daemon-reload" in calls
     assert "enable --now" not in calls
+    installed_secret = tmp_path / "home" / ".config" / "2much2read" / secret_name
+    assert installed_secret.read_text(encoding="utf-8") == "client secret"
+    assert installed_secret.stat().st_mode & 0o777 == 0o600
     if script == "install-2busy1miss-user-service.sh":
         assert "disable --now 2busy1miss.timer 2busy1miss-agenda.timer" in calls
         assert "Enable reminders when ready: systemctl --user enable --now 2busy1miss.timer" in result.stdout
