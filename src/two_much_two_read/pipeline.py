@@ -6,7 +6,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from two_read_runtime.discord import deliver, parse_message_ids
+from two_read_runtime.discord import deliver, delivery_error_code, parse_message_ids
 from two_read_runtime.locking import ProcessLock
 
 from .config import Settings, load_sources
@@ -188,11 +188,12 @@ def run_pipeline(
             database.close()
 
 
-def retry_delivery(settings: Settings, database: Database | None = None) -> dict[str, int]:
+def retry_delivery(settings: Settings, database: Database | None = None) -> dict[str, object]:
     owned = database is None
     active_database = database
     delivered = 0
     failed = 0
+    failed_by_error_code: dict[str, int] = {}
     try:
         with ProcessLock(settings.lock_path):
             active_database = active_database or Database(settings.database_path)
@@ -215,13 +216,15 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> dict
                     delivered += 1
                 except sqlite3.Error:
                     raise
-                except Exception:
-                    active_database.fail_delivery(int(digest["id"]))
+                except Exception as error:
+                    error_code = delivery_error_code(error)
+                    active_database.fail_delivery(int(digest["id"]), error_code)
                     failed += 1
+                    failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
     finally:
         if owned and active_database is not None:
             active_database.close()
-    return {"delivered": delivered, "failed": failed}
+    return {"delivered": delivered, "failed": failed, "failed_by_error_code": failed_by_error_code}
 
 
 def deliver_digest(settings: Settings, database: Database, digest_id: int) -> None:
@@ -241,6 +244,6 @@ def deliver_digest(settings: Settings, database: Database, digest_id: int) -> No
             save_progress,
         )
         database.finish_delivery(digest_id, ids)
-    except Exception:
-        database.fail_delivery(digest_id)
+    except Exception as error:
+        database.fail_delivery(digest_id, delivery_error_code(error))
         raise

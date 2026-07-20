@@ -130,7 +130,7 @@ def test_retry_delivery_holds_process_lock(tmp_path: Path, monkeypatch: pytest.M
 
     monkeypatch.setattr(pipeline, "deliver", fake_deliver)
 
-    assert pipeline.retry_delivery(settings) == {"delivered": 1, "failed": 0}
+    assert pipeline.retry_delivery(settings) == {"delivered": 1, "failed": 0, "failed_by_error_code": {}}
     process_lock.assert_called_once_with(settings.lock_path)
     database.finish_delivery.assert_called_once_with(1, ["discord-id"])
 
@@ -150,8 +150,12 @@ def test_retry_delivery_continues_after_a_failed_digest(tmp_path: Path, monkeypa
 
     monkeypatch.setattr(pipeline, "deliver", fake_deliver)
 
-    assert pipeline.retry_delivery(settings, database) == {"delivered": 1, "failed": 1}
-    database.fail_delivery.assert_called_once_with(1)
+    assert pipeline.retry_delivery(settings, database) == {
+        "delivered": 1,
+        "failed": 1,
+        "failed_by_error_code": {"DISCORD_DELIVERY_FAILED": 1},
+    }
+    database.fail_delivery.assert_called_once_with(1, "DISCORD_DELIVERY_FAILED")
     database.finish_delivery.assert_called_once_with(2, ["discord-id"])
 
 
@@ -169,6 +173,27 @@ def test_retry_delivery_stops_when_recording_a_failure_hits_the_database(tmp_pat
         pipeline.retry_delivery(settings, database)
 
     assert database.finish_delivery.call_count == 0
+
+
+def test_retry_delivery_preserves_corrupt_checkpoint_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
+    database = Database(settings.database_path)
+    corrupt_id = database.save_digest("daily:corrupt", "start", "end", "UTC", "corrupt")
+    good_id = database.save_digest("daily:good", "start", "end", "UTC", "good")
+    assert corrupt_id is not None and good_id is not None
+    database.connection.execute("UPDATE digests SET discord_message_ids_json='not json' WHERE id=?", (corrupt_id,))
+    database.connection.commit()
+    monkeypatch.setattr(pipeline, "deliver", lambda *args: ["discord-id"])
+
+    assert pipeline.retry_delivery(settings, database) == {
+        "delivered": 1,
+        "failed": 1,
+        "failed_by_error_code": {"DISCORD_MESSAGE_IDS_CORRUPT": 1},
+    }
+    error_code = database.connection.execute("SELECT last_error_code FROM digests WHERE id=?", (corrupt_id,)).fetchone()[0]
+    assert error_code == "DISCORD_MESSAGE_IDS_CORRUPT"
+    assert database.pending_digest(good_id) is None
+    database.close()
 
 
 def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

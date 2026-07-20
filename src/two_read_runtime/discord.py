@@ -6,6 +6,8 @@ from collections.abc import Callable
 
 import httpx
 
+CORRUPT_MESSAGE_IDS = "DISCORD_MESSAGE_IDS_CORRUPT"
+
 
 def parse_message_ids(value: object) -> list[str]:
     if value is None:
@@ -13,10 +15,16 @@ def parse_message_ids(value: object) -> list[str]:
     try:
         parsed = json.loads(str(value))
     except json.JSONDecodeError as error:
-        raise ValueError("DISCORD_MESSAGE_IDS_CORRUPT: expected a JSON array of strings") from error
+        raise ValueError(f"{CORRUPT_MESSAGE_IDS}: expected a JSON array of strings") from error
     if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
-        raise ValueError("DISCORD_MESSAGE_IDS_CORRUPT: expected a JSON array of strings")
+        raise ValueError(f"{CORRUPT_MESSAGE_IDS}: expected a JSON array of strings")
     return parsed
+
+
+def delivery_error_code(error: Exception) -> str:
+    if isinstance(error, ValueError) and str(error).startswith(f"{CORRUPT_MESSAGE_IDS}:"):
+        return CORRUPT_MESSAGE_IDS
+    return "DISCORD_DELIVERY_FAILED"
 
 
 def _split_text(text: str, limit: int) -> list[str]:

@@ -238,12 +238,12 @@ class Database:
         )
         self.connection.commit()
 
-    def fail_delivery(self, digest_id: int) -> None:
+    def fail_delivery(self, digest_id: int, error_code: str = "DISCORD_DELIVERY_FAILED") -> None:
         now = datetime.now(UTC).isoformat()
         self.connection.execute(
             """UPDATE digests SET state='failed', delivery_attempt_count=delivery_attempt_count+1,
-            last_error_code='DISCORD_DELIVERY_FAILED', updated_at=? WHERE id=?""",
-            (now, digest_id),
+            last_error_code=?, updated_at=? WHERE id=?""",
+            (error_code, now, digest_id),
         )
         self.connection.commit()
 
