@@ -1,15 +1,15 @@
 import base64
 import json
 import re
-from pathlib import Path
 from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
-from two_much_two_read import cli, operations
-from two_much_two_read.config import Settings
-from two_much_two_read.operations import FiltersResult
+from two_much_two_read import cli, mail_operations
+from two_much_two_read.command_models import FiltersResult
+from two_much_two_read.config import Settings, load_excluded_subscriptions, load_sources
+from two_much_two_read.gmail import display_id
 from two_much_two_read.schemas import EmailExtraction
 
 
@@ -63,22 +63,21 @@ def test_mails_require_exactly_one_selector(arguments: list[str]) -> None:
     assert "exactly one of" in result.output
 
 
-def test_mails_list_uses_configured_source_query(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    sources_path = tmp_path / "sources.yaml"
+def test_mails_list_uses_configured_source_query(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = newsletter_settings.sources_config_path
     sources_path.write_text(
         "sources:\n  - id: alphasignal\n    name: AlphaSignal\n    enabled: false\n"
         "    gmail_query: 'label:newsletter-alphasignal'\n",
         encoding="utf-8",
     )
-    settings = Settings(sources_config_path=sources_path)
 
     class FakeGmailClient:
         def list_messages(self, query: str, limit: int) -> list[str]:
             assert (query, limit) == ("label:newsletter-alphasignal", 20)
             return []
 
-    monkeypatch.setattr(cli, "Settings", lambda: settings)
-    monkeypatch.setattr(operations, "gmail_client", lambda settings: FakeGmailClient())
+    monkeypatch.setattr(cli, "Settings", lambda: newsletter_settings)
+    monkeypatch.setattr(mail_operations, "gmail_client", lambda settings: FakeGmailClient())
 
     result = CliRunner().invoke(cli.app, ["mails", "list", "--source", "alphasignal"])
 
@@ -86,21 +85,22 @@ def test_mails_list_uses_configured_source_query(tmp_path: Path, monkeypatch: py
     assert json.loads(result.stdout) == {"status": "ok", "mails": []}
 
 
-def test_mails_list_uses_explicit_query(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_mails_list_uses_explicit_query(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeGmailClient:
         def list_messages(self, query: str, limit: int) -> list[str]:
             assert (query, limit) == ("subject:weekly", 3)
             return []
 
-    monkeypatch.setattr(operations, "gmail_client", lambda settings: FakeGmailClient())
+    monkeypatch.setattr(cli, "Settings", lambda: newsletter_settings)
+    monkeypatch.setattr(mail_operations, "gmail_client", lambda settings: FakeGmailClient())
 
     result = CliRunner().invoke(cli.app, ["mails", "list", "--query", "subject:weekly", "--limit", "3"])
 
     assert result.exit_code == 0
 
 
-def test_subscriptions_list_and_sync_apply(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    sources_path = tmp_path / "sources.yaml"
+def test_subscriptions_list_and_sync_apply(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = newsletter_settings.sources_config_path
     sources_path.write_text(
         "# keep this comment\nsources:\n"
         "  - id: existing\n    name: Existing\n    category: AI\n"
@@ -108,7 +108,6 @@ def test_subscriptions_list_and_sync_apply(tmp_path: Path, monkeypatch: pytest.M
         encoding="utf-8",
     )
     sources_path.chmod(0o600)
-    settings = Settings(sources_config_path=sources_path)
 
     class FakeGmailClient:
         labels = {"ai-newsPaper": "Label_AI"}
@@ -141,8 +140,8 @@ def test_subscriptions_list_and_sync_apply(tmp_path: Path, monkeypatch: pytest.M
                 },
             }
 
-    monkeypatch.setattr(cli, "Settings", lambda: settings)
-    monkeypatch.setattr(operations, "gmail_client", lambda settings: FakeGmailClient())
+    monkeypatch.setattr(cli, "Settings", lambda: newsletter_settings)
+    monkeypatch.setattr(cli, "gmail_client", lambda settings: FakeGmailClient())
     runner = CliRunner()
 
     preview = runner.invoke(cli.app, ["subscriptions", "sync"])
@@ -156,10 +155,10 @@ def test_subscriptions_list_and_sync_apply(tmp_path: Path, monkeypatch: pytest.M
     assert json.loads(synced.stdout.splitlines()[-1])["status"] == "applied"
     assert "# keep this comment" in sources_path.read_text(encoding="utf-8")
     assert sources_path.stat().st_mode & 0o777 == 0o600
-    sources = operations.load_sources(sources_path).sources
+    sources = load_sources(sources_path).sources
     assert [source.id for source in sources] == ["existing", "new-example-com"]
     assert sources[-1].category == "CYBERSECURITY"
-    exclusions = operations.load_excluded_subscriptions(sources_path.with_name("excluded-subscriptions.yaml"))
+    exclusions = load_excluded_subscriptions(sources_path.with_name("excluded-subscriptions.yaml"))
     assert [(item.id, item.sender) for item in exclusions.excluded_subscriptions] == [
         ("spam-example-com", "no-reply@substack.com")
     ]
@@ -180,13 +179,12 @@ def test_filters_commands_share_one_operation(monkeypatch: pytest.MonkeyPatch) -
     assert calls == [True, False]
 
 
-def test_mails_inspect_outputs_parsed_text_and_extraction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    sources_path = tmp_path / "sources.yaml"
+def test_mails_inspect_outputs_parsed_text_and_extraction(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = newsletter_settings.sources_config_path
     sources_path.write_text(
         "sources:\n  - id: alphasignal\n    name: AlphaSignal\n    gmail_query: 'label:newsletter-alphasignal'\n",
         encoding="utf-8",
     )
-    settings = Settings(sources_config_path=sources_path)
     encoded_body = base64.urlsafe_b64encode(b"Parsed newsletter body").decode().rstrip("=")
 
     class FakeGmailClient:
@@ -219,13 +217,13 @@ def test_mails_inspect_outputs_parsed_text_and_extraction(tmp_path: Path, monkey
                 items=[],
             )
 
-    monkeypatch.setattr(cli, "Settings", lambda: settings)
-    monkeypatch.setattr(operations, "gmail_client", lambda settings: FakeGmailClient())
-    monkeypatch.setattr(operations, "create_ollama_client", lambda _: FakeOllamaClient())
+    monkeypatch.setattr(cli, "Settings", lambda: newsletter_settings)
+    monkeypatch.setattr(mail_operations, "gmail_client", lambda settings: FakeGmailClient())
+    monkeypatch.setattr(mail_operations, "create_ollama_client", lambda _: FakeOllamaClient())
 
     result = CliRunner().invoke(
         cli.app,
-        ["mails", "inspect", "--source", "alphasignal", "--id", operations.display_id("gmail-1"), "--extract"],
+        ["mails", "inspect", "--source", "alphasignal", "--id", display_id("gmail-1"), "--extract"],
     )
 
     assert result.exit_code == 0

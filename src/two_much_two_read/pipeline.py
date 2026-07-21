@@ -117,6 +117,8 @@ def run_pipeline(
     no_deliver: bool = False,
     dry_run: bool = False,
     force: bool = False,
+    *,
+    now: datetime | None = None,
 ) -> dict[str, int | str]:
     sources = _enabled_sources(settings, source_id)
 
@@ -155,7 +157,8 @@ def run_pipeline(
                 failed += source_failed
                 processed_message_ids.extend(source_message_ids)
 
-            now = datetime.now(ZoneInfo(settings.digest_timezone))
+            timezone = ZoneInfo(settings.digest_timezone)
+            now = (now or datetime.now(timezone)).astimezone(timezone)
             content = render_digest(
                 _items(database, processed_message_ids, settings.digest_max_items)[: settings.digest_max_items],
                 now,
@@ -167,7 +170,7 @@ def run_pipeline(
                 period_start = now - timedelta(days=1)
                 digest_key = f"daily:{now.date()}:{settings.digest_timezone}:{source_id or 'all'}"
                 if force:
-                    digest_key += f":force:{datetime.now(UTC).isoformat()}"
+                    digest_key += f":force:{now.astimezone(UTC).isoformat()}"
                 digest_id = database.save_digest(
                     digest_key,
                     period_start.isoformat(),

@@ -4,6 +4,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from two_busy_one_miss import pipeline
 from two_busy_one_miss.config import EventMatch, RemindersConfig, ReminderSpec, RuleConfig, Settings
 from two_busy_one_miss.google_calendar import CalendarClient
@@ -100,11 +102,6 @@ def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkey
     windows: list[tuple[datetime, datetime]] = []
     deliveries: list[str] = []
 
-    class FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(2026, 3, 8, 21, tzinfo=tz)
-
     def list_events(*args: object) -> list[object]:
         windows.append((args[-2], args[-1]))
         return []
@@ -113,14 +110,14 @@ def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkey
         deliveries.append(str(args[1]))
         return ["discord-id"]
 
-    monkeypatch.setattr(pipeline, "datetime", FixedDatetime)
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "list_events_between", list_events)
     monkeypatch.setattr(pipeline, "deliver", deliver)
 
-    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True).day == date(2026, 3, 9)
-    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True).skipped == 1
-    assert pipeline.next_day_agenda(settings, dry_run=False, force=True, scheduled=True).sent == 1
+    now = datetime(2026, 3, 8, 21, tzinfo=timezone)
+    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True, now=now).day == date(2026, 3, 9)
+    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True, now=now).skipped == 1
+    assert pipeline.next_day_agenda(settings, dry_run=False, force=True, scheduled=True, now=now).sent == 1
     assert deliveries == [render_agenda(date(2026, 3, 9), [])] * 2
     assert windows[0] == (datetime(2026, 3, 8, 21, tzinfo=timezone), datetime(2026, 3, 15, 21, tzinfo=timezone))
 
@@ -163,20 +160,14 @@ def test_scheduled_next_day_agenda_before_2100_is_noop(tmp_path: Path, monkeypat
     database = MagicMock()
     deliver = MagicMock()
 
-    class FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(2026, 3, 8, 8, tzinfo=tz)
-
-    monkeypatch.setattr(pipeline, "datetime", FixedDatetime)
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "list_events_between", calendar)
     monkeypatch.setattr(pipeline, "Database", database)
     monkeypatch.setattr(pipeline, "deliver", deliver)
 
-    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True).model_dump(
-        mode="json", exclude_none=True
-    ) == {
+    assert pipeline.next_day_agenda(
+        settings, dry_run=False, force=False, scheduled=True, now=datetime(2026, 3, 8, 20, 59, tzinfo=timezone)
+    ).model_dump(mode="json", exclude_none=True) == {
         "status": "ok",
         "day": "2026-03-09",
         "sent": 0,
@@ -197,22 +188,38 @@ def test_scheduled_next_day_agenda_uses_configured_time(tmp_path: Path, monkeypa
         agenda_schedule_time=time(20, 30),
     )
 
-    class FixedDatetime(datetime):
-        current = datetime(2026, 3, 8, 20, 29, tzinfo=timezone)
-
-        @classmethod
-        def now(cls, tz=None):
-            return cls.current.astimezone(tz)
-
-    monkeypatch.setattr(pipeline, "datetime", FixedDatetime)
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "list_events_between", lambda *args: [])
 
-    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True).reason == "before_schedule"
-    FixedDatetime.current = datetime(2026, 3, 8, 20, 30, tzinfo=timezone)
-    result = pipeline.next_day_agenda(settings, dry_run=True, force=False, scheduled=True)
+    assert (
+        pipeline.next_day_agenda(
+            settings, dry_run=False, force=False, scheduled=True, now=datetime(2026, 3, 8, 20, 29, tzinfo=timezone)
+        ).reason
+        == "before_schedule"
+    )
+    result = pipeline.next_day_agenda(
+        settings, dry_run=True, force=False, scheduled=True, now=datetime(2026, 3, 8, 20, 30, tzinfo=timezone)
+    )
     assert isinstance(result, pipeline.AgendaPreviewResult)
     assert result.day == date(2026, 3, 9)
+
+
+@pytest.mark.parametrize(
+    ("now", "expected_day"),
+    [
+        (datetime(2026, 3, 8, 21, tzinfo=ZoneInfo("America/Montreal")), date(2026, 3, 9)),
+        (datetime(2026, 12, 31, 21, tzinfo=ZoneInfo("America/Montreal")), date(2027, 1, 1)),
+    ],
+)
+def test_next_day_agenda_uses_the_next_local_date(tmp_path: Path, monkeypatch, now: datetime, expected_day: date) -> None:
+    config = RemindersConfig(calendars=[{"id": "primary"}], timezone="America/Montreal")
+    settings = Settings(database_path=tmp_path / "reminders.sqlite3", lock_path=tmp_path / "reminders.lock")
+    monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
+    monkeypatch.setattr(pipeline, "list_events_between", lambda *args: [])
+
+    result = pipeline.next_day_agenda(settings, dry_run=True, force=False, now=now)
+
+    assert result.day == expected_day
 
 
 def test_discover_returns_a_typed_result(tmp_path: Path, monkeypatch) -> None:
@@ -248,11 +255,6 @@ def test_next_day_agenda_includes_overlapping_events(tmp_path: Path, monkeypatch
     config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
     settings = Settings(database_path=tmp_path / "reminders.sqlite3", lock_path=tmp_path / "reminders.lock")
 
-    class FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return cls(2026, 3, 8, 21, tzinfo=tz)
-
     def event(instance_id: str, start: datetime, end: datetime) -> pipeline.CalendarEvent:
         return pipeline.CalendarEvent("primary", "Main", instance_id, instance_id, instance_id, "", start, end, False)
 
@@ -262,11 +264,10 @@ def test_next_day_agenda_includes_overlapping_events(tmp_path: Path, monkeypatch
         event("ends-at-start", datetime(2026, 3, 8, 22, tzinfo=timezone), datetime(2026, 3, 9, 0, tzinfo=timezone)),
         event("starts-at-end", datetime(2026, 3, 10, 0, tzinfo=timezone), datetime(2026, 3, 10, 1, tzinfo=timezone)),
     ]
-    monkeypatch.setattr(pipeline, "datetime", FixedDatetime)
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "list_events_between", lambda *args: events)
 
-    result = pipeline.next_day_agenda(settings, dry_run=True, force=False)
+    result = pipeline.next_day_agenda(settings, dry_run=True, force=False, now=datetime(2026, 3, 8, 21, tzinfo=timezone))
 
     assert [item.title for item in result.events] == ["overlap", "within-day"]
 
@@ -361,18 +362,12 @@ def test_run_reads_scheduled_jobs_without_calendar_and_expires_started_events(tm
     assert future_id is not None and past_id is not None
     database.close()
 
-    class FixedDatetime(datetime):
-        @classmethod
-        def now(cls, tz=None):
-            return now.astimezone(tz)
-
     delivered: list[str] = []
-    monkeypatch.setattr(pipeline, "datetime", FixedDatetime)
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "list_events_between", lambda *args: (_ for _ in ()).throw(AssertionError("no Calendar read")))
     monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: delivered.append(str(args[1])) or ["1"])
 
-    assert pipeline.run(settings, dry_run=False).model_dump() == {
+    assert pipeline.run(settings, dry_run=False, now=now).model_dump() == {
         "status": "ok",
         "sent": 1,
         "failed": 0,
