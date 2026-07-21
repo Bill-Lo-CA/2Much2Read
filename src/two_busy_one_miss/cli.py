@@ -64,7 +64,7 @@ def doctor(send_test: Annotated[bool, typer.Option()] = False) -> None:
     try:
         load_reminders(settings.reminders_config_path)
         checks["config"] = "ok"
-    except Exception as error:
+    except (OSError, ValueError) as error:
         checks["config"] = str(error)
     checks["google_calendar_token"] = token_status(
         settings.google_calendar_token_path,

@@ -1,3 +1,4 @@
+from datetime import time
 from pathlib import Path
 
 import pytest
@@ -96,7 +97,7 @@ def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, mo
         encoding="utf-8",
     )
     (app_config / ".2busy1miss.env").write_text(
-        "DISCORD_WEBHOOK_URL=https://busy.example/webhook\nDATABASE_PATH=/tmp/2busy1miss.sqlite3\n",
+        "DISCORD_WEBHOOK_URL=https://busy.example/webhook\nDATABASE_PATH=/tmp/2busy1miss.sqlite3\nAGENDA_SCHEDULE_TIME=20:30\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
@@ -108,3 +109,11 @@ def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, mo
 
     assert settings.discord_webhook_url == "https://busy.example/webhook"
     assert settings.database_path == Path("/tmp/2busy1miss.sqlite3")
+    assert settings.agenda_schedule_time == time(20, 30)
+
+
+def test_agenda_schedule_time_requires_a_minute_precision_time() -> None:
+    assert Settings(agenda_schedule_time="20:30").agenda_schedule_time == time(20, 30)
+
+    with pytest.raises(ValueError, match="HH:MM"):
+        Settings(agenda_schedule_time="20:30:01")

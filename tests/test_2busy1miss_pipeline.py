@@ -1,4 +1,4 @@
-from datetime import date, datetime, timedelta
+from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import MagicMock
@@ -11,6 +11,7 @@ from two_busy_one_miss.pipeline import event_query_lookahead
 from two_busy_one_miss.renderer import render_agenda
 from two_busy_one_miss.rules import ReminderCandidate
 from two_busy_one_miss.storage import Database
+from two_read_runtime.discord import DiscordDeliveryError
 
 
 def test_event_query_lookahead_covers_longest_reminder() -> None:
@@ -71,12 +72,12 @@ def test_retry_delivery_holds_process_lock(tmp_path: Path, monkeypatch) -> None:
     def fake_deliver(*args: object) -> list[str]:
         assert lock.__enter__.called
         if args[1] == "bad":
-            raise RuntimeError("delivery failed")
+            raise DiscordDeliveryError("delivery failed")
         return ["discord-id"]
 
     monkeypatch.setattr(pipeline, "deliver", fake_deliver)
 
-    assert pipeline.retry_delivery(settings) == {
+    assert pipeline.retry_delivery(settings).model_dump() == {
         "status": "ok",
         "delivered": 1,
         "failed": 1,
@@ -117,9 +118,9 @@ def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkey
     monkeypatch.setattr(pipeline, "list_events_between", list_events)
     monkeypatch.setattr(pipeline, "deliver", deliver)
 
-    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True)["day"] == "2026-03-09"
-    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True)["skipped"] == 1
-    assert pipeline.next_day_agenda(settings, dry_run=False, force=True, scheduled=True)["sent"] == 1
+    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True).day == date(2026, 3, 9)
+    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True).skipped == 1
+    assert pipeline.next_day_agenda(settings, dry_run=False, force=True, scheduled=True).sent == 1
     assert deliveries == [render_agenda(date(2026, 3, 9), [])] * 2
     assert windows[0] == (datetime(2026, 3, 8, 21, tzinfo=timezone), datetime(2026, 3, 15, 21, tzinfo=timezone))
 
@@ -138,19 +139,19 @@ def test_manual_agenda_is_idempotent_and_forceable(tmp_path: Path, monkeypatch) 
     monkeypatch.setattr(pipeline, "list_events_between", lambda *args: [])
     monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: delivered.append(str(args[1])) or ["discord-id"])
 
-    assert pipeline.agenda(settings, date(2026, 7, 9), dry_run=False) == {
+    assert pipeline.agenda(settings, date(2026, 7, 9), dry_run=False).model_dump(exclude_none=True) == {
         "status": "ok",
         "sent": 1,
         "discord_message_ids": ["discord-id"],
         "events": 0,
     }
-    assert pipeline.agenda(settings, date(2026, 7, 9), dry_run=False) == {
+    assert pipeline.agenda(settings, date(2026, 7, 9), dry_run=False).model_dump(exclude_none=True) == {
         "status": "ok",
         "sent": 0,
         "skipped": 1,
         "events": 0,
     }
-    assert pipeline.agenda(settings, date(2026, 7, 9), dry_run=False, force=True)["sent"] == 1
+    assert pipeline.agenda(settings, date(2026, 7, 9), dry_run=False, force=True).sent == 1
     assert len(delivered) == 2
 
 
@@ -173,7 +174,9 @@ def test_scheduled_next_day_agenda_before_2100_is_noop(tmp_path: Path, monkeypat
     monkeypatch.setattr(pipeline, "Database", database)
     monkeypatch.setattr(pipeline, "deliver", deliver)
 
-    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True) == {
+    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True).model_dump(
+        mode="json", exclude_none=True
+    ) == {
         "status": "ok",
         "day": "2026-03-09",
         "sent": 0,
@@ -183,6 +186,45 @@ def test_scheduled_next_day_agenda_before_2100_is_noop(tmp_path: Path, monkeypat
     calendar.assert_not_called()
     database.assert_not_called()
     deliver.assert_not_called()
+
+
+def test_scheduled_next_day_agenda_uses_configured_time(tmp_path: Path, monkeypatch) -> None:
+    timezone = ZoneInfo("America/Montreal")
+    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    settings = Settings(
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        agenda_schedule_time=time(20, 30),
+    )
+
+    class FixedDatetime(datetime):
+        current = datetime(2026, 3, 8, 20, 29, tzinfo=timezone)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current.astimezone(tz)
+
+    monkeypatch.setattr(pipeline, "datetime", FixedDatetime)
+    monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
+    monkeypatch.setattr(pipeline, "list_events_between", lambda *args: [])
+
+    assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True).reason == "before_schedule"
+    FixedDatetime.current = datetime(2026, 3, 8, 20, 30, tzinfo=timezone)
+    result = pipeline.next_day_agenda(settings, dry_run=True, force=False, scheduled=True)
+    assert isinstance(result, pipeline.AgendaPreviewResult)
+    assert result.day == date(2026, 3, 9)
+
+
+def test_discover_returns_a_typed_result(tmp_path: Path, monkeypatch) -> None:
+    config = RemindersConfig(calendars=[{"id": "primary"}], timezone="America/Montreal")
+    settings = Settings(database_path=tmp_path / "reminders.sqlite3", lock_path=tmp_path / "reminders.lock")
+    monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
+    monkeypatch.setattr(pipeline, "list_events", lambda *args: [])
+
+    result = pipeline.discover(settings, 7)
+
+    assert isinstance(result, pipeline.DiscoverResult)
+    assert result.model_dump() == {"status": "ok", "events": []}
 
 
 def test_next_day_agenda_dry_run_skips_database_and_discord(tmp_path: Path, monkeypatch) -> None:
@@ -196,7 +238,7 @@ def test_next_day_agenda_dry_run_skips_database_and_discord(tmp_path: Path, monk
     monkeypatch.setattr(pipeline, "Database", database)
     monkeypatch.setattr(pipeline, "deliver", deliver)
 
-    assert pipeline.next_day_agenda(settings, dry_run=True, force=False)["status"] == "ok"
+    assert pipeline.next_day_agenda(settings, dry_run=True, force=False).status == "ok"
     database.assert_not_called()
     deliver.assert_not_called()
 
@@ -226,7 +268,7 @@ def test_next_day_agenda_includes_overlapping_events(tmp_path: Path, monkeypatch
 
     result = pipeline.next_day_agenda(settings, dry_run=True, force=False)
 
-    assert [item["title"] for item in result["events"]] == ["overlap", "within-day"]
+    assert [item.title for item in result.events] == ["overlap", "within-day"]
 
 
 def test_resync_cancels_overdue_job_after_an_event_changes(tmp_path: Path) -> None:
@@ -292,7 +334,7 @@ def test_retry_agenda_delivers_only_the_current_destination(tmp_path: Path, monk
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["discord-id"])
 
-    assert pipeline.retry_agenda(settings, day) == {
+    assert pipeline.retry_agenda(settings, day).model_dump(mode="json") == {
         "status": "ok",
         "day": "2026-07-09",
         "delivered": 1,
@@ -330,7 +372,7 @@ def test_run_reads_scheduled_jobs_without_calendar_and_expires_started_events(tm
     monkeypatch.setattr(pipeline, "list_events_between", lambda *args: (_ for _ in ()).throw(AssertionError("no Calendar read")))
     monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: delivered.append(str(args[1])) or ["1"])
 
-    assert pipeline.run(settings, dry_run=False) == {
+    assert pipeline.run(settings, dry_run=False).model_dump() == {
         "status": "ok",
         "sent": 1,
         "failed": 0,

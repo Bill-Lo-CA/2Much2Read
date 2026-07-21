@@ -67,16 +67,42 @@ def test_installers_leave_timers_disabled(
         assert "disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer" in calls
         assert "Enable reminders when ready: systemctl --user enable --now 2busy1miss-runtime.timer" in result.stdout
         assert "Enable agenda when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer" in result.stdout
+        agenda_timer = tmp_path / "home" / ".config" / "systemd" / "user" / "2busy1miss-runtime-agenda.timer"
+        assert "OnCalendar=*-*-* 21:00:00" in agenda_timer.read_text(encoding="utf-8")
+        (tmp_path / "home" / ".config" / "2much2read-runtime" / ".2busy1miss.env").write_text(
+            "AGENDA_SCHEDULE_TIME=20:30\n", encoding="utf-8"
+        )
+        subprocess.run(
+            ["sh", f"scripts/{script}", secret_option, str(client_secret)],
+            cwd=root,
+            env=environment,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        assert "OnCalendar=*-*-* 20:30:00" in agenda_timer.read_text(encoding="utf-8")
+        (tmp_path / "home" / ".config" / "2much2read-runtime" / ".2busy1miss.env").write_text(
+            "DISCORD_WEBHOOK_URL=\n", encoding="utf-8"
+        )
+        subprocess.run(
+            ["sh", f"scripts/{script}", secret_option, str(client_secret)],
+            cwd=root,
+            env=environment,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        assert "OnCalendar=*-*-* 21:00:00" in agenda_timer.read_text(encoding="utf-8")
     else:
         assert f"Enable when ready: systemctl --user enable --now {timer}" in result.stdout
 
 
-def test_2busy1miss_agenda_timer_runs_at_local_2100() -> None:
+def test_2busy1miss_agenda_timer_is_an_installer_template() -> None:
     root = Path(__file__).parents[1]
     timer = (root / "deploy/systemd/2busy1miss-runtime-agenda.timer").read_text(encoding="utf-8")
     service = (root / "deploy/systemd/2busy1miss-runtime-agenda.service").read_text(encoding="utf-8")
 
-    assert "OnCalendar=*-*-* 21:00:00" in timer
+    assert "OnCalendar=*-*-* __AGENDA_SCHEDULE_TIME__:00" in timer
     assert "Persistent=true" in timer
     assert "ExecStart=__EXECUTABLE__ agenda-next-day --scheduled" in service
 
