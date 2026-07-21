@@ -68,7 +68,8 @@ if [ ! -f "$reminders_file" ]; then
   chmod 600 "$reminders_file"
 fi
 
-agenda_schedule_time=$(sed -n 's/^AGENDA_SCHEDULE_TIME=//p' "$env_file")
+agenda_schedule_time=$(sed -n 's/^AGENDA_SCHEDULE_TIME=//p' "$env_file" || :)
+agenda_schedule_time=${agenda_schedule_time:-21:00}
 case "$agenda_schedule_time" in
   [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;;
   *)

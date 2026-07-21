@@ -81,6 +81,18 @@ def test_installers_leave_timers_disabled(
             capture_output=True,
         )
         assert "OnCalendar=*-*-* 20:30:00" in agenda_timer.read_text(encoding="utf-8")
+        (tmp_path / "home" / ".config" / "2much2read-runtime" / ".2busy1miss.env").write_text(
+            "DISCORD_WEBHOOK_URL=\n", encoding="utf-8"
+        )
+        subprocess.run(
+            ["sh", f"scripts/{script}", secret_option, str(client_secret)],
+            cwd=root,
+            env=environment,
+            check=True,
+            text=True,
+            capture_output=True,
+        )
+        assert "OnCalendar=*-*-* 21:00:00" in agenda_timer.read_text(encoding="utf-8")
     else:
         assert f"Enable when ready: systemctl --user enable --now {timer}" in result.stdout
 
