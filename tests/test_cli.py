@@ -221,7 +221,7 @@ def test_mails_inspect_outputs_parsed_text_and_extraction(tmp_path: Path, monkey
 
     monkeypatch.setattr(cli, "Settings", lambda: settings)
     monkeypatch.setattr(operations, "gmail_client", lambda settings: FakeGmailClient())
-    monkeypatch.setattr(operations, "OllamaClient", FakeOllamaClient)
+    monkeypatch.setattr(operations, "create_ollama_client", lambda _: FakeOllamaClient())
 
     result = CliRunner().invoke(
         cli.app,

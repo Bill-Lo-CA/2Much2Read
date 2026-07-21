@@ -98,12 +98,13 @@ def run_command(dry_run: Annotated[bool, typer.Option()] = False) -> None:
 def agenda_command(
     day: Annotated[str, typer.Argument()],
     dry_run: Annotated[bool, typer.Option()] = False,
+    force: Annotated[bool, typer.Option()] = False,
 ) -> None:
     try:
         parsed = date.fromisoformat(day)
     except ValueError as error:
         raise typer.BadParameter("date must use YYYY-MM-DD") from error
-    emit(agenda(Settings(), parsed, dry_run))
+    emit(agenda(Settings(), parsed, dry_run, force))
 
 
 @app.command("agenda-next-day")

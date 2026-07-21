@@ -2,7 +2,7 @@ import httpx
 import pytest
 import respx
 
-from two_read_runtime.discord import chunk_text, deliver, parse_message_ids
+from two_read_runtime.discord import chunk_text, deliver, deliver_resumable, parse_message_ids
 
 
 @pytest.mark.parametrize(
@@ -81,3 +81,31 @@ def test_resumes_after_saved_chunk_progress() -> None:
     assert message_ids == ["1", "2"]
     assert progress == [["1", "2"]]
     assert route.call_count == 1
+
+
+def test_deliver_resumable_restores_checkpoint_and_records_success() -> None:
+    progress: list[list[str]] = []
+    delivered: list[list[str]] = []
+
+    def sender(
+        webhook_url: str,
+        content: str,
+        username: str,
+        message_ids: list[str] | None,
+        on_progress: object,
+    ) -> list[str]:
+        assert (webhook_url, content, username, message_ids) == (
+            "https://discord.example/webhook",
+            "content",
+            "2much2read",
+            ["one"],
+        )
+        assert callable(on_progress)
+        on_progress(["one", "two"])
+        return ["one", "two"]
+
+    assert deliver_resumable(
+        "https://discord.example/webhook", "content", "2much2read", '["one"]', progress.append, delivered.append, sender=sender
+    ) == ["one", "two"]
+    assert progress == [["one", "two"]]
+    assert delivered == [["one", "two"]]

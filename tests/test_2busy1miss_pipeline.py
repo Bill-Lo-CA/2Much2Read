@@ -124,6 +124,36 @@ def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkey
     assert windows[0] == (datetime(2026, 3, 8, 21, tzinfo=timezone), datetime(2026, 3, 15, 21, tzinfo=timezone))
 
 
+def test_manual_agenda_is_idempotent_and_forceable(tmp_path: Path, monkeypatch) -> None:
+    timezone = ZoneInfo("America/Montreal")
+    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    settings = Settings(
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        discord_webhook_url="https://busy.example/webhook",
+    )
+    delivered: list[str] = []
+
+    monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
+    monkeypatch.setattr(pipeline, "list_events_between", lambda *args: [])
+    monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: delivered.append(str(args[1])) or ["discord-id"])
+
+    assert pipeline.agenda(settings, date(2026, 7, 9), dry_run=False) == {
+        "status": "ok",
+        "sent": 1,
+        "discord_message_ids": ["discord-id"],
+        "events": 0,
+    }
+    assert pipeline.agenda(settings, date(2026, 7, 9), dry_run=False) == {
+        "status": "ok",
+        "sent": 0,
+        "skipped": 1,
+        "events": 0,
+    }
+    assert pipeline.agenda(settings, date(2026, 7, 9), dry_run=False, force=True)["sent"] == 1
+    assert len(delivered) == 2
+
+
 def test_scheduled_next_day_agenda_before_2100_is_noop(tmp_path: Path, monkeypatch) -> None:
     timezone = ZoneInfo("America/Montreal")
     config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)

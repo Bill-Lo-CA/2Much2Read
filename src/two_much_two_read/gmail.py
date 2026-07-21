@@ -44,6 +44,12 @@ def source_backfill_query(source: Source) -> str:
     return f'{query} -label:"{source.gmail_filter.label}"'
 
 
+def message_headers(message: dict[str, object]) -> dict[str, str]:
+    payload = message.get("payload", {})
+    headers = payload.get("headers", []) if isinstance(payload, dict) else []
+    return {str(item.get("name", "")).lower(): str(item.get("value", "")) for item in headers if isinstance(item, dict)}
+
+
 def credentials(credentials_path: Path, token_path: Path, port: int = 8765, *, interactive: bool = False) -> Credentials:
     return load_credentials(
         credentials_path,

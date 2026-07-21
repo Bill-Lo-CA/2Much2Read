@@ -22,9 +22,9 @@ from .config import (
     load_sources,
     update_subscription_files,
 )
-from .gmail import FilterStatus, GmailClient, credentials, display_id
+from .gmail import FilterStatus, GmailClient, credentials, display_id, message_headers
 from .mime import extract_gmail_payload
-from .ollama import OllamaClient
+from .ollama import create_ollama_client
 
 CATEGORY_OPTIONS = {
     "1": ("AI", "ai-newsPaper"),
@@ -151,12 +151,6 @@ def gmail_client(settings: Settings) -> GmailClient:
                 settings.gmail_oauth_callback_port,
             )
         )
-
-
-def message_headers(message: dict[str, object]) -> dict[str, str]:
-    payload = message.get("payload", {})
-    headers = payload.get("headers", []) if isinstance(payload, dict) else []
-    return {str(item.get("name", "")).lower(): str(item.get("value", "")) for item in headers if isinstance(item, dict)}
 
 
 def _model_name(value: str) -> str:
@@ -361,13 +355,7 @@ def inspect_mail(settings: Settings, selector: MailSelector, message_id: str, li
             )
             max_items = source.max_items_per_email if source else 10
             extraction = (
-                OllamaClient(
-                    settings.ollama_base_url,
-                    settings.ollama_model,
-                    settings.ollama_timeout_seconds,
-                    settings.ollama_num_ctx,
-                    settings.ollama_keep_alive,
-                )
+                create_ollama_client(settings)
                 .extract(source_id, llm_input, len(text) > 45_000, max_items)
                 .model_dump(mode="json")
             )

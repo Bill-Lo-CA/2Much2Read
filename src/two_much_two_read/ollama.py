@@ -8,6 +8,7 @@ from urllib.parse import urlsplit, urlunsplit
 import httpx
 from pydantic import ValidationError
 
+from .config import Settings
 from .schemas import EmailExtraction
 
 SYSTEM_PROMPT = """You extract newsletter facts into the supplied JSON schema.
@@ -125,3 +126,13 @@ class OllamaClient:
                     ]
                 )
         raise AssertionError("unreachable")
+
+
+def create_ollama_client(settings: Settings) -> OllamaClient:
+    return OllamaClient(
+        settings.ollama_base_url,
+        settings.ollama_model,
+        settings.ollama_timeout_seconds,
+        settings.ollama_num_ctx,
+        settings.ollama_keep_alive,
+    )
