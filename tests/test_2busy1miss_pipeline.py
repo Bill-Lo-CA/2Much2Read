@@ -1,7 +1,7 @@
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, call
 from zoneinfo import ZoneInfo
 
 import pytest
@@ -45,6 +45,21 @@ def test_calendar_client_requests_conference_data() -> None:
         conferenceDataVersion=1,
         pageToken=None,
     )
+
+
+def test_calendar_client_lists_all_calendar_pages() -> None:
+    client = CalendarClient.__new__(CalendarClient)
+    client.service = MagicMock()
+    client.service.calendarList.return_value.list.return_value.execute.side_effect = [
+        {"items": [{"id": "primary", "summary": "Primary"}], "nextPageToken": "next"},
+        {"items": [{"id": "team"}]},
+    ]
+
+    assert client.list_calendars() == [{"id": "primary", "name": "Primary"}, {"id": "team", "name": "team"}]
+    assert client.service.calendarList.return_value.list.call_args_list == [
+        call(maxResults=250, pageToken=None),
+        call(maxResults=250, pageToken="next"),
+    ]
 
 
 def test_retry_delivery_holds_process_lock(tmp_path: Path, monkeypatch) -> None:

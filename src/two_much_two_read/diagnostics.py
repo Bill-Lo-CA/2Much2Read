@@ -42,13 +42,19 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
     except (httpx.HTTPError, ValueError):
         checks["ollama"] = "unreachable"
     checks["discord"] = "configured" if settings.discord_webhook_url else "missing"
-    if send_test and settings.discord_webhook_url:
-        response = httpx.post(
-            settings.discord_webhook_url,
-            params={"wait": "true"},
-            json={"content": "2much2read connectivity test", "allowed_mentions": {"parse": []}},
-            timeout=30,
-        )
-        checks["discord_test"] = "ok" if response.is_success else "failed"
+    if send_test:
+        if not settings.discord_webhook_url:
+            checks["discord_test"] = "missing"
+        else:
+            try:
+                response = httpx.post(
+                    settings.discord_webhook_url,
+                    params={"wait": "true"},
+                    json={"content": "2much2read connectivity test", "allowed_mentions": {"parse": []}},
+                    timeout=30,
+                )
+                checks["discord_test"] = "ok" if response.is_success else "failed"
+            except httpx.HTTPError:
+                checks["discord_test"] = "unreachable"
     status = "ok" if all(value in {"ok", "configured"} for value in checks.values()) else "warning"
     return DoctorResult(status=status, checks=checks)

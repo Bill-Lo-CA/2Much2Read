@@ -89,45 +89,48 @@ class Database:
         with self.connection:
             yield self.connection
 
-    def upsert_event(self, event: CalendarEvent) -> int:
+    def _upsert_event(self, connection: sqlite3.Connection, event: CalendarEvent) -> int:
         now = datetime.now(UTC).isoformat()
-        with self.transaction() as connection:
-            connection.execute(
-                """INSERT INTO events
-                (calendar_id,calendar_name,event_id,instance_id,title,location,start_at,end_at,all_day,updated_at)
-                VALUES(?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(calendar_id, instance_id) DO UPDATE SET
-                  calendar_name=excluded.calendar_name,
-                  event_id=excluded.event_id,
-                  title=excluded.title,
-                  location=excluded.location,
-                  start_at=excluded.start_at,
-                  end_at=excluded.end_at,
-                  all_day=excluded.all_day,
-                  updated_at=excluded.updated_at""",
-                (
-                    event.calendar_id,
-                    event.calendar_name,
-                    event.event_id,
-                    event.instance_id,
-                    event.title,
-                    event.location,
-                    event.start.isoformat(),
-                    event.end.isoformat(),
-                    int(event.all_day),
-                    now,
-                ),
-            )
-            row = connection.execute(
-                "SELECT id FROM events WHERE calendar_id=? AND instance_id=?",
-                (event.calendar_id, event.instance_id),
-            ).fetchone()
+        connection.execute(
+            """INSERT INTO events
+            (calendar_id,calendar_name,event_id,instance_id,title,location,start_at,end_at,all_day,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(calendar_id, instance_id) DO UPDATE SET
+              calendar_name=excluded.calendar_name,
+              event_id=excluded.event_id,
+              title=excluded.title,
+              location=excluded.location,
+              start_at=excluded.start_at,
+              end_at=excluded.end_at,
+              all_day=excluded.all_day,
+              updated_at=excluded.updated_at""",
+            (
+                event.calendar_id,
+                event.calendar_name,
+                event.event_id,
+                event.instance_id,
+                event.title,
+                event.location,
+                event.start.isoformat(),
+                event.end.isoformat(),
+                int(event.all_day),
+                now,
+            ),
+        )
+        row = connection.execute(
+            "SELECT id FROM events WHERE calendar_id=? AND instance_id=?",
+            (event.calendar_id, event.instance_id),
+        ).fetchone()
         return int(row["id"])
 
-    def create_attempt(self, candidate: ReminderCandidate, content: str) -> int | None:
-        event_row_id = self.upsert_event(candidate.event)
+    def upsert_event(self, event: CalendarEvent) -> int:
+        with self.transaction() as connection:
+            return self._upsert_event(connection, event)
+
+    def _create_attempt(self, connection: sqlite3.Connection, candidate: ReminderCandidate, content: str) -> int | None:
+        event_row_id = self._upsert_event(connection, candidate.event)
         now = datetime.now(UTC).isoformat()
-        cursor = self.connection.execute(
+        cursor = connection.execute(
             """INSERT OR IGNORE INTO reminder_attempts
             (event_row_id,calendar_id,event_id,instance_id,rule_id,reminder_at,content,state,created_at,updated_at)
             VALUES(?,?,?,?,?,?,?,'pending',?,?)""",
@@ -143,10 +146,9 @@ class Database:
                 now,
             ),
         )
-        self.connection.commit()
         if cursor.rowcount and cursor.lastrowid is not None:
             return int(cursor.lastrowid)
-        self.connection.execute(
+        connection.execute(
             """UPDATE reminder_attempts SET event_row_id=?, content=?, state='pending', discord_message_ids_json=NULL,
             last_error_code=NULL, updated_at=?
             WHERE calendar_id=? AND event_id=? AND instance_id=? AND rule_id=? AND reminder_at=?
@@ -163,8 +165,15 @@ class Database:
                 content,
             ),
         )
-        self.connection.commit()
         return None
+
+    def create_attempt(self, candidate: ReminderCandidate, content: str) -> int | None:
+        with self.transaction() as connection:
+            return self._create_attempt(connection, candidate, content)
+
+    def create_attempts(self, candidates: list[tuple[ReminderCandidate, str]]) -> int:
+        with self.transaction() as connection:
+            return sum(self._create_attempt(connection, candidate, content) is not None for candidate, content in candidates)
 
     def pending_attempts(self) -> list[sqlite3.Row]:
         return self.connection.execute(

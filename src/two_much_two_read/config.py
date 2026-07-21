@@ -156,14 +156,6 @@ def _temporary_file(path: Path, content: bytes, mode: int) -> Path:
     return temporary
 
 
-def replace_file(path: Path, content: str, mode: int) -> None:
-    temporary = _temporary_file(path, content.encode(), mode)
-    try:
-        os.replace(temporary, path)
-    finally:
-        temporary.unlink(missing_ok=True)
-
-
 def replace_files(replacements: list[tuple[Path, str, int]]) -> None:
     originals = {
         path: (path.read_bytes(), stat.S_IMODE(path.stat().st_mode)) if path.exists() else None for path, _, _ in replacements
@@ -218,11 +210,6 @@ def _appended_sources_content(path: Path, additions: list[Source]) -> tuple[str,
     return updated, stat.S_IMODE(path.stat().st_mode)
 
 
-def append_sources(path: Path, additions: list[Source]) -> None:
-    if update := _appended_sources_content(path, additions):
-        replace_file(path, *update)
-
-
 def _appended_excluded_subscriptions_content(path: Path, additions: list[ExcludedSubscription]) -> str | None:
     if not additions:
         return None
@@ -235,11 +222,6 @@ def _appended_excluded_subscriptions_content(path: Path, additions: list[Exclude
         sort_keys=False,
     )
     return content
-
-
-def append_excluded_subscriptions(path: Path, additions: list[ExcludedSubscription]) -> None:
-    if content := _appended_excluded_subscriptions_content(path, additions):
-        replace_file(path, content, 0o600)
 
 
 def update_subscription_files(

@@ -61,7 +61,3 @@ def schedule_reminders(config: RemindersConfig, events: list[CalendarEvent]) -> 
                 candidate = ReminderCandidate(event, rule_id, reminder.before, event.start - parse_offset(reminder.before))
                 scheduled[event.calendar_id, event.instance_id, candidate.reminder_time] = candidate
     return sorted(scheduled.values(), key=lambda item: (item.reminder_time, item.event.start, item.rule_id))
-
-
-def due_reminders(candidates: list[ReminderCandidate], now: datetime) -> list[ReminderCandidate]:
-    return [item for item in candidates if item.reminder_time <= now <= item.event.start]
