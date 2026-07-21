@@ -10,20 +10,28 @@ CORRUPT_MESSAGE_IDS = "DISCORD_MESSAGE_IDS_CORRUPT"
 DiscordSender = Callable[[str, str, str, list[str] | None, Callable[[list[str]], None] | None], list[str]]
 
 
+class DiscordDeliveryError(ValueError):
+    pass
+
+
+class CorruptMessageIdsError(DiscordDeliveryError):
+    pass
+
+
 def parse_message_ids(value: object) -> list[str]:
     if value is None:
         return []
     try:
         parsed = json.loads(str(value))
     except json.JSONDecodeError as error:
-        raise ValueError(f"{CORRUPT_MESSAGE_IDS}: expected a JSON array of strings") from error
+        raise CorruptMessageIdsError(f"{CORRUPT_MESSAGE_IDS}: expected a JSON array of strings") from error
     if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
-        raise ValueError(f"{CORRUPT_MESSAGE_IDS}: expected a JSON array of strings")
+        raise CorruptMessageIdsError(f"{CORRUPT_MESSAGE_IDS}: expected a JSON array of strings")
     return parsed
 
 
 def delivery_error_code(error: Exception) -> str:
-    if isinstance(error, ValueError) and str(error).startswith(f"{CORRUPT_MESSAGE_IDS}:"):
+    if isinstance(error, CorruptMessageIdsError):
         return CORRUPT_MESSAGE_IDS
     return "DISCORD_DELIVERY_FAILED"
 
@@ -90,30 +98,34 @@ def deliver(
     on_progress: Callable[[list[str]], None] | None = None,
 ) -> list[str]:
     if not webhook_url:
-        raise ValueError("DISCORD_WEBHOOK_URL is required")
+        raise DiscordDeliveryError("DISCORD_WEBHOOK_URL is required")
     message_ids = list(message_ids or [])
     chunks = chunk_text(content)
     if len(message_ids) > len(chunks):
-        raise ValueError("stored Discord delivery progress exceeds message chunks")
+        raise DiscordDeliveryError("stored Discord delivery progress exceeds message chunks")
     for chunk in chunks[len(message_ids) :]:
         for attempt in range(4):
-            response = httpx.post(
-                webhook_url,
-                params={"wait": "true"},
-                json={"content": chunk, "username": username, "allowed_mentions": {"parse": []}},
-                timeout=30,
-            )
-            if response.status_code == 429:
-                time.sleep(float(response.headers.get("Retry-After", "1")))
-                continue
-            if response.status_code >= 500 and attempt < 3:
-                time.sleep(2**attempt)
-                continue
-            response.raise_for_status()
-            message_ids.append(str(response.json()["id"]))
+            try:
+                response = httpx.post(
+                    webhook_url,
+                    params={"wait": "true"},
+                    json={"content": chunk, "username": username, "allowed_mentions": {"parse": []}},
+                    timeout=30,
+                )
+                if response.status_code == 429:
+                    time.sleep(float(response.headers.get("Retry-After", "1")))
+                    continue
+                if response.status_code >= 500 and attempt < 3:
+                    time.sleep(2**attempt)
+                    continue
+                response.raise_for_status()
+                message_id = str(response.json()["id"])
+            except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
+                raise DiscordDeliveryError("DISCORD_DELIVERY_FAILED") from error
+            message_ids.append(message_id)
             if on_progress is not None:
                 on_progress(message_ids)
             break
         else:
-            raise RuntimeError("DISCORD_DELIVERY_FAILED")
+            raise DiscordDeliveryError("DISCORD_DELIVERY_FAILED")
     return message_ids

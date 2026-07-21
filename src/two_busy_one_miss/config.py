@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from datetime import timedelta
+from datetime import time, timedelta
 from pathlib import Path
 from typing import Any, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
@@ -110,11 +110,19 @@ class Settings(BaseSettings):
     discord_username: str = "2busy1miss"
     reminder_timezone: str = "America/Montreal"
     reminder_lookahead_days: int = Field(default=7, ge=1, le=366)
+    agenda_schedule_time: time = time(21)
 
     @field_validator("reminder_timezone")
     @classmethod
     def valid_timezone(cls, value: str) -> str:
         return _timezone(value)
+
+    @field_validator("agenda_schedule_time")
+    @classmethod
+    def valid_agenda_schedule_time(cls, value: time) -> time:
+        if value.second or value.microsecond:
+            raise ValueError("agenda schedule time must use HH:MM")
+        return value
 
     def __init__(self, **data: Any) -> None:
         super().__init__(_env_file=settings_env_file(), **data)
@@ -123,4 +131,8 @@ class Settings(BaseSettings):
 def load_reminders(path: Path) -> RemindersConfig:
     if not path.is_file():
         raise ValueError(f"reminders configuration not found: {path}")
-    return RemindersConfig.model_validate(yaml.safe_load(path.read_text(encoding="utf-8")))
+    try:
+        data = yaml.safe_load(path.read_text(encoding="utf-8"))
+    except yaml.YAMLError as error:
+        raise ValueError(f"invalid reminders configuration: {path}") from error
+    return RemindersConfig.model_validate(data)

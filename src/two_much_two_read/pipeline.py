@@ -1,12 +1,11 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from two_read_runtime.discord import deliver, deliver_resumable, delivery_error_code
+from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code
 from two_read_runtime.locking import ProcessLock
 
 from .config import Settings, Source, load_sources
@@ -228,9 +227,7 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> dict
                         sender=deliver,
                     )
                     delivered += 1
-                except sqlite3.Error:
-                    raise
-                except Exception as error:
+                except DiscordDeliveryError as error:
                     error_code = delivery_error_code(error)
                     active_database.fail_delivery(int(digest["id"]), error_code)
                     failed += 1
@@ -259,6 +256,6 @@ def deliver_digest(settings: Settings, database: Database, digest_id: int) -> No
             lambda message_ids: database.finish_delivery(digest_id, message_ids),
             sender=deliver,
         )
-    except Exception as error:
+    except DiscordDeliveryError as error:
         database.fail_delivery(digest_id, delivery_error_code(error))
         raise

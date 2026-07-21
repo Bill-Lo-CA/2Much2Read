@@ -6,6 +6,7 @@ from collections.abc import Callable
 from email.utils import parseaddr
 
 import httpx
+import yaml
 from pydantic import BaseModel, Field, model_validator
 
 from two_read_runtime.locking import ProcessLock
@@ -478,7 +479,7 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
     try:
         load_sources(settings.sources_config_path)
         checks["sources"] = "ok"
-    except Exception as error:
+    except (OSError, ValueError, yaml.YAMLError) as error:
         checks["sources"] = str(error)
     checks["gmail_token"] = token_status(
         settings.gmail_token_path,
@@ -488,11 +489,16 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
     try:
         response = httpx.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags", timeout=5)
         response.raise_for_status()
-        models = [model.get("name") for model in response.json().get("models", []) if isinstance(model, dict)]
+        payload = response.json()
+        models = (
+            [model.get("name") for model in payload.get("models", []) if isinstance(model, dict)]
+            if isinstance(payload, dict)
+            else []
+        )
         checks["ollama"] = (
             "ok" if _model_name(settings.ollama_model) in {_model_name(str(model)) for model in models} else "model_missing"
         )
-    except Exception:
+    except (httpx.HTTPError, ValueError):
         checks["ollama"] = "unreachable"
     checks["discord"] = "configured" if settings.discord_webhook_url else "missing"
     if send_test and settings.discord_webhook_url:

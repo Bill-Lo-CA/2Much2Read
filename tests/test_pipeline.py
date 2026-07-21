@@ -11,6 +11,7 @@ from two_much_two_read.ollama import OllamaSchemaError
 from two_much_two_read.pipeline import deliver_digest, run_pipeline
 from two_much_two_read.schemas import EmailExtraction
 from two_much_two_read.storage import Database
+from two_read_runtime.discord import DiscordDeliveryError
 
 
 def write_sources(path: Path, *, enabled: bool = True) -> None:
@@ -145,7 +146,7 @@ def test_retry_delivery_continues_after_a_failed_digest(tmp_path: Path, monkeypa
 
     def fake_deliver(*args: object) -> list[str]:
         if args[1] == "bad":
-            raise RuntimeError("delivery failed")
+            raise DiscordDeliveryError("delivery failed")
         return ["discord-id"]
 
     monkeypatch.setattr(pipeline, "deliver", fake_deliver)
@@ -167,7 +168,7 @@ def test_retry_delivery_stops_when_recording_a_failure_hits_the_database(tmp_pat
         {"id": 2, "rendered_content": "good", "discord_message_ids_json": None},
     ]
     database.fail_delivery.side_effect = sqlite3.OperationalError("database unavailable")
-    monkeypatch.setattr(pipeline, "deliver", lambda *args: (_ for _ in ()).throw(RuntimeError("delivery failed")))
+    monkeypatch.setattr(pipeline, "deliver", lambda *args: (_ for _ in ()).throw(DiscordDeliveryError("delivery failed")))
 
     with pytest.raises(sqlite3.OperationalError, match="database unavailable"):
         pipeline.retry_delivery(settings, database)

@@ -89,9 +89,11 @@ systemctl --user enable --now 2busy1miss-runtime-agenda.timer
 ```
 
 `REMINDER_LOOKAHEAD_DAYS` in `.2busy1miss.env` controls the Calendar sync horizon
-(default: 7; maximum: 366). The 21:00 agenda job reads that horizon and writes
-one-time reminder jobs to SQLite. `2busy1miss-runtime.timer` runs every minute and only
-dispatches those local jobs. To refresh jobs after adding or changing an event,
+(default: 7; maximum: 366). `AGENDA_SCHEDULE_TIME` controls the daily next-day
+agenda time in `HH:MM` format (default: `21:00`); after changing it, rerun the
+installer to render the systemd timer. That agenda job reads the horizon and writes
+one-time reminder jobs to SQLite. `2busy1miss-runtime.timer` runs every minute and
+only dispatches those local jobs. To refresh jobs after adding or changing an event,
 run `uv run 2busy1miss agenda-next-day`; an already delivered agenda is skipped,
 but reminder jobs are reconciled.
 
@@ -108,7 +110,7 @@ uv run 2busy1miss agenda-retry 2026-07-16
 uv run 2busy1miss retry-delivery
 ```
 
-Manual and next-day agendas use the same durable delivery record, de-duplicated by date, timezone, and Discord destination; `agenda-retry` retries failed records and `--force` is the explicit resend path. `2busy1miss-runtime-agenda.timer` runs at 21:00 in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone and synchronizes the configured reminder horizon. Its persistent catch-up is ignored before 21:00 in that timezone, so a morning startup cannot send the next day's agenda early. Empty days are sent as `No events`. Reminder messages use the same Markdown code-block style as agendas; a retry after an event starts marks the job `expired` instead of sending it.
+Manual and next-day agendas use the same durable delivery record, de-duplicated by date, timezone, and Discord destination; `agenda-retry` retries failed records and `--force` is the explicit resend path. `2busy1miss-runtime-agenda.timer` runs at `AGENDA_SCHEDULE_TIME` in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone and synchronizes the configured reminder horizon. Its persistent catch-up is ignored before that configured time, so a morning startup cannot send the next day's agenda early. Empty days are sent as `No events`. Reminder messages use the same Markdown code-block style as agendas; a retry after an event starts marks the job `expired` instead of sending it.
 
 ## Delivery behavior
 

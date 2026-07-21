@@ -1,11 +1,13 @@
 from __future__ import annotations
 
-import sqlite3
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
+from typing import Literal
 from zoneinfo import ZoneInfo
 
-from two_read_runtime.discord import deliver, deliver_resumable, delivery_error_code
+from pydantic import BaseModel
+
+from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code
 from two_read_runtime.locking import ProcessLock
 
 from .config import RemindersConfig, Settings, load_reminders
@@ -13,6 +15,84 @@ from .google_calendar import CalendarClient, CalendarEvent, credentials
 from .renderer import render_agenda, render_reminder
 from .rules import ReminderCandidate, parse_offset, schedule_reminders
 from .storage import Database
+
+
+class EventView(BaseModel):
+    calendar_id: str
+    calendar_name: str | None
+    event_id: str
+    instance_id: str
+    title: str
+    location: str
+    start: datetime
+    end: datetime
+    all_day: bool
+
+
+class ReminderView(BaseModel):
+    rule_id: str
+    before: str
+    reminder_time: datetime
+    event: EventView
+
+
+class DiscoverResult(BaseModel):
+    status: Literal["ok"] = "ok"
+    events: list[EventView]
+
+
+class RulesTestResult(BaseModel):
+    status: Literal["ok"] = "ok"
+    reminders: list[ReminderView]
+
+
+class AgendaPreviewResult(BaseModel):
+    status: Literal["ok"] = "ok"
+    content: str
+    events: list[EventView]
+    day: date | None = None
+    scheduled_reminders: int | None = None
+
+
+class AgendaDeliveryResult(BaseModel):
+    status: Literal["ok"] = "ok"
+    sent: int
+    events: int | None = None
+    day: date | None = None
+    skipped: int | None = None
+    reason: str | None = None
+    discord_message_ids: list[str] | None = None
+    scheduled_reminders: int | None = None
+    cancelled_reminders: int | None = None
+
+
+class AgendaRetryResult(BaseModel):
+    status: Literal["ok"] = "ok"
+    day: date
+    delivered: int
+    failed: int
+    failed_by_error_code: dict[str, int]
+
+
+class ReminderRunResult(BaseModel):
+    status: Literal["ok"] = "ok"
+    sent: int
+    failed: int
+    failed_by_error_code: dict[str, int]
+    expired: int
+
+
+class ReminderDryRunResult(BaseModel):
+    status: Literal["ok"] = "ok"
+    due: list[str]
+
+
+class ReminderRetryResult(BaseModel):
+    status: Literal["ok"] = "ok"
+    delivered: int
+    failed: int
+    failed_by_error_code: dict[str, int]
+    expired: int
 
 
 def calendar_client(settings: Settings, config: RemindersConfig) -> CalendarClient:
@@ -47,27 +127,27 @@ def event_query_lookahead(config: RemindersConfig, days: int) -> timedelta:
     return max([timedelta(days=days), *offsets])
 
 
-def event_view(event: CalendarEvent) -> dict[str, object]:
-    return {
-        "calendar_id": event.calendar_id,
-        "calendar_name": event.calendar_name,
-        "event_id": event.event_id,
-        "instance_id": event.instance_id,
-        "title": event.title,
-        "location": event.location,
-        "start": event.start.isoformat(),
-        "end": event.end.isoformat(),
-        "all_day": event.all_day,
-    }
+def event_view(event: CalendarEvent) -> EventView:
+    return EventView(
+        calendar_id=event.calendar_id,
+        calendar_name=event.calendar_name,
+        event_id=event.event_id,
+        instance_id=event.instance_id,
+        title=event.title,
+        location=event.location,
+        start=event.start,
+        end=event.end,
+        all_day=event.all_day,
+    )
 
 
-def reminder_view(candidate: ReminderCandidate) -> dict[str, object]:
-    return {
-        "rule_id": candidate.rule_id,
-        "before": candidate.before,
-        "reminder_time": candidate.reminder_time.isoformat(),
-        "event": event_view(candidate.event),
-    }
+def reminder_view(candidate: ReminderCandidate) -> ReminderView:
+    return ReminderView(
+        rule_id=candidate.rule_id,
+        before=candidate.before,
+        reminder_time=candidate.reminder_time,
+        event=event_view(candidate.event),
+    )
 
 
 def _sync_scheduled_reminders(
@@ -105,7 +185,7 @@ def _deliver_agenda(
             lambda message_ids: database.finish_agenda_delivery(delivery_id, message_ids),
             sender=deliver,
         )
-    except Exception as error:
+    except DiscordDeliveryError as error:
         database.fail_agenda_delivery(delivery_id, delivery_error_code(error))
         raise
 
@@ -139,9 +219,7 @@ def _dispatch_due_reminders(database: Database, settings: Settings, now: datetim
                 sender=deliver,
             )
             sent += 1
-        except sqlite3.Error:
-            raise
-        except Exception as error:
+        except DiscordDeliveryError as error:
             error_code = delivery_error_code(error)
             database.fail_delivery(attempt_id, error_code)
             failed += 1
@@ -149,19 +227,19 @@ def _dispatch_due_reminders(database: Database, settings: Settings, now: datetim
     return sent, failed, expired, failed_by_error_code
 
 
-def discover(settings: Settings, days: int) -> dict[str, object]:
+def discover(settings: Settings, days: int) -> DiscoverResult:
     config = load_reminders(settings.reminders_config_path)
     events = list_events(settings, config, days)
-    return {"status": "ok", "events": [event_view(event) for event in events]}
+    return DiscoverResult(events=[event_view(event) for event in events])
 
 
-def test_rules(settings: Settings, days: int) -> dict[str, object]:
+def test_rules(settings: Settings, days: int) -> RulesTestResult:
     config = load_reminders(settings.reminders_config_path)
     candidates = schedule_reminders(config, list_events(settings, config, days))
-    return {"status": "ok", "reminders": [reminder_view(candidate) for candidate in candidates]}
+    return RulesTestResult(reminders=[reminder_view(candidate) for candidate in candidates])
 
 
-def agenda(settings: Settings, day: date, dry_run: bool, force: bool = False) -> dict[str, object]:
+def agenda(settings: Settings, day: date, dry_run: bool, force: bool = False) -> AgendaPreviewResult | AgendaDeliveryResult:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
     start = datetime.combine(day, time.min, timezone)
@@ -169,26 +247,28 @@ def agenda(settings: Settings, day: date, dry_run: bool, force: bool = False) ->
     events = list_events_between(settings, config, start, end)
     content = render_agenda(day, events)
     if dry_run:
-        return {"status": "ok", "content": content, "events": [event_view(event) for event in events]}
+        return AgendaPreviewResult(content=content, events=[event_view(event) for event in events])
     with ProcessLock(settings.lock_path):
         database = Database(settings.database_path)
         try:
             delivery_id = _create_agenda_delivery(database, settings, day, timezone, content, force=force)
             if delivery_id is None:
-                return {"status": "ok", "sent": 0, "skipped": 1, "events": len(events)}
+                return AgendaDeliveryResult(sent=0, skipped=1, events=len(events))
             message_ids = _deliver_agenda(database, settings, delivery_id, content, None)
         finally:
             database.close()
-    return {"status": "ok", "sent": 1, "discord_message_ids": message_ids, "events": len(events)}
+    return AgendaDeliveryResult(sent=1, discord_message_ids=message_ids, events=len(events))
 
 
-def next_day_agenda(settings: Settings, dry_run: bool, force: bool, *, scheduled: bool = False) -> dict[str, object]:
+def next_day_agenda(
+    settings: Settings, dry_run: bool, force: bool, *, scheduled: bool = False
+) -> AgendaPreviewResult | AgendaDeliveryResult:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
     now = datetime.now(timezone)
     day = now.date() + timedelta(days=1)
-    if scheduled and now < datetime.combine(now.date(), time(21), timezone):
-        return {"status": "ok", "day": day.isoformat(), "sent": 0, "skipped": 1, "reason": "before_schedule"}
+    if scheduled and now < datetime.combine(now.date(), settings.agenda_schedule_time, timezone):
+        return AgendaDeliveryResult(day=day, sent=0, skipped=1, reason="before_schedule")
     start = datetime.combine(day, time.min, timezone)
     end = datetime.combine(day + timedelta(days=1), time.min, timezone)
     sync_end = now + event_query_lookahead(config, settings.reminder_lookahead_days)
@@ -196,13 +276,12 @@ def next_day_agenda(settings: Settings, dry_run: bool, force: bool, *, scheduled
     agenda_events = [event for event in events if event.end > start and event.start < end]
     content = render_agenda(day, agenda_events)
     if dry_run:
-        return {
-            "status": "ok",
-            "day": day.isoformat(),
-            "content": content,
-            "events": [event_view(event) for event in agenda_events],
-            "scheduled_reminders": len(schedule_reminders(config, events)),
-        }
+        return AgendaPreviewResult(
+            day=day,
+            content=content,
+            events=[event_view(event) for event in agenda_events],
+            scheduled_reminders=len(schedule_reminders(config, events)),
+        )
 
     with ProcessLock(settings.lock_path):
         database = Database(settings.database_path)
@@ -210,29 +289,27 @@ def next_day_agenda(settings: Settings, dry_run: bool, force: bool, *, scheduled
             scheduled_reminders, cancelled_reminders = _sync_scheduled_reminders(database, config, events, now, sync_end)
             delivery_id = _create_agenda_delivery(database, settings, day, timezone, content, force=force)
             if delivery_id is None:
-                return {
-                    "status": "ok",
-                    "day": day.isoformat(),
-                    "sent": 0,
-                    "skipped": 1,
-                    "events": len(agenda_events),
-                    "scheduled_reminders": scheduled_reminders,
-                    "cancelled_reminders": cancelled_reminders,
-                }
+                return AgendaDeliveryResult(
+                    day=day,
+                    sent=0,
+                    skipped=1,
+                    events=len(agenda_events),
+                    scheduled_reminders=scheduled_reminders,
+                    cancelled_reminders=cancelled_reminders,
+                )
             _deliver_agenda(database, settings, delivery_id, content, None)
         finally:
             database.close()
-    return {
-        "status": "ok",
-        "day": day.isoformat(),
-        "sent": 1,
-        "events": len(agenda_events),
-        "scheduled_reminders": scheduled_reminders,
-        "cancelled_reminders": cancelled_reminders,
-    }
+    return AgendaDeliveryResult(
+        day=day,
+        sent=1,
+        events=len(agenda_events),
+        scheduled_reminders=scheduled_reminders,
+        cancelled_reminders=cancelled_reminders,
+    )
 
 
-def retry_agenda(settings: Settings, day: date) -> dict[str, object]:
+def retry_agenda(settings: Settings, day: date) -> AgendaRetryResult:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
     destination_hash = sha256(settings.discord_webhook_url.encode()).hexdigest()
@@ -250,47 +327,33 @@ def retry_agenda(settings: Settings, day: date) -> dict[str, object]:
                         database, settings, delivery_id, str(delivery["content"]), delivery["discord_message_ids_json"]
                     )
                     delivered += 1
-                except sqlite3.Error:
-                    raise
-                except Exception as error:
+                except DiscordDeliveryError as error:
                     error_code = delivery_error_code(error)
                     failed += 1
                     failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
         finally:
             database.close()
-    return {
-        "status": "ok",
-        "day": day.isoformat(),
-        "delivered": delivered,
-        "failed": failed,
-        "failed_by_error_code": failed_by_error_code,
-    }
+    return AgendaRetryResult(day=day, delivered=delivered, failed=failed, failed_by_error_code=failed_by_error_code)
 
 
-def run(settings: Settings, dry_run: bool) -> dict[str, object]:
+def run(settings: Settings, dry_run: bool) -> ReminderRunResult | ReminderDryRunResult:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
     now = datetime.now(timezone)
     if dry_run and not settings.database_path.exists():
-        return {"status": "ok", "due": []}
+        return ReminderDryRunResult(due=[])
     database = Database(settings.database_path, read_only=dry_run)
     try:
         if dry_run:
-            return {"status": "ok", "due": [str(row["content"]) for row in database.due_attempts(now)]}
+            return ReminderDryRunResult(due=[str(row["content"]) for row in database.due_attempts(now)])
         with ProcessLock(settings.lock_path):
             sent, failed, expired, failed_by_error_code = _dispatch_due_reminders(database, settings, now)
     finally:
         database.close()
-    return {
-        "status": "ok",
-        "sent": sent,
-        "failed": failed,
-        "failed_by_error_code": failed_by_error_code,
-        "expired": expired,
-    }
+    return ReminderRunResult(sent=sent, failed=failed, failed_by_error_code=failed_by_error_code, expired=expired)
 
 
-def retry_delivery(settings: Settings) -> dict[str, object]:
+def retry_delivery(settings: Settings) -> ReminderRetryResult:
     config = load_reminders(settings.reminders_config_path)
     now = datetime.now(ZoneInfo(config.timezone or settings.reminder_timezone))
     database = Database(settings.database_path)
@@ -299,10 +362,4 @@ def retry_delivery(settings: Settings) -> dict[str, object]:
             delivered, failed, expired, failed_by_error_code = _dispatch_due_reminders(database, settings, now)
     finally:
         database.close()
-    return {
-        "status": "ok",
-        "delivered": delivered,
-        "failed": failed,
-        "failed_by_error_code": failed_by_error_code,
-        "expired": expired,
-    }
+    return ReminderRetryResult(delivered=delivered, failed=failed, failed_by_error_code=failed_by_error_code, expired=expired)

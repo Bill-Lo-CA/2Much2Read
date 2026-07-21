@@ -68,10 +68,19 @@ if [ ! -f "$reminders_file" ]; then
   chmod 600 "$reminders_file"
 fi
 
+agenda_schedule_time=$(sed -n 's/^AGENDA_SCHEDULE_TIME=//p' "$env_file")
+case "$agenda_schedule_time" in
+  [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;;
+  *)
+    printf '%s\n' "AGENDA_SCHEDULE_TIME must use HH:MM in $env_file" >&2
+    exit 1
+    ;;
+esac
+
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss-runtime.service > "$systemd_dir/2busy1miss-runtime.service"
 cp deploy/systemd/2busy1miss-runtime.timer "$systemd_dir/2busy1miss-runtime.timer"
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss-runtime-agenda.service > "$systemd_dir/2busy1miss-runtime-agenda.service"
-cp deploy/systemd/2busy1miss-runtime-agenda.timer "$systemd_dir/2busy1miss-runtime-agenda.timer"
+sed "s|__AGENDA_SCHEDULE_TIME__|$agenda_schedule_time|" deploy/systemd/2busy1miss-runtime-agenda.timer > "$systemd_dir/2busy1miss-runtime-agenda.timer"
 
 systemctl --user daemon-reload
 
