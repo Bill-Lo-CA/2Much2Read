@@ -131,14 +131,6 @@ class Database:
         )
         self.connection.commit()
 
-    def recent_items(self, limit: int = 100) -> list[dict[str, object]]:
-        rows = self.connection.execute(
-            """SELECT i.*, m.received_at FROM items i JOIN messages m ON m.id=i.message_id
-            WHERE m.state='processed' ORDER BY m.received_at DESC LIMIT ?""",
-            (limit,),
-        ).fetchall()
-        return [dict(row) for row in rows]
-
     def items_for_messages(self, message_ids: list[int], limit: int) -> list[dict[str, object]]:
         if not message_ids:
             return []

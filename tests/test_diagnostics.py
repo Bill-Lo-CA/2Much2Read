@@ -1,5 +1,6 @@
 from pathlib import Path
 
+import httpx
 import pytest
 
 from two_much_two_read import diagnostics
@@ -42,3 +43,23 @@ def test_doctor_accepts_default_model_tag_and_creatable_database_directory(
 
 def test_missing_database_directory_is_creatable_under_writable_parent(tmp_path: Path) -> None:
     assert directory_is_creatable(tmp_path / "missing" / "nested")
+
+
+def test_doctor_reports_an_unreachable_discord_test(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, object]:
+            return {"models": []}
+
+    def offline(*args: object, **kwargs: object) -> None:
+        raise httpx.ConnectError("offline")
+
+    monkeypatch.setattr(diagnostics.httpx, "get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(diagnostics.httpx, "post", offline)
+
+    result = diagnostics.doctor(newsletter_settings.model_copy(update={"discord_webhook_url": "https://discord.example"}), True)
+
+    assert result.status == "warning"
+    assert result.checks["discord_test"] == "unreachable"

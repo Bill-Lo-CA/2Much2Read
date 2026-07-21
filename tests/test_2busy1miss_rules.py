@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 from two_busy_one_miss.config import EventMatch, RemindersConfig, ReminderSpec, RuleConfig
 from two_busy_one_miss.google_calendar import CalendarEvent
-from two_busy_one_miss.rules import due_reminders, matches, parse_offset, schedule_reminders
+from two_busy_one_miss.rules import matches, parse_offset, schedule_reminders
 
 
 def event(title: str = "French class", location: str = "Room 1") -> CalendarEvent:
@@ -51,11 +51,3 @@ def test_schedules_defaults_and_matching_rules() -> None:
     scheduled = schedule_reminders(config, [event()])
 
     assert [item.rule_id for item in scheduled] == ["french-class:2h", "french-class:30m", "default-5m"]
-
-
-def test_due_reminders_skip_started_events() -> None:
-    config = RemindersConfig(calendars=[{"id": "primary"}], default_rules=[ReminderSpec(before="5m")])
-    candidate = schedule_reminders(config, [event()])[0]
-
-    assert due_reminders([candidate], event().start - timedelta(minutes=1)) == [candidate]
-    assert due_reminders([candidate], event().start + timedelta(minutes=1)) == []

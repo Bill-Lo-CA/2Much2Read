@@ -62,8 +62,16 @@ class CalendarClient:
         self.timezone = ZoneInfo(timezone)
 
     def list_calendars(self) -> list[dict[str, str]]:
-        result = self.service.calendarList().list().execute()
-        return [{"id": str(item["id"]), "name": str(item.get("summary", item["id"]))} for item in result.get("items", [])]
+        calendars: list[dict[str, str]] = []
+        page_token: str | None = None
+        while True:
+            result = self.service.calendarList().list(maxResults=250, pageToken=page_token).execute()
+            calendars.extend(
+                {"id": str(item["id"]), "name": str(item.get("summary", item["id"]))} for item in result.get("items", [])
+            )
+            page_token = result.get("nextPageToken")
+            if not page_token:
+                return calendars
 
     def list_events(
         self,

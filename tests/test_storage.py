@@ -30,7 +30,7 @@ def test_message_and_digest_idempotency(tmp_path: Path) -> None:
             ],
         ),
     )
-    assert len(database.recent_items()) == 1
+    assert len(database.items_for_messages([message_id], 10)) == 1
     assert database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body") is None
     failed_id = database.discover("gmail-2", "thread-2", "source", "now", "subject", "sender", "body")
     assert failed_id is not None
@@ -67,10 +67,10 @@ def test_force_replaces_existing_extraction(tmp_path: Path) -> None:
 
     forced_id = database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "new body", force=True)
     assert forced_id == message_id
-    assert database.recent_items()[0]["title"] == "Old title"
+    assert database.items_for_messages([message_id], 10)[0]["title"] == "Old title"
     extraction.items[0].title = "New title"
     database.store_extraction(forced_id, extraction, replace=True)
-    assert database.recent_items()[0]["title"] == "New title"
+    assert database.items_for_messages([message_id], 10)[0]["title"] == "New title"
     database.close()
 
 

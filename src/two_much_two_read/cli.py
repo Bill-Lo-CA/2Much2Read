@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 import json
-import sys
 from collections.abc import Callable, Mapping
-from threading import Event, Thread
-from time import monotonic
 from typing import Annotated
 
 import typer
 from pydantic import BaseModel, ValidationError
+
+from two_read_runtime.progress import run_with_elapsed
 
 from .command_models import MailSelector, SubscriptionCandidate
 from .config import Settings
@@ -50,46 +49,6 @@ SubscriptionOption = Annotated[str | None, typer.Option("--subscription")]
 def emit(result: BaseModel | Mapping[str, object]) -> None:
     values = result.model_dump(mode="json", exclude_none=True) if isinstance(result, BaseModel) else result
     typer.echo(json.dumps(values, ensure_ascii=False, default=str))
-
-
-def _format_elapsed(seconds: float) -> str:
-    total = max(0, int(seconds))
-    minutes, remaining = divmod(total, 60)
-    hours, minutes = divmod(minutes, 60)
-    if hours:
-        return f"{hours}h {minutes:02d}m {remaining:02d}s"
-    if minutes:
-        return f"{minutes}m {remaining:02d}s"
-    return f"{remaining}s"
-
-
-def run_with_elapsed(
-    operation: Callable[[], BaseModel | Mapping[str, object]], interval: float = 1.0
-) -> BaseModel | Mapping[str, object]:
-    if not sys.stderr.isatty():
-        return operation()
-    start = monotonic()
-    stop = Event()
-
-    def elapsed() -> str:
-        return _format_elapsed(monotonic() - start)
-
-    def show(message: str, final: bool = False) -> None:
-        typer.echo(f"\r\033[K{message}", err=True, nl=final)
-
-    def tick() -> None:
-        show(f"2much2read run elapsed {elapsed()}")
-        while not stop.wait(interval):
-            show(f"2much2read run elapsed {elapsed()}")
-
-    thread = Thread(target=tick, daemon=True)
-    thread.start()
-    try:
-        return operation()
-    finally:
-        stop.set()
-        thread.join(timeout=max(interval, 0.1))
-        show(f"2much2read run finished in {elapsed()}", final=True)
 
 
 def selector(source: str | None, query: str | None, subscription: str | None) -> MailSelector:
@@ -196,7 +155,7 @@ def run_command(
 ) -> None:
     if force and (dry_run or source is None or max_messages is None):
         raise typer.BadParameter("--force requires --source and --max-messages and cannot use --dry-run")
-    emit(run_with_elapsed(lambda: run_pipeline(Settings(), source, max_messages, not deliver, dry_run, force)))
+    emit(run_with_elapsed("2much2read run", lambda: run_pipeline(Settings(), source, max_messages, not deliver, dry_run, force)))
 
 
 @app.command()

@@ -7,14 +7,14 @@ from two_busy_one_miss.rules import ReminderCandidate
 from two_busy_one_miss.storage import Database
 
 
-def candidate() -> ReminderCandidate:
+def candidate(event_id: str = "event-1") -> ReminderCandidate:
     timezone = ZoneInfo("America/Montreal")
     start = datetime(2026, 7, 8, 10, 0, tzinfo=timezone)
     event = CalendarEvent(
         calendar_id="primary",
         calendar_name="Main",
-        event_id="event-1",
-        instance_id="event-1",
+        event_id=event_id,
+        instance_id=event_id,
         title="French class",
         location="Room 1",
         start=start,
@@ -35,6 +35,14 @@ def test_attempt_idempotency_and_delivery_state(tmp_path: Path) -> None:
 
     database.finish_delivery(attempt_id, ["123"])
     assert database.attempt_state(attempt_id) == "delivered"
+    database.close()
+
+
+def test_create_attempts_batches_distinct_candidates(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+
+    assert database.create_attempts([(candidate("one"), "one"), (candidate("two"), "two")]) == 2
+    assert database.counts() == {"events": 2, "reminder_attempts": 2}
     database.close()
 
 

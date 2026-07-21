@@ -8,10 +8,11 @@ from typing import Annotated
 import typer
 from pydantic import BaseModel
 
-from two_read_runtime.discord import deliver
+from two_read_runtime.discord import DiscordDeliveryError, deliver
 from two_read_runtime.locking import ProcessLock
 from two_read_runtime.oauth import token_status
 from two_read_runtime.paths import directory_is_creatable
+from two_read_runtime.progress import run_with_elapsed
 
 from .config import Settings, load_reminders
 from .google_calendar import credentials
@@ -54,7 +55,12 @@ def auth_calendar() -> None:
 def calendars_list() -> None:
     settings = Settings()
     config = load_reminders(settings.reminders_config_path)
-    emit({"status": "ok", "calendars": calendar_client(settings, config).list_calendars()})
+    emit(
+        run_with_elapsed(
+            "2busy1miss calendars list",
+            lambda: {"status": "ok", "calendars": calendar_client(settings, config).list_calendars()},
+        )
+    )
 
 
 @app.command()
@@ -72,26 +78,32 @@ def doctor(send_test: Annotated[bool, typer.Option()] = False) -> None:
     )
     checks["database_directory"] = "ok" if directory_is_creatable(settings.database_path.parent) else "not_writable"
     checks["discord"] = "configured" if settings.discord_webhook_url else "missing"
-    if send_test and settings.discord_webhook_url:
-        deliver(settings.discord_webhook_url, "2busy1miss connectivity test", settings.discord_username)
-        checks["discord_test"] = "ok"
+    if send_test:
+        if not settings.discord_webhook_url:
+            checks["discord_test"] = "missing"
+        else:
+            try:
+                deliver(settings.discord_webhook_url, "2busy1miss connectivity test", settings.discord_username)
+                checks["discord_test"] = "ok"
+            except DiscordDeliveryError:
+                checks["discord_test"] = "failed"
     status = "ok" if all(value in {"ok", "configured"} for value in checks.values()) else "warning"
     emit({"status": status, "checks": checks})
 
 
 @app.command("discover")
 def discover_command(days: Annotated[int, typer.Option("--days", min=1, max=30)] = 7) -> None:
-    emit(discover(Settings(), days))
+    emit(run_with_elapsed("2busy1miss discover", lambda: discover(Settings(), days)))
 
 
 @rules_app.command("test")
 def rules_test(days: Annotated[int, typer.Option("--days", min=1, max=30)] = 7) -> None:
-    emit(test_rules(Settings(), days))
+    emit(run_with_elapsed("2busy1miss rules test", lambda: test_rules(Settings(), days)))
 
 
 @app.command("run")
 def run_command(dry_run: Annotated[bool, typer.Option()] = False) -> None:
-    emit(run(Settings(), dry_run))
+    emit(run_with_elapsed("2busy1miss run", lambda: run(Settings(), dry_run)))
 
 
 @app.command("agenda")
@@ -104,7 +116,7 @@ def agenda_command(
         parsed = date.fromisoformat(day)
     except ValueError as error:
         raise typer.BadParameter("date must use YYYY-MM-DD") from error
-    emit(agenda(Settings(), parsed, dry_run, force))
+    emit(run_with_elapsed("2busy1miss agenda", lambda: agenda(Settings(), parsed, dry_run, force)))
 
 
 @app.command("agenda-next-day")
@@ -113,7 +125,7 @@ def agenda_next_day_command(
     force: Annotated[bool, typer.Option()] = False,
     scheduled: Annotated[bool, typer.Option()] = False,
 ) -> None:
-    emit(next_day_agenda(Settings(), dry_run, force, scheduled=scheduled))
+    emit(run_with_elapsed("2busy1miss agenda next day", lambda: next_day_agenda(Settings(), dry_run, force, scheduled=scheduled)))
 
 
 @app.command("agenda-retry")
@@ -122,9 +134,9 @@ def agenda_retry_command(day: Annotated[str, typer.Argument()]) -> None:
         parsed = date.fromisoformat(day)
     except ValueError as error:
         raise typer.BadParameter("date must use YYYY-MM-DD") from error
-    emit(retry_agenda(Settings(), parsed))
+    emit(run_with_elapsed("2busy1miss agenda retry", lambda: retry_agenda(Settings(), parsed)))
 
 
 @app.command("retry-delivery")
 def retry_delivery_command() -> None:
-    emit(retry_delivery(Settings()))
+    emit(run_with_elapsed("2busy1miss retry delivery", lambda: retry_delivery(Settings())))
