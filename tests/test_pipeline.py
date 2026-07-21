@@ -1,6 +1,8 @@
 import sqlite3
+from datetime import datetime
 from pathlib import Path
 from unittest.mock import MagicMock
+from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
@@ -67,6 +69,37 @@ def test_empty_news_day_records_no_content_run(tmp_path: Path, monkeypatch: pyte
         "SELECT run_type,status,discovered_count,processed_count,failed_count,delivered_digest_count FROM runs"
     ).fetchone()
     assert tuple(row) == ("newsletter_digest", "no_content", 0, 0, 0, 0)
+    database.close()
+
+
+def test_run_pipeline_uses_one_captured_time_for_digest_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "_process_source", lambda *args, **kwargs: (0, 0, 0, 0, []))
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args: "digest")
+    now = datetime(2026, 1, 1, 9, 30, tzinfo=ZoneInfo("America/Montreal"))
+
+    assert run_pipeline(settings, no_deliver=True, force=True, now=now)["status"] == "ok"
+
+    database = Database(settings.database_path)
+    row = database.connection.execute("SELECT digest_key,period_start,period_end FROM digests").fetchone()
+    assert tuple(row) == (
+        "daily:2026-01-01:America/Montreal:all:force:2026-01-01T14:30:00+00:00",
+        "2025-12-31T09:30:00-05:00",
+        "2026-01-01T09:30:00-05:00",
+    )
     database.close()
 
 

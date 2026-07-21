@@ -10,23 +10,23 @@ from typing import Annotated
 import typer
 from pydantic import BaseModel, ValidationError
 
+from .command_models import MailSelector, SubscriptionCandidate
 from .config import Settings
-from .operations import (
-    CATEGORY_OPTIONS,
-    MailSelector,
-    SubscriptionCandidate,
+from .diagnostics import doctor as run_doctor
+from .mail_operations import (
     authorize_gmail,
     ensure_labels,
     filters,
+    gmail_client,
     inspect_mail,
     list_mails,
+)
+from .pipeline import retry_delivery, run_pipeline
+from .subscription_operations import (
+    CATEGORY_OPTIONS,
     list_subscriptions,
     sync_subscriptions,
 )
-from .operations import (
-    doctor as run_doctor,
-)
-from .pipeline import retry_delivery, run_pipeline
 
 app = typer.Typer(no_args_is_help=True)
 auth_app = typer.Typer(no_args_is_help=True)
@@ -163,7 +163,8 @@ def mails_inspect(
 
 @subscriptions_app.command("list")
 def subscriptions_list(limit: Annotated[int, typer.Option(min=1, max=500)] = 100) -> None:
-    invoke(lambda: list_subscriptions(Settings(), limit))
+    settings = Settings()
+    invoke(lambda: list_subscriptions(settings, gmail_client(settings), limit))
 
 
 @subscriptions_app.command("sync")
@@ -171,7 +172,8 @@ def subscriptions_sync(
     apply: Annotated[bool, typer.Option()] = False,
     limit: Annotated[int, typer.Option(min=1, max=500)] = 100,
 ) -> None:
-    invoke(lambda: sync_subscriptions(Settings(), limit, apply, choose_category))
+    settings = Settings()
+    invoke(lambda: sync_subscriptions(settings, gmail_client(settings), limit, apply, choose_category))
 
 
 @delivery_app.command("retry")

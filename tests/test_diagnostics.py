@@ -2,7 +2,7 @@ from pathlib import Path
 
 import pytest
 
-from two_much_two_read import operations
+from two_much_two_read import diagnostics
 from two_much_two_read.config import Settings
 from two_read_runtime.paths import directory_is_creatable
 
@@ -16,15 +16,12 @@ from two_read_runtime.paths import directory_is_creatable
     ],
 )
 def test_normalizes_ollama_default_tags(value: str, expected: str) -> None:
-    assert operations._model_name(value) == expected
+    assert diagnostics.model_name(value) == expected
 
 
 def test_doctor_accepts_default_model_tag_and_creatable_database_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    sources_path = tmp_path / "sources.yaml"
-    sources_path.write_text("sources: []\n", encoding="utf-8")
-
     class Response:
         def raise_for_status(self) -> None:
             pass
@@ -32,17 +29,15 @@ def test_doctor_accepts_default_model_tag_and_creatable_database_directory(
         def json(self) -> dict[str, object]:
             return {"models": [{"name": "mistral:latest"}]}
 
-    monkeypatch.setattr(operations.httpx, "get", lambda *args, **kwargs: Response())
-    settings = Settings(
-        sources_config_path=sources_path,
-        database_path=tmp_path / "new-directory" / "digest.sqlite3",
-        ollama_model="mistral",
+    monkeypatch.setattr(diagnostics.httpx, "get", lambda *args, **kwargs: Response())
+    settings = newsletter_settings.model_copy(
+        update={"database_path": tmp_path / "new-directory" / "digest.sqlite3", "ollama_model": "mistral"}
     )
 
-    assert operations.doctor(settings, send_test=False).checks["ollama"] == "ok"
-    assert operations.doctor(settings, send_test=False).checks["database_directory"] == "ok"
+    assert diagnostics.doctor(settings, send_test=False).checks["ollama"] == "ok"
+    assert diagnostics.doctor(settings, send_test=False).checks["database_directory"] == "ok"
     tagged_settings = settings.model_copy(update={"ollama_model": "mistral:7b"})
-    assert operations.doctor(tagged_settings, send_test=False).checks["ollama"] == "model_missing"
+    assert diagnostics.doctor(tagged_settings, send_test=False).checks["ollama"] == "model_missing"
 
 
 def test_missing_database_directory_is_creatable_under_writable_parent(tmp_path: Path) -> None:

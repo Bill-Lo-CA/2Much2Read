@@ -261,11 +261,11 @@ def agenda(settings: Settings, day: date, dry_run: bool, force: bool = False) ->
 
 
 def next_day_agenda(
-    settings: Settings, dry_run: bool, force: bool, *, scheduled: bool = False
+    settings: Settings, dry_run: bool, force: bool, *, scheduled: bool = False, now: datetime | None = None
 ) -> AgendaPreviewResult | AgendaDeliveryResult:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
-    now = datetime.now(timezone)
+    now = (now or datetime.now(timezone)).astimezone(timezone)
     day = now.date() + timedelta(days=1)
     if scheduled and now < datetime.combine(now.date(), settings.agenda_schedule_time, timezone):
         return AgendaDeliveryResult(day=day, sent=0, skipped=1, reason="before_schedule")
@@ -336,10 +336,10 @@ def retry_agenda(settings: Settings, day: date) -> AgendaRetryResult:
     return AgendaRetryResult(day=day, delivered=delivered, failed=failed, failed_by_error_code=failed_by_error_code)
 
 
-def run(settings: Settings, dry_run: bool) -> ReminderRunResult | ReminderDryRunResult:
+def run(settings: Settings, dry_run: bool, *, now: datetime | None = None) -> ReminderRunResult | ReminderDryRunResult:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
-    now = datetime.now(timezone)
+    now = (now or datetime.now(timezone)).astimezone(timezone)
     if dry_run and not settings.database_path.exists():
         return ReminderDryRunResult(due=[])
     database = Database(settings.database_path, read_only=dry_run)
@@ -353,9 +353,10 @@ def run(settings: Settings, dry_run: bool) -> ReminderRunResult | ReminderDryRun
     return ReminderRunResult(sent=sent, failed=failed, failed_by_error_code=failed_by_error_code, expired=expired)
 
 
-def retry_delivery(settings: Settings) -> ReminderRetryResult:
+def retry_delivery(settings: Settings, *, now: datetime | None = None) -> ReminderRetryResult:
     config = load_reminders(settings.reminders_config_path)
-    now = datetime.now(ZoneInfo(config.timezone or settings.reminder_timezone))
+    timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
+    now = (now or datetime.now(timezone)).astimezone(timezone)
     database = Database(settings.database_path)
     try:
         with ProcessLock(settings.lock_path):
