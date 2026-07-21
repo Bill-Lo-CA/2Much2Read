@@ -236,7 +236,7 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda credentials: FakeGmailClient())
-    monkeypatch.setattr(pipeline, "OllamaClient", FakeOllamaClient)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllamaClient())
     monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
 
     result = run_pipeline(settings, max_messages=3, no_deliver=True)
@@ -297,7 +297,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
     gmail = FakeGmailClient()
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda credentials: gmail)
-    monkeypatch.setattr(pipeline, "OllamaClient", FakeOllamaClient)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllamaClient())
     monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
 
     result = run_pipeline(settings, no_deliver=True)
@@ -331,7 +331,7 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
     ollama.extract.side_effect = httpx.ConnectError("Ollama unavailable")
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda credentials: gmail)
-    monkeypatch.setattr(pipeline, "OllamaClient", lambda *args: ollama)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
     monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
 
     with pytest.raises(httpx.ConnectError, match="Ollama unavailable"):

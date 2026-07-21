@@ -6,22 +6,16 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from two_read_runtime.discord import deliver, delivery_error_code, parse_message_ids
+from two_read_runtime.discord import deliver, deliver_resumable, delivery_error_code
 from two_read_runtime.locking import ProcessLock
 
-from .config import Settings, load_sources
+from .config import Settings, Source, load_sources
 from .digest import render_digest
-from .gmail import GmailClient, credentials
+from .gmail import GmailClient, credentials, message_headers
 from .mime import extract_gmail_payload
-from .ollama import OllamaClient, OllamaSchemaError
+from .ollama import OllamaClient, OllamaSchemaError, create_ollama_client
 from .schemas import DigestItem
 from .storage import Database
-
-
-def _headers(message: dict[str, object]) -> dict[str, str]:
-    payload = message.get("payload", {})
-    values = payload.get("headers", []) if isinstance(payload, dict) else []
-    return {str(header.get("name", "")).lower(): str(header.get("value", "")) for header in values if isinstance(header, dict)}
 
 
 def _items(database: Database, message_ids: list[int], maximum: int) -> list[DigestItem]:
@@ -44,12 +38,77 @@ def _items(database: Database, message_ids: list[int], maximum: int) -> list[Dig
     return result
 
 
-def _message_ids(row: sqlite3.Row) -> list[str]:
-    try:
-        value = row["discord_message_ids_json"]
-    except KeyError:
-        return []
-    return parse_message_ids(value)
+def _enabled_sources(settings: Settings, source_id: str | None) -> list[Source]:
+    sources = [source for source in load_sources(settings.sources_config_path).sources if source.enabled]
+    if source_id:
+        matching_sources = [source for source in sources if source.id == source_id]
+        if not matching_sources:
+            enabled_ids = ", ".join(source.id for source in sources) or "(none)"
+            raise ValueError(f"unknown or disabled source_id {source_id!r}; enabled source IDs: {enabled_ids}")
+        sources = matching_sources
+    if not sources:
+        raise ValueError("no enabled sources configured")
+    return sources
+
+
+def _process_source(
+    database: Database,
+    gmail: GmailClient,
+    ollama: OllamaClient,
+    settings: Settings,
+    source: Source,
+    remaining: int,
+    *,
+    force: bool,
+    dry_run: bool,
+) -> tuple[int, int, int, int, list[int]]:
+    processed_label = "NewsletterBot/Processed"
+    failed_label = "NewsletterBot/Failed"
+    query = f"({source.gmail_query}) newer_than:{settings.gmail_lookback_days}d"
+    if not force:
+        query += f' -label:"{processed_label}" -label:"{failed_label}"'
+    discovered = 0
+    processed = 0
+    failed = 0
+    message_ids: list[int] = []
+    gmail_ids = gmail.list_messages(query, remaining)
+    for gmail_id in gmail_ids:
+        message = gmail.get_message(gmail_id)
+        payload = message.get("payload")
+        if not isinstance(payload, dict):
+            continue
+        body = extract_gmail_payload(payload)
+        truncated = len(body) > 45_000
+        body = body[:45_000] if truncated else body
+        headers = message_headers(message)
+        received = datetime.fromtimestamp(int(str(message.get("internalDate", "0"))) / 1000, tz=UTC).isoformat()
+        message_id = database.discover(
+            gmail_id,
+            str(message.get("threadId", "")),
+            source.id,
+            received,
+            headers.get("subject", ""),
+            headers.get("from", ""),
+            body,
+            force=force,
+        )
+        if message_id is None:
+            continue
+        discovered += 1
+        try:
+            extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
+        except OllamaSchemaError:
+            database.fail_message(message_id, "OLLAMA_EXTRACTION_FAILED")
+            failed += 1
+            if not dry_run:
+                gmail.add_labels(gmail_id, [failed_label])
+            continue
+        database.store_extraction(message_id, extraction, replace=force)
+        processed += 1
+        message_ids.append(message_id)
+        if not dry_run:
+            gmail.add_labels(gmail_id, [processed_label])
+    return len(gmail_ids), discovered, processed, failed, message_ids
 
 
 def run_pipeline(
@@ -60,15 +119,7 @@ def run_pipeline(
     dry_run: bool = False,
     force: bool = False,
 ) -> dict[str, int | str]:
-    sources = [source for source in load_sources(settings.sources_config_path).sources if source.enabled]
-    if source_id:
-        matching_sources = [source for source in sources if source.id == source_id]
-        if not matching_sources:
-            enabled_ids = ", ".join(source.id for source in sources) or "(none)"
-            raise ValueError(f"unknown or disabled source_id {source_id!r}; enabled source IDs: {enabled_ids}")
-        sources = matching_sources
-    if not sources:
-        raise ValueError("no enabled sources configured")
+    sources = _enabled_sources(settings, source_id)
 
     database: Database | None = None
     run_id: int | None = None
@@ -91,60 +142,19 @@ def run_pipeline(
             )
             gmail = GmailClient(creds)
             gmail.ensure_labels()
-            ollama = OllamaClient(
-                settings.ollama_base_url,
-                settings.ollama_model,
-                settings.ollama_timeout_seconds,
-                settings.ollama_num_ctx,
-                settings.ollama_keep_alive,
-            )
+            ollama = create_ollama_client(settings)
             remaining = max_messages or settings.gmail_max_messages_per_run
             for source in sources:
                 if remaining <= 0:
                     break
-                processed_label = "NewsletterBot/Processed"
-                failed_label = "NewsletterBot/Failed"
-                query = f"({source.gmail_query}) newer_than:{settings.gmail_lookback_days}d"
-                if not force:
-                    query += f' -label:"{processed_label}" -label:"{failed_label}"'
-                gmail_ids = gmail.list_messages(query, remaining)
-                remaining -= len(gmail_ids)
-                for gmail_id in gmail_ids:
-                    message = gmail.get_message(gmail_id)
-                    payload = message.get("payload")
-                    if not isinstance(payload, dict):
-                        continue
-                    body = extract_gmail_payload(payload)
-                    truncated = len(body) > 45_000
-                    body = body[:45_000] if truncated else body
-                    headers = _headers(message)
-                    received = datetime.fromtimestamp(int(str(message.get("internalDate", "0"))) / 1000, tz=UTC).isoformat()
-                    message_id = database.discover(
-                        gmail_id,
-                        str(message.get("threadId", "")),
-                        source.id,
-                        received,
-                        headers.get("subject", ""),
-                        headers.get("from", ""),
-                        body,
-                        force=force,
-                    )
-                    if message_id is None:
-                        continue
-                    discovered += 1
-                    try:
-                        extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
-                    except OllamaSchemaError:
-                        database.fail_message(message_id, "OLLAMA_EXTRACTION_FAILED")
-                        failed += 1
-                        if not dry_run:
-                            gmail.add_labels(gmail_id, [failed_label])
-                        continue
-                    database.store_extraction(message_id, extraction, replace=force)
-                    processed += 1
-                    processed_message_ids.append(message_id)
-                    if not dry_run:
-                        gmail.add_labels(gmail_id, [processed_label])
+                used, source_discovered, source_processed, source_failed, source_message_ids = _process_source(
+                    database, gmail, ollama, settings, source, remaining, force=force, dry_run=dry_run
+                )
+                remaining -= used
+                discovered += source_discovered
+                processed += source_processed
+                failed += source_failed
+                processed_message_ids.extend(source_message_ids)
 
             now = datetime.now(ZoneInfo(settings.digest_timezone))
             content = render_digest(
@@ -205,14 +215,18 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> dict
                     def save_progress(message_ids: list[str], target_id: int = digest_id) -> None:
                         active_database.record_delivery_progress(target_id, message_ids)
 
-                    ids = deliver(
+                    def finish_delivery(message_ids: list[str], target_id: int = digest_id) -> None:
+                        active_database.finish_delivery(target_id, message_ids)
+
+                    deliver_resumable(
                         settings.discord_webhook_url,
                         str(digest["rendered_content"]),
                         settings.discord_username,
-                        _message_ids(digest),
+                        digest["discord_message_ids_json"],
                         save_progress,
+                        finish_delivery,
+                        sender=deliver,
                     )
-                    active_database.finish_delivery(digest_id, ids)
                     delivered += 1
                 except sqlite3.Error:
                     raise
@@ -236,14 +250,15 @@ def deliver_digest(settings: Settings, database: Database, digest_id: int) -> No
         database.record_delivery_progress(digest_id, message_ids)
 
     try:
-        ids = deliver(
+        deliver_resumable(
             settings.discord_webhook_url,
             str(digest["rendered_content"]),
             settings.discord_username,
-            _message_ids(digest),
+            digest["discord_message_ids_json"],
             save_progress,
+            lambda message_ids: database.finish_delivery(digest_id, message_ids),
+            sender=deliver,
         )
-        database.finish_delivery(digest_id, ids)
     except Exception as error:
         database.fail_delivery(digest_id, delivery_error_code(error))
         raise

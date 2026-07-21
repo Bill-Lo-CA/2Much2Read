@@ -7,6 +7,7 @@ from collections.abc import Callable
 import httpx
 
 CORRUPT_MESSAGE_IDS = "DISCORD_MESSAGE_IDS_CORRUPT"
+DiscordSender = Callable[[str, str, str, list[str] | None, Callable[[list[str]], None] | None], list[str]]
 
 
 def parse_message_ids(value: object) -> list[str]:
@@ -25,6 +26,21 @@ def delivery_error_code(error: Exception) -> str:
     if isinstance(error, ValueError) and str(error).startswith(f"{CORRUPT_MESSAGE_IDS}:"):
         return CORRUPT_MESSAGE_IDS
     return "DISCORD_DELIVERY_FAILED"
+
+
+def deliver_resumable(
+    webhook_url: str,
+    content: str,
+    username: str,
+    stored_message_ids: object,
+    on_progress: Callable[[list[str]], None],
+    on_success: Callable[[list[str]], None],
+    *,
+    sender: DiscordSender,
+) -> list[str]:
+    message_ids = sender(webhook_url, content, username, parse_message_ids(stored_message_ids), on_progress)
+    on_success(message_ids)
+    return message_ids
 
 
 def _split_text(text: str, limit: int) -> list[str]:

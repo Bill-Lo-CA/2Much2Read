@@ -101,13 +101,14 @@ Useful commands:
 uv run 2busy1miss calendars list
 uv run 2busy1miss discover --days 7
 uv run 2busy1miss agenda 2026-07-16 --dry-run
+uv run 2busy1miss agenda 2026-07-16 --force
 uv run 2busy1miss agenda-next-day --dry-run
 uv run 2busy1miss agenda-next-day --force
 uv run 2busy1miss agenda-retry 2026-07-16
 uv run 2busy1miss retry-delivery
 ```
 
-`2busy1miss-runtime-agenda.timer` runs at 21:00 in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone and synchronizes the configured reminder horizon. Its persistent catch-up is ignored before 21:00 in that timezone, so a morning startup cannot send the next day's agenda early. Normal `agenda-next-day` runs are de-duplicated by date, timezone, and Discord destination; `--force` is the explicit resend path. Empty days are sent as `No events`. Reminder messages use the same Markdown code-block style as agendas; a retry after an event starts marks the job `expired` instead of sending it.
+Manual and next-day agendas use the same durable delivery record, de-duplicated by date, timezone, and Discord destination; `agenda-retry` retries failed records and `--force` is the explicit resend path. `2busy1miss-runtime-agenda.timer` runs at 21:00 in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone and synchronizes the configured reminder horizon. Its persistent catch-up is ignored before 21:00 in that timezone, so a morning startup cannot send the next day's agenda early. Empty days are sent as `No events`. Reminder messages use the same Markdown code-block style as agendas; a retry after an event starts marks the job `expired` instead of sending it.
 
 ## Delivery behavior
 
@@ -115,7 +116,7 @@ Newsletter digests contain only items extracted in that run, so a source-specifi
 run cannot include older items or another source's items. `2much2read run
 --no-deliver` stores the rendered digest as pending and reserves its daily key;
 send it later with `uv run 2much2read delivery retry`. Durable digest, reminder,
-and next-day-agenda deliveries checkpoint each confirmed Discord chunk, so a retry
+and agenda deliveries checkpoint each confirmed Discord chunk, so a retry
 only sends the remaining chunks.
 
 ## OAuth safety

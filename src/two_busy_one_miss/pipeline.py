@@ -5,7 +5,7 @@ from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 from zoneinfo import ZoneInfo
 
-from two_read_runtime.discord import deliver, delivery_error_code, parse_message_ids
+from two_read_runtime.discord import deliver, deliver_resumable, delivery_error_code
 from two_read_runtime.locking import ProcessLock
 
 from .config import RemindersConfig, Settings, load_reminders
@@ -70,14 +70,6 @@ def reminder_view(candidate: ReminderCandidate) -> dict[str, object]:
     }
 
 
-def _message_ids(row: sqlite3.Row) -> list[str]:
-    try:
-        value = row["discord_message_ids_json"]
-    except KeyError:
-        return []
-    return parse_message_ids(value)
-
-
 def _sync_scheduled_reminders(
     database: Database,
     config: RemindersConfig,
@@ -88,6 +80,34 @@ def _sync_scheduled_reminders(
     candidates = schedule_reminders(config, events)
     created = sum(database.create_attempt(candidate, render_reminder(candidate)) is not None for candidate in candidates)
     return created, database.cancel_unmatched_attempts(candidates, events, window_start, window_end)
+
+
+def _create_agenda_delivery(
+    database: Database, settings: Settings, day: date, timezone: ZoneInfo, content: str, *, force: bool
+) -> int | None:
+    destination_hash = sha256(settings.discord_webhook_url.encode()).hexdigest()
+    return database.create_agenda_delivery(day, timezone.key, destination_hash, content, force=force)
+
+
+def _deliver_agenda(
+    database: Database, settings: Settings, delivery_id: int, content: str, stored_message_ids: object
+) -> list[str]:
+    def save_progress(message_ids: list[str]) -> None:
+        database.record_agenda_delivery_progress(delivery_id, message_ids)
+
+    try:
+        return deliver_resumable(
+            settings.discord_webhook_url,
+            content,
+            settings.discord_username,
+            stored_message_ids,
+            save_progress,
+            lambda message_ids: database.finish_agenda_delivery(delivery_id, message_ids),
+            sender=deliver,
+        )
+    except Exception as error:
+        database.fail_agenda_delivery(delivery_id, delivery_error_code(error))
+        raise
 
 
 def _dispatch_due_reminders(database: Database, settings: Settings, now: datetime) -> tuple[int, int, int, dict[str, int]]:
@@ -105,15 +125,19 @@ def _dispatch_due_reminders(database: Database, settings: Settings, now: datetim
         def save_progress(message_ids: list[str], target_id: int = attempt_id) -> None:
             database.record_delivery_progress(target_id, message_ids)
 
+        def finish_delivery(message_ids: list[str], target_id: int = attempt_id) -> None:
+            database.finish_delivery(target_id, message_ids)
+
         try:
-            message_ids = deliver(
+            deliver_resumable(
                 settings.discord_webhook_url,
                 str(attempt["content"]),
                 settings.discord_username,
-                _message_ids(attempt),
+                attempt["discord_message_ids_json"],
                 save_progress,
+                finish_delivery,
+                sender=deliver,
             )
-            database.finish_delivery(attempt_id, message_ids)
             sent += 1
         except sqlite3.Error:
             raise
@@ -137,7 +161,7 @@ def test_rules(settings: Settings, days: int) -> dict[str, object]:
     return {"status": "ok", "reminders": [reminder_view(candidate) for candidate in candidates]}
 
 
-def agenda(settings: Settings, day: date, dry_run: bool) -> dict[str, object]:
+def agenda(settings: Settings, day: date, dry_run: bool, force: bool = False) -> dict[str, object]:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
     start = datetime.combine(day, time.min, timezone)
@@ -147,7 +171,14 @@ def agenda(settings: Settings, day: date, dry_run: bool) -> dict[str, object]:
     if dry_run:
         return {"status": "ok", "content": content, "events": [event_view(event) for event in events]}
     with ProcessLock(settings.lock_path):
-        message_ids = deliver(settings.discord_webhook_url, content, settings.discord_username)
+        database = Database(settings.database_path)
+        try:
+            delivery_id = _create_agenda_delivery(database, settings, day, timezone, content, force=force)
+            if delivery_id is None:
+                return {"status": "ok", "sent": 0, "skipped": 1, "events": len(events)}
+            message_ids = _deliver_agenda(database, settings, delivery_id, content, None)
+        finally:
+            database.close()
     return {"status": "ok", "sent": 1, "discord_message_ids": message_ids, "events": len(events)}
 
 
@@ -173,12 +204,11 @@ def next_day_agenda(settings: Settings, dry_run: bool, force: bool, *, scheduled
             "scheduled_reminders": len(schedule_reminders(config, events)),
         }
 
-    destination_hash = sha256(settings.discord_webhook_url.encode()).hexdigest()
     with ProcessLock(settings.lock_path):
         database = Database(settings.database_path)
         try:
             scheduled_reminders, cancelled_reminders = _sync_scheduled_reminders(database, config, events, now, sync_end)
-            delivery_id = database.create_agenda_delivery(day, timezone.key, destination_hash, content, force=force)
+            delivery_id = _create_agenda_delivery(database, settings, day, timezone, content, force=force)
             if delivery_id is None:
                 return {
                     "status": "ok",
@@ -189,21 +219,7 @@ def next_day_agenda(settings: Settings, dry_run: bool, force: bool, *, scheduled
                     "scheduled_reminders": scheduled_reminders,
                     "cancelled_reminders": cancelled_reminders,
                 }
-
-            def save_progress(message_ids: list[str]) -> None:
-                database.record_agenda_delivery_progress(delivery_id, message_ids)
-
-            try:
-                message_ids = deliver(
-                    settings.discord_webhook_url,
-                    content,
-                    settings.discord_username,
-                    on_progress=save_progress,
-                )
-                database.finish_agenda_delivery(delivery_id, message_ids)
-            except Exception as error:
-                database.fail_agenda_delivery(delivery_id, delivery_error_code(error))
-                raise
+            _deliver_agenda(database, settings, delivery_id, content, None)
         finally:
             database.close()
     return {
@@ -229,24 +245,15 @@ def retry_agenda(settings: Settings, day: date) -> dict[str, object]:
             for delivery in database.pending_agenda_deliveries(day, timezone.key, destination_hash):
                 delivery_id = int(delivery["id"])
 
-                def save_progress(message_ids: list[str], target_id: int = delivery_id) -> None:
-                    database.record_agenda_delivery_progress(target_id, message_ids)
-
                 try:
-                    message_ids = deliver(
-                        settings.discord_webhook_url,
-                        str(delivery["content"]),
-                        settings.discord_username,
-                        _message_ids(delivery),
-                        save_progress,
+                    _deliver_agenda(
+                        database, settings, delivery_id, str(delivery["content"]), delivery["discord_message_ids_json"]
                     )
-                    database.finish_agenda_delivery(delivery_id, message_ids)
                     delivered += 1
                 except sqlite3.Error:
                     raise
                 except Exception as error:
                     error_code = delivery_error_code(error)
-                    database.fail_agenda_delivery(delivery_id, error_code)
                     failed += 1
                     failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
         finally:
