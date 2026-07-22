@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 from datetime import date, datetime, time, timedelta
 from hashlib import sha256
 from pathlib import Path
@@ -14,6 +16,46 @@ from two_busy_one_miss.renderer import render_agenda
 from two_busy_one_miss.rules import ReminderCandidate
 from two_busy_one_miss.storage import Database
 from two_read_runtime.discord import DiscordDeliveryError
+
+
+class FakeReminderDatabase:
+    def __init__(self, attempts: list[dict[str, object]]) -> None:
+        self.attempts = attempts
+        self.failed: list[tuple[int, str]] = []
+        self.finished: list[tuple[int, list[str]]] = []
+        self.progress: list[tuple[int, list[str]]] = []
+        self.closed = False
+
+    def due_attempts(self, now: datetime) -> list[dict[str, object]]:
+        return self.attempts
+
+    def record_delivery_progress(self, attempt_id: int, message_ids: list[str]) -> None:
+        self.progress.append((attempt_id, message_ids))
+
+    def finish_delivery(self, attempt_id: int, message_ids: list[str]) -> None:
+        self.finished.append((attempt_id, message_ids))
+
+    def fail_delivery(self, attempt_id: int, error_code: str) -> None:
+        self.failed.append((attempt_id, error_code))
+
+    def close(self) -> None:
+        self.closed = True
+
+
+class RecordingLock:
+    def __init__(self) -> None:
+        self.entered = False
+
+    def __enter__(self) -> RecordingLock:
+        self.entered = True
+        return self
+
+    def __exit__(self, *args: object) -> None:
+        pass
+
+
+def unexpected(*args: object, **kwargs: object) -> None:
+    raise AssertionError("unexpected runtime call")
 
 
 def test_event_query_lookahead_covers_longest_reminder() -> None:
@@ -62,32 +104,32 @@ def test_calendar_client_lists_all_calendar_pages() -> None:
     ]
 
 
-def test_retry_delivery_holds_process_lock(tmp_path: Path, monkeypatch) -> None:
-    settings = Settings(database_path=tmp_path / "reminders.sqlite3", lock_path=tmp_path / "reminders.lock")
+def test_retry_delivery_holds_process_lock(calendar_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = calendar_settings
     config = RemindersConfig(calendars=[{"id": "primary"}], timezone="America/Montreal")
-    database = MagicMock()
-    database.due_attempts.return_value = [
-        {
-            "id": 1,
-            "content": "bad",
-            "event_start_at": "2099-01-01T10:00:00+00:00",
-            "discord_message_ids_json": None,
-        },
-        {
-            "id": 2,
-            "content": "good",
-            "event_start_at": "2099-01-01T10:00:00+00:00",
-            "discord_message_ids_json": None,
-        },
-    ]
-    lock = MagicMock()
-    process_lock = MagicMock(return_value=lock)
-    monkeypatch.setattr(pipeline, "Database", MagicMock(return_value=database))
-    monkeypatch.setattr(pipeline, "ProcessLock", process_lock)
+    database = FakeReminderDatabase(
+        [
+            {
+                "id": 1,
+                "content": "bad",
+                "event_start_at": "2099-01-01T10:00:00+00:00",
+                "discord_message_ids_json": None,
+            },
+            {
+                "id": 2,
+                "content": "good",
+                "event_start_at": "2099-01-01T10:00:00+00:00",
+                "discord_message_ids_json": None,
+            },
+        ]
+    )
+    lock = RecordingLock()
+    monkeypatch.setattr(pipeline, "Database", lambda _: database)
+    monkeypatch.setattr(pipeline, "ProcessLock", lambda _: lock)
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
 
     def fake_deliver(*args: object) -> list[str]:
-        assert lock.__enter__.called
+        assert lock.entered
         if args[1] == "bad":
             raise DiscordDeliveryError("delivery failed")
         return ["discord-id"]
@@ -101,9 +143,9 @@ def test_retry_delivery_holds_process_lock(tmp_path: Path, monkeypatch) -> None:
         "failed_by_error_code": {"DISCORD_DELIVERY_FAILED": 1},
         "expired": 0,
     }
-    process_lock.assert_called_once_with(settings.lock_path)
-    database.fail_delivery.assert_called_once_with(1, "DISCORD_DELIVERY_FAILED")
-    database.finish_delivery.assert_called_once_with(2, ["discord-id"])
+    assert database.failed == [(1, "DISCORD_DELIVERY_FAILED")]
+    assert database.finished == [(2, ["discord-id"])]
+    assert database.closed
 
 
 def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkeypatch) -> None:
@@ -167,18 +209,15 @@ def test_manual_agenda_is_idempotent_and_forceable(tmp_path: Path, monkeypatch) 
     assert len(delivered) == 2
 
 
-def test_scheduled_next_day_agenda_before_2100_is_noop(tmp_path: Path, monkeypatch) -> None:
+def test_scheduled_next_day_agenda_before_2100_is_noop(calendar_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     timezone = ZoneInfo("America/Montreal")
     config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
-    settings = Settings(database_path=tmp_path / "reminders.sqlite3", lock_path=tmp_path / "reminders.lock")
-    calendar = MagicMock()
-    database = MagicMock()
-    deliver = MagicMock()
+    settings = calendar_settings
 
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
-    monkeypatch.setattr(pipeline, "list_events_between", calendar)
-    monkeypatch.setattr(pipeline, "Database", database)
-    monkeypatch.setattr(pipeline, "deliver", deliver)
+    monkeypatch.setattr(pipeline, "list_events_between", unexpected)
+    monkeypatch.setattr(pipeline, "Database", unexpected)
+    monkeypatch.setattr(pipeline, "deliver", unexpected)
 
     assert pipeline.next_day_agenda(
         settings, dry_run=False, force=False, scheduled=True, now=datetime(2026, 3, 8, 20, 59, tzinfo=timezone)
@@ -189,9 +228,6 @@ def test_scheduled_next_day_agenda_before_2100_is_noop(tmp_path: Path, monkeypat
         "skipped": 1,
         "reason": "before_schedule",
     }
-    calendar.assert_not_called()
-    database.assert_not_called()
-    deliver.assert_not_called()
 
 
 def test_scheduled_next_day_agenda_uses_configured_time(tmp_path: Path, monkeypatch) -> None:
@@ -237,9 +273,9 @@ def test_next_day_agenda_uses_the_next_local_date(tmp_path: Path, monkeypatch, n
     assert result.day == expected_day
 
 
-def test_discover_returns_a_typed_result(tmp_path: Path, monkeypatch) -> None:
+def test_discover_returns_a_typed_result(calendar_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     config = RemindersConfig(calendars=[{"id": "primary"}], timezone="America/Montreal")
-    settings = Settings(database_path=tmp_path / "reminders.sqlite3", lock_path=tmp_path / "reminders.lock")
+    settings = calendar_settings
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "list_events", lambda *args: [])
 
@@ -249,20 +285,16 @@ def test_discover_returns_a_typed_result(tmp_path: Path, monkeypatch) -> None:
     assert result.model_dump() == {"status": "ok", "events": []}
 
 
-def test_next_day_agenda_dry_run_skips_database_and_discord(tmp_path: Path, monkeypatch) -> None:
+def test_next_day_agenda_dry_run_skips_database_and_discord(calendar_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     config = RemindersConfig(calendars=[{"id": "primary"}], timezone="America/Montreal")
-    settings = Settings(database_path=tmp_path / "reminders.sqlite3", lock_path=tmp_path / "reminders.lock")
-    database = MagicMock()
-    deliver = MagicMock()
+    settings = calendar_settings
 
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "list_events_between", lambda *args: [])
-    monkeypatch.setattr(pipeline, "Database", database)
-    monkeypatch.setattr(pipeline, "deliver", deliver)
+    monkeypatch.setattr(pipeline, "Database", unexpected)
+    monkeypatch.setattr(pipeline, "deliver", unexpected)
 
     assert pipeline.next_day_agenda(settings, dry_run=True, force=False).status == "ok"
-    database.assert_not_called()
-    deliver.assert_not_called()
 
 
 def test_next_day_agenda_includes_overlapping_events(tmp_path: Path, monkeypatch) -> None:
@@ -287,10 +319,10 @@ def test_next_day_agenda_includes_overlapping_events(tmp_path: Path, monkeypatch
     assert [item.title for item in result.events] == ["overlap", "within-day"]
 
 
-def test_resync_cancels_overdue_job_after_an_event_changes(tmp_path: Path) -> None:
+def test_resync_cancels_overdue_job_after_an_event_changes(calendar_database: Database) -> None:
     timezone = ZoneInfo("America/Montreal")
     config = RemindersConfig(calendars=[{"id": "primary"}], default_rules=[ReminderSpec(id="default-5m", before="5m")])
-    database = Database(tmp_path / "reminders.sqlite3")
+    database = calendar_database
     original = pipeline.CalendarEvent(
         "primary",
         "Main",
@@ -327,7 +359,6 @@ def test_resync_cancels_overdue_job_after_an_event_changes(tmp_path: Path) -> No
     assert (created, cancelled) == (1, 1)
     assert database.attempt_state(old_attempt) == "cancelled"
     assert database.due_attempts(now) == []
-    database.close()
 
 
 def test_retry_agenda_delivers_only_the_current_destination(tmp_path: Path, monkeypatch) -> None:

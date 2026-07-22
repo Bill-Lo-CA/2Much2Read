@@ -118,9 +118,11 @@ def test_gmail_and_calendar_keep_credentials_isolated(monkeypatch: pytest.Monkey
     ]
 
 
-def test_token_status_distinguishes_missing_and_unusable_files(tmp_path: Path) -> None:
+@pytest.mark.parametrize(("contents", "expected"), [(None, "missing"), ("{}", "reauth_required")])
+def test_token_status_distinguishes_missing_and_unusable_files(tmp_path: Path, contents: str | None, expected: str) -> None:
     token_path = tmp_path / "token.json"
 
-    assert oauth.token_status(token_path, gmail.SCOPES) == "missing"
-    token_path.write_text("{}", encoding="utf-8")
-    assert oauth.token_status(token_path, gmail.SCOPES) == "reauth_required"
+    if contents is not None:
+        token_path.write_text(contents, encoding="utf-8")
+
+    assert oauth.token_status(token_path, gmail.SCOPES) == expected

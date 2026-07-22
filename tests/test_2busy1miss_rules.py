@@ -1,6 +1,8 @@
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from two_busy_one_miss.config import EventMatch, RemindersConfig, ReminderSpec, RuleConfig
 from two_busy_one_miss.google_calendar import CalendarEvent
 from two_busy_one_miss.rules import matches, parse_offset, schedule_reminders
@@ -22,10 +24,12 @@ def event(title: str = "French class", location: str = "Room 1") -> CalendarEven
     )
 
 
-def test_parse_offset() -> None:
-    assert parse_offset("5m") == timedelta(minutes=5)
-    assert parse_offset("2h") == timedelta(hours=2)
-    assert parse_offset("1d") == timedelta(days=1)
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [("5m", timedelta(minutes=5)), ("2h", timedelta(hours=2)), ("1d", timedelta(days=1))],
+)
+def test_parse_offset(value: str, expected: timedelta) -> None:
+    assert parse_offset(value) == expected
 
 
 def test_matches_supported_fields() -> None:

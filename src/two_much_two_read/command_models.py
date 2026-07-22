@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import BaseModel, Field, model_validator
 
 from .config import Source
@@ -7,6 +9,20 @@ from .config import Source
 
 class CommandResult(BaseModel):
     status: str = "ok"
+
+
+class NewsletterRunResult(CommandResult):
+    status: Literal["ok", "partial", "no_content"]
+    discovered: int
+    processed: int
+    failed: int
+    delivered: int
+
+
+class NewsletterRetryResult(CommandResult):
+    delivered: int
+    failed: int
+    failed_by_error_code: dict[str, int] = Field(default_factory=dict)
 
 
 class MailSelector(BaseModel):

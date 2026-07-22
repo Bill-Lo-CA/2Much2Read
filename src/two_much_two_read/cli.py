@@ -137,7 +137,7 @@ def subscriptions_sync(
 
 @delivery_app.command("retry")
 def delivery_retry() -> None:
-    emit({"status": "ok", **retry_delivery(Settings())})
+    emit(retry_delivery(Settings()))
 
 
 @app.command()

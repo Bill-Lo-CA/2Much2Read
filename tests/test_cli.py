@@ -7,7 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from two_much_two_read import cli, mail_operations
-from two_much_two_read.command_models import FiltersResult
+from two_much_two_read.command_models import FiltersResult, NewsletterRetryResult, NewsletterRunResult
 from two_much_two_read.config import Settings, load_excluded_subscriptions, load_sources
 from two_much_two_read.gmail import display_id
 from two_much_two_read.schemas import EmailExtraction
@@ -40,16 +40,25 @@ def test_run_help_uses_clear_delivery_flags_without_resend() -> None:
 
 
 def test_run_avoids_ansi_progress_when_stderr_is_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_run_pipeline(*args: object) -> dict[str, int | str]:
-        return {"status": "ok", "discovered": 1, "processed": 1, "delivered": 0}
+    def fake_run_pipeline(*args: object) -> NewsletterRunResult:
+        return NewsletterRunResult(status="ok", discovered=1, processed=1, failed=0, delivered=0)
 
     monkeypatch.setattr(cli, "run_pipeline", fake_run_pipeline)
 
     result = CliRunner().invoke(cli.app, ["run", "--source", "news", "--max-messages", "1"])
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout) == {"status": "ok", "discovered": 1, "processed": 1, "delivered": 0}
+    assert json.loads(result.stdout) == {"status": "ok", "discovered": 1, "processed": 1, "failed": 0, "delivered": 0}
     assert result.stderr == ""
+
+
+def test_delivery_retry_keeps_its_json_shape(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "retry_delivery", lambda _: NewsletterRetryResult(delivered=1, failed=0))
+
+    result = CliRunner().invoke(cli.app, ["delivery", "retry"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {"status": "ok", "delivered": 1, "failed": 0, "failed_by_error_code": {}}
 
 
 @pytest.mark.parametrize(
