@@ -91,7 +91,6 @@ class CalendarClient:
                     timeMax=time_max.isoformat(),
                     singleEvents=True,
                     orderBy="startTime",
-                    conferenceDataVersion=1,
                     pageToken=page_token,
                 )
                 .execute()

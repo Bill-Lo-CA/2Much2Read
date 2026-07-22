@@ -10,7 +10,7 @@ import pytest
 
 from two_busy_one_miss import pipeline
 from two_busy_one_miss.config import EventMatch, RemindersConfig, ReminderSpec, RuleConfig, Settings
-from two_busy_one_miss.google_calendar import CalendarClient
+from two_busy_one_miss.google_calendar import CalendarClient, CalendarEvent
 from two_busy_one_miss.pipeline import event_query_lookahead
 from two_busy_one_miss.renderer import render_agenda
 from two_busy_one_miss.rules import ReminderCandidate
@@ -68,7 +68,7 @@ def test_event_query_lookahead_covers_longest_reminder() -> None:
     assert event_query_lookahead(config, 7) == timedelta(days=10)
 
 
-def test_calendar_client_requests_conference_data() -> None:
+def test_calendar_client_lists_events() -> None:
     timezone = ZoneInfo("America/Montreal")
     client = CalendarClient.__new__(CalendarClient)
     client.service = MagicMock()
@@ -84,9 +84,25 @@ def test_calendar_client_requests_conference_data() -> None:
         timeMax=end.isoformat(),
         singleEvents=True,
         orderBy="startTime",
-        conferenceDataVersion=1,
         pageToken=None,
     )
+
+
+def test_list_events_between_deduplicates_by_instance_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    timezone = ZoneInfo("America/Montreal")
+    start = datetime(2026, 7, 27, 17, tzinfo=timezone)
+    duplicate = CalendarEvent("primary", "Main", "one", "one", "Cloud CTF", "KPMG", start, start + timedelta(hours=5), False)
+    repeated = CalendarEvent("primary", "Main", "one", "one", "Cloud CTF", "KPMG", start, start + timedelta(hours=5), False)
+    copied = CalendarEvent("primary", "Main", "two", "two", "Cloud CTF", "KPMG", start, start + timedelta(hours=5), False)
+    config = RemindersConfig(calendars=[{"id": "primary", "name": "Main"}], timezone=timezone.key)
+
+    class FakeCalendarClient:
+        def list_events(self, *args: object) -> list[CalendarEvent]:
+            return [duplicate, repeated, copied]
+
+    monkeypatch.setattr(pipeline, "calendar_client", lambda *args: FakeCalendarClient())
+
+    assert pipeline.list_events_between(Settings(), config, start, start + timedelta(days=1)) == [repeated, copied]
 
 
 def test_calendar_client_lists_all_calendar_pages() -> None:

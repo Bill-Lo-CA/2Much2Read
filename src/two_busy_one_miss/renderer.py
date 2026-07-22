@@ -24,25 +24,31 @@ def render_reminder(candidate: ReminderCandidate) -> str:
         f"{when:<11} | {_agenda_cell(event.title)}",
         f"{'':<11} | Starts: {_when(event.start)}",
     ]
-    if event.calendar_name:
-        lines.append(f"{'':<11} | Calendar: {_agenda_cell(event.calendar_name)}")
-    if event.location:
-        lines.append(f"{'':<11} | Location: {_agenda_cell(event.location)}")
+    if calendar_name := _agenda_cell(event.calendar_name or ""):
+        lines.append(f"{'':<11} | Calendar: {calendar_name}")
+    if location := _agenda_cell(event.location):
+        lines.append(f"{'':<11} | Location: {location}")
     return _with_links(lines, [event])
 
 
 def _agenda_cell(value: str) -> str:
-    return " ".join(value.replace("@", "@\u200b").replace("`", "ˋ").split())
+    return " ".join(URL.sub("", value).replace("@", "@\u200b").replace("`", "ˋ").split())
 
 
 def _with_links(lines: list[str], events: list[CalendarEvent]) -> str:
-    links = dict.fromkeys(
-        url.rstrip(".,;:!?")
-        for event in events
-        for value in (event.title, event.calendar_name or "", event.location, *event.links)
-        for url in URL.findall(value)
-    )
-    return "\n".join([*lines, "```", *(f"<{url}>" for url in links)])
+    link_lines = []
+    for event in events:
+        links: dict[str, str] = {}
+        for label, value in (
+            ("Title", event.title),
+            ("Calendar", event.calendar_name or ""),
+            ("Location", event.location),
+        ):
+            for url in URL.findall(value):
+                links.setdefault(url.rstrip(".,;:!?"), label)
+        if links:
+            link_lines.append(" · ".join(f"[{label}]({url})" for url, label in links.items()))
+    return "\n".join([*lines, "```", *link_lines])
 
 
 def _agenda_when(day: date, event: CalendarEvent) -> str:
@@ -69,9 +75,9 @@ def render_agenda(day: date, events: list[CalendarEvent]) -> str:
     for event in sorted(events, key=lambda item: (item.start, item.calendar_id, item.instance_id)):
         when = _agenda_when(day, event)
         summary = _agenda_cell(event.title)
-        if event.calendar_name:
-            summary += f" ({_agenda_cell(event.calendar_name)})"
+        if calendar_name := _agenda_cell(event.calendar_name or ""):
+            summary += f" ({calendar_name})"
         lines.append(f"{when:<11} | {summary}")
-        if event.location:
-            lines.append(f"{'':<11} | {_agenda_cell(event.location)}")
+        if location := _agenda_cell(event.location):
+            lines.append(f"{'':<11} | {location}")
     return _with_links(lines, events)

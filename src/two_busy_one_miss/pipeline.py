@@ -118,7 +118,8 @@ def list_events_between(
     events: list[CalendarEvent] = []
     for calendar in config.enabled_calendars:
         events.extend(client.list_events(calendar.id, calendar.name, time_min, time_max))
-    return sorted(events, key=lambda event: (event.start, event.calendar_id, event.instance_id))
+    unique = {(event.calendar_id, event.instance_id): event for event in events}
+    return sorted(unique.values(), key=lambda event: (event.start, event.calendar_id, event.instance_id))
 
 
 def event_query_lookahead(config: RemindersConfig, days: int) -> timedelta:
