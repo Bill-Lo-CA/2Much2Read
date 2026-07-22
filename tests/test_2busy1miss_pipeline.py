@@ -68,7 +68,7 @@ def test_event_query_lookahead_covers_longest_reminder() -> None:
     assert event_query_lookahead(config, 7) == timedelta(days=10)
 
 
-def test_calendar_client_requests_conference_data() -> None:
+def test_calendar_client_lists_events() -> None:
     timezone = ZoneInfo("America/Montreal")
     client = CalendarClient.__new__(CalendarClient)
     client.service = MagicMock()
@@ -84,7 +84,6 @@ def test_calendar_client_requests_conference_data() -> None:
         timeMax=end.isoformat(),
         singleEvents=True,
         orderBy="startTime",
-        conferenceDataVersion=1,
         pageToken=None,
     )
 
