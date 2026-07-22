@@ -97,8 +97,8 @@ def _process_source(
         discovered += 1
         try:
             extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
-        except OllamaSchemaError:
-            database.fail_message(message_id, "OLLAMA_EXTRACTION_FAILED")
+        except OllamaSchemaError as error:
+            database.fail_message(message_id, str(error).split(" response_preview=", 1)[0])
             failed += 1
             if not dry_run:
                 gmail.add_labels(gmail_id, [failed_label])

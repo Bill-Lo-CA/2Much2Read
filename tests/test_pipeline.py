@@ -387,7 +387,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
 
         def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
             if content == "bad":
-                raise OllamaSchemaError("OLLAMA_SCHEMA_INVALID")
+                raise OllamaSchemaError("OLLAMA_SCHEMA_INVALID error='missing category' response_preview='newsletter body'")
             return EmailExtraction(
                 source_id=source_id,
                 newsletter_title="Good news",
@@ -421,7 +421,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
     database = Database(settings.database_path)
     rows = database.connection.execute("SELECT gmail_message_id, state, last_error_code FROM messages ORDER BY id").fetchall()
     assert [tuple(row) for row in rows] == [
-        ("bad", "failed", "OLLAMA_EXTRACTION_FAILED"),
+        ("bad", "failed", "OLLAMA_SCHEMA_INVALID error='missing category'"),
         ("good", "processed", None),
     ]
     database.close()
