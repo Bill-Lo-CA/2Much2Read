@@ -7,7 +7,7 @@ import pytest
 
 
 @pytest.mark.parametrize(
-    ("script", "timer", "service", "secret_option", "secret_name"),
+    ("script", "timer", "service", "secret_option", "secret_name", "answer", "starts"),
     [
         (
             "install-2much2read-user-service.sh",
@@ -15,6 +15,17 @@ import pytest
             "2much2read-runtime.service",
             "--gmail-client-secret",
             "gmail-client-secret.json",
+            "",
+            False,
+        ),
+        (
+            "install-2much2read-user-service.sh",
+            "2much2read-runtime.timer",
+            "2much2read-runtime.service",
+            "--gmail-client-secret",
+            "gmail-client-secret.json",
+            "y\n",
+            True,
         ),
         (
             "install-2busy1miss-user-service.sh",
@@ -22,11 +33,29 @@ import pytest
             "2busy1miss-runtime.service",
             "--calendar-client-secret",
             "calendar-client-secret.json",
+            "",
+            False,
+        ),
+        (
+            "install-2busy1miss-user-service.sh",
+            "2busy1miss-runtime.timer",
+            "2busy1miss-runtime.service",
+            "--calendar-client-secret",
+            "calendar-client-secret.json",
+            "y\n",
+            True,
         ),
     ],
 )
-def test_installers_leave_timers_disabled(
-    tmp_path: Path, script: str, timer: str, service: str, secret_option: str, secret_name: str
+def test_installers_only_start_timers_when_confirmed(
+    tmp_path: Path,
+    script: str,
+    timer: str,
+    service: str,
+    secret_option: str,
+    secret_name: str,
+    answer: str,
+    starts: bool,
 ) -> None:
     root = Path(__file__).parents[1]
     fake_bin = tmp_path / "bin"
@@ -53,20 +82,28 @@ def test_installers_leave_timers_disabled(
         check=True,
         text=True,
         capture_output=True,
+        input=answer,
     )
 
     calls = log.read_text(encoding="utf-8")
     assert f"disable --now {timer}" in calls
     assert f"is-active --quiet {service}" in calls
     assert "daemon-reload" in calls
-    assert "enable --now" not in calls
+    assert ("enable --now" in calls) is starts
     installed_secret = tmp_path / "home" / ".config" / "2much2read-runtime" / secret_name
     assert installed_secret.read_text(encoding="utf-8") == "client secret"
     assert installed_secret.stat().st_mode & 0o777 == 0o600
     if script == "install-2busy1miss-user-service.sh":
         assert "disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer" in calls
-        assert "Enable reminders when ready: systemctl --user enable --now 2busy1miss-runtime.timer" in result.stdout
-        assert "Enable agenda when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer" in result.stdout
+        if starts:
+            assert "enable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer" in calls
+            assert "Timers enabled." in result.stdout
+        else:
+            assert (
+                "Timers remain disabled. Enable reminders when ready: systemctl --user enable --now 2busy1miss-runtime.timer"
+                in result.stdout
+            )
+            assert "Enable agenda when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer" in result.stdout
         agenda_timer = tmp_path / "home" / ".config" / "systemd" / "user" / "2busy1miss-runtime-agenda.timer"
         assert "OnCalendar=*-*-* 21:00:00" in agenda_timer.read_text(encoding="utf-8")
         (tmp_path / "home" / ".config" / "2much2read-runtime" / ".2busy1miss.env").write_text(
@@ -79,6 +116,7 @@ def test_installers_leave_timers_disabled(
             check=True,
             text=True,
             capture_output=True,
+            input=answer,
         )
         assert "OnCalendar=*-*-* 20:30:00" in agenda_timer.read_text(encoding="utf-8")
         (tmp_path / "home" / ".config" / "2much2read-runtime" / ".2busy1miss.env").write_text(
@@ -91,10 +129,67 @@ def test_installers_leave_timers_disabled(
             check=True,
             text=True,
             capture_output=True,
+            input=answer,
         )
         assert "OnCalendar=*-*-* 21:00:00" in agenda_timer.read_text(encoding="utf-8")
     else:
-        assert f"Enable when ready: systemctl --user enable --now {timer}" in result.stdout
+        if starts:
+            assert f"enable --now {timer}" in calls
+        expected = (
+            "Timer enabled." if starts else f"Timer remains disabled. Enable when ready: systemctl --user enable --now {timer}"
+        )
+        assert expected in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("script", "units", "disable_call"),
+    [
+        (
+            "uninstall-2much2read-user-service.sh",
+            ["2much2read-runtime.service", "2much2read-runtime.timer"],
+            "disable --now 2much2read-runtime.timer",
+        ),
+        (
+            "uninstall-2busy1miss-user-service.sh",
+            [
+                "2busy1miss-runtime.service",
+                "2busy1miss-runtime.timer",
+                "2busy1miss-runtime-agenda.service",
+                "2busy1miss-runtime-agenda.timer",
+            ],
+            "disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer",
+        ),
+    ],
+)
+def test_uninstallers_remove_only_their_unit_files(tmp_path: Path, script: str, units: list[str], disable_call: str) -> None:
+    root = Path(__file__).parents[1]
+    systemd_dir = tmp_path / "home" / ".config" / "systemd" / "user"
+    systemd_dir.mkdir(parents=True)
+    for unit in units:
+        (systemd_dir / unit).write_text("owned", encoding="utf-8")
+    preserved = systemd_dir / "unrelated.timer"
+    preserved.write_text("keep", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "systemctl.log"
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n', encoding="utf-8")
+    systemctl.chmod(0o755)
+
+    subprocess.run(
+        ["sh", f"scripts/{script}"],
+        cwd=root,
+        env=os.environ | {"HOME": str(tmp_path / "home"), "PATH": f"{fake_bin}:{os.environ['PATH']}", "SYSTEMCTL_LOG": str(log)},
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert all(not (systemd_dir / unit).exists() for unit in units)
+    assert preserved.read_text(encoding="utf-8") == "keep"
+    calls = log.read_text(encoding="utf-8")
+    assert disable_call in calls
+    assert "daemon-reload" in calls
 
 
 def test_2busy1miss_agenda_timer_is_an_installer_template() -> None:
