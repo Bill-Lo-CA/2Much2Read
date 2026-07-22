@@ -79,8 +79,7 @@ def test_urls_move_below_the_table_without_metadata_links() -> None:
         links=("https://calendar.example/event",),
     )
     links = (
-        "[Title](https://docs.example/brief) · [Calendar](https://calendar.example/view) · "
-        "[Location](https://meet.example/join)"
+        "[Title](https://docs.example/brief) · [Calendar](https://calendar.example/view) · [Location](https://meet.example/join)"
     )
 
     agenda = render_agenda(date(2026, 7, 9), [event])
