@@ -38,7 +38,7 @@ def _agenda_cell(value: str) -> str:
 def _with_links(lines: list[str], events: list[CalendarEvent]) -> str:
     link_lines = []
     for event in events:
-        links = dict.fromkeys((url.rstrip(".,;:!?") for url in event.links[:1]), "Event")
+        links: dict[str, str] = {}
         for label, value in (("Title", event.title), ("Calendar", event.calendar_name or ""), ("Location", event.location)):
             for url in URL.findall(value):
                 links.setdefault(url.rstrip(".,;:!?"), label)
