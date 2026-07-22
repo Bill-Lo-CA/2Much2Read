@@ -85,6 +85,22 @@ sed "s|__AGENDA_SCHEDULE_TIME__|$agenda_schedule_time|" deploy/systemd/2busy1mis
 
 systemctl --user daemon-reload
 
+printf '%s' "Enable reminder and agenda timers now? [y/N] "
+if ! IFS= read -r enable_timers; then
+  enable_timers=""
+fi
+case "$enable_timers" in
+  y|Y)
+    systemctl --user enable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer
+    timer_status="Timers enabled."
+    agenda_status=""
+    ;;
+  *)
+    timer_status="Timers remain disabled. Enable reminders when ready: systemctl --user enable --now 2busy1miss-runtime.timer"
+    agenda_status="Enable agenda when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer"
+    ;;
+esac
+
 printf '%s\n' \
   "Config: $config_dir" \
   "Edit Discord webhook: $env_file" \
@@ -92,6 +108,6 @@ printf '%s\n' \
   "Check setup: cd $repo_dir && uv run 2busy1miss doctor" \
   "Dry run: cd $repo_dir && uv run 2busy1miss run --dry-run" \
   "Agenda dry run: cd $repo_dir && uv run 2busy1miss agenda-next-day --dry-run" \
-  "Enable reminders when ready: systemctl --user enable --now 2busy1miss-runtime.timer" \
-  "Enable agenda when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer" \
-  "Logs: journalctl --user -u 2busy1miss-runtime.service"
+  "$timer_status"
+[ -z "$agenda_status" ] || printf '%s\n' "$agenda_status"
+printf '%s\n' "Logs: journalctl --user -u 2busy1miss-runtime.service"

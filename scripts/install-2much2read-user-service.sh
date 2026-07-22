@@ -68,11 +68,25 @@ sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2much2read-runtime.service > "$syste
 cp deploy/systemd/2much2read-runtime.timer "$systemd_dir/2much2read-runtime.timer"
 systemctl --user daemon-reload
 
+printf '%s' "Enable 2much2read timer now? [y/N] "
+if ! IFS= read -r enable_timer; then
+  enable_timer=""
+fi
+case "$enable_timer" in
+  y|Y)
+    systemctl --user enable --now 2much2read-runtime.timer
+    timer_status="Timer enabled."
+    ;;
+  *)
+    timer_status="Timer remains disabled. Enable when ready: systemctl --user enable --now 2much2read-runtime.timer"
+    ;;
+esac
+
 printf '%s\n' \
   "Config: $config_dir" \
   "Edit Discord webhook: $env_file" \
   "Authorize Gmail: cd $repo_dir && uv run 2much2read auth gmail" \
   "Check setup: cd $repo_dir && uv run 2much2read doctor" \
   "Dry run: cd $repo_dir && uv run 2much2read run --dry-run" \
-  "Enable when ready: systemctl --user enable --now 2much2read-runtime.timer" \
+  "$timer_status" \
   "Logs: journalctl --user -u 2much2read-runtime.service"

@@ -50,7 +50,7 @@ uv run 2much2read run --dry-run
 uv run 2much2read run
 ```
 
-The installer copies the supplied client credential to `gmail-client-secret.json`, copies `config/2much2read.env.example` and `sources.yaml` on first install, and leaves `2much2read-runtime.timer` stopped and disabled. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read-runtime/.2much2read.env`, authorize, run `doctor` and a dry run, then explicitly enable the timer when ready:
+The installer copies the supplied client credential to `gmail-client-secret.json`, copies `config/2much2read.env.example` and `sources.yaml` on first install, then asks whether to enable `2much2read-runtime.timer`. Reply `y` only after configuration and authorization are ready; an empty response keeps it stopped and disabled. You can enable it later:
 
 ```bash
 systemctl --user enable --now 2much2read-runtime.timer
@@ -81,11 +81,17 @@ uv run 2busy1miss run --dry-run
 uv run 2busy1miss run
 ```
 
-The installer copies the supplied client credential to `calendar-client-secret.json`, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, and leaves both timers stopped and disabled. Set `DISCORD_WEBHOOK_URL` in `~/.config/2much2read-runtime/.2busy1miss.env`, authorize, run `doctor` and a dry run, then explicitly enable each timer when ready:
+The installer copies the supplied client credential to `calendar-client-secret.json`, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, then asks whether to enable both timers. Reply `y` only after configuration and authorization are ready; an empty response keeps both stopped and disabled. You can enable either timer later:
 
 ```bash
 systemctl --user enable --now 2busy1miss-runtime.timer
 systemctl --user enable --now 2busy1miss-runtime-agenda.timer
+```
+
+To stop active reminder/agenda jobs and remove only the installed units while preserving configuration, OAuth files, and SQLite data:
+
+```bash
+sh scripts/uninstall-2busy1miss-user-service.sh
 ```
 
 `REMINDER_LOOKAHEAD_DAYS` in `.2busy1miss.env` controls the Calendar sync horizon
