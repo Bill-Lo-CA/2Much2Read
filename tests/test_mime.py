@@ -5,11 +5,14 @@ import pytest
 from two_much_two_read.mime import EmptyEmailError, extract_mime, html_to_text
 
 
-def test_prefers_plain_text() -> None:
+@pytest.mark.parametrize(("plain", "html"), [("plain wins", None), ("plain wins", "<p>html loses</p>")])
+def test_extract_mime_returns_plain_text_for_supported_structures(plain: str, html: str | None) -> None:
     message = EmailMessage()
-    message.set_content("plain wins")
-    message.add_alternative("<p>html loses</p>", subtype="html")
-    assert extract_mime(message.as_bytes()) == "plain wins"
+    message.set_content(plain)
+    if html is not None:
+        message.add_alternative(html, subtype="html")
+
+    assert extract_mime(message.as_bytes()) == plain
 
 
 def test_html_preserves_safe_links_and_drops_unsafe_ones() -> None:

@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo
 from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code
 from two_read_runtime.locking import ProcessLock
 
+from .command_models import NewsletterRetryResult, NewsletterRunResult
 from .config import Settings, Source, load_sources
 from .digest import render_digest
 from .gmail import GmailClient, credentials, message_headers
@@ -119,7 +120,7 @@ def run_pipeline(
     force: bool = False,
     *,
     now: datetime | None = None,
-) -> dict[str, int | str]:
+) -> NewsletterRunResult:
     sources = _enabled_sources(settings, source_id)
 
     database: Database | None = None
@@ -181,14 +182,14 @@ def run_pipeline(
                 if digest_id is not None and not no_deliver:
                     deliver_digest(settings, database, digest_id)
                     delivered = 1
-            result = {
-                "status": "partial" if failed else "ok" if content else "no_content",
-                "discovered": discovered,
-                "processed": processed,
-                "failed": failed,
-                "delivered": delivered,
-            }
-            run_status = str(result["status"])
+            result = NewsletterRunResult(
+                status="partial" if failed else "ok" if content else "no_content",
+                discovered=discovered,
+                processed=processed,
+                failed=failed,
+                delivered=delivered,
+            )
+            run_status = result.status
             return result
     except Exception as error:
         error_summary = type(error).__name__
@@ -200,7 +201,7 @@ def run_pipeline(
             database.close()
 
 
-def retry_delivery(settings: Settings, database: Database | None = None) -> dict[str, object]:
+def retry_delivery(settings: Settings, database: Database | None = None) -> NewsletterRetryResult:
     owned = database is None
     active_database = database
     delivered = 0
@@ -238,7 +239,7 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> dict
     finally:
         if owned and active_database is not None:
             active_database.close()
-    return {"delivered": delivered, "failed": failed, "failed_by_error_code": failed_by_error_code}
+    return NewsletterRetryResult(delivered=delivered, failed=failed, failed_by_error_code=failed_by_error_code)
 
 
 def deliver_digest(settings: Settings, database: Database, digest_id: int) -> None:

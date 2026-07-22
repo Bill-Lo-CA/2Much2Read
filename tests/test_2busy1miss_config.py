@@ -88,8 +88,10 @@ calendars:
         load_reminders(path)
 
 
-def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    home = tmp_path / "home"
+def test_settings_ignore_repo_dotenv_and_use_private_env_file(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_home: Path
+) -> None:
+    home = isolated_home
     app_config = home / ".config" / "2much2read-runtime"
     app_config.mkdir(parents=True)
     (tmp_path / ".env").write_text(
@@ -101,7 +103,6 @@ def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, mo
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("HOME", str(home))
     monkeypatch.delenv("DISCORD_WEBHOOK_URL", raising=False)
     monkeypatch.delenv("DATABASE_PATH", raising=False)
 
