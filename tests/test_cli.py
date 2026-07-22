@@ -41,7 +41,7 @@ def test_run_help_uses_clear_delivery_flags_without_resend() -> None:
 
 
 def test_run_avoids_ansi_progress_when_stderr_is_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
-    def fake_run_pipeline(*args: object) -> NewsletterRunResult:
+    def fake_run_pipeline(*args: object, **kwargs: object) -> NewsletterRunResult:
         return NewsletterRunResult(status="ok", discovered=1, processed=1, failed=0, delivered=0)
 
     monkeypatch.setattr(cli, "run_pipeline", fake_run_pipeline)

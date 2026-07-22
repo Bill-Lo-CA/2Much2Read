@@ -8,7 +8,7 @@ import httpx
 import typer
 from pydantic import BaseModel, ValidationError
 
-from two_read_runtime.progress import run_with_elapsed
+from two_read_runtime.progress import run_with_live_progress
 
 from .command_models import MailSelector, SubscriptionCandidate
 from .config import Settings
@@ -174,7 +174,12 @@ def run_command(
 ) -> None:
     if force and (dry_run or source is None or max_messages is None):
         raise typer.BadParameter("--force requires --source and --max-messages and cannot use --dry-run")
-    emit(run_with_elapsed("2much2read run", lambda: run_pipeline(Settings(), source, max_messages, not deliver, dry_run, force)))
+    emit(
+        run_with_live_progress(
+            "2much2read run",
+            lambda status: run_pipeline(Settings(), source, max_messages, not deliver, dry_run, force, status=status),
+        )
+    )
 
 
 @app.command()
