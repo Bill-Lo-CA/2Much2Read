@@ -88,20 +88,21 @@ def test_calendar_client_lists_events() -> None:
     )
 
 
-def test_list_events_between_deduplicates_identical_calendar_events(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_list_events_between_deduplicates_by_instance_id(monkeypatch: pytest.MonkeyPatch) -> None:
     timezone = ZoneInfo("America/Montreal")
     start = datetime(2026, 7, 27, 17, tzinfo=timezone)
     duplicate = CalendarEvent("primary", "Main", "one", "one", "Cloud CTF", "KPMG", start, start + timedelta(hours=5), False)
+    repeated = CalendarEvent("primary", "Main", "one", "one", "Cloud CTF", "KPMG", start, start + timedelta(hours=5), False)
     copied = CalendarEvent("primary", "Main", "two", "two", "Cloud CTF", "KPMG", start, start + timedelta(hours=5), False)
     config = RemindersConfig(calendars=[{"id": "primary", "name": "Main"}], timezone=timezone.key)
 
     class FakeCalendarClient:
         def list_events(self, *args: object) -> list[CalendarEvent]:
-            return [duplicate, copied]
+            return [duplicate, repeated, copied]
 
     monkeypatch.setattr(pipeline, "calendar_client", lambda *args: FakeCalendarClient())
 
-    assert pipeline.list_events_between(Settings(), config, start, start + timedelta(days=1)) == [copied]
+    assert pipeline.list_events_between(Settings(), config, start, start + timedelta(days=1)) == [repeated, copied]
 
 
 def test_calendar_client_lists_all_calendar_pages() -> None:
