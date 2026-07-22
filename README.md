@@ -40,7 +40,7 @@ Requirements: Gmail API desktop OAuth credentials, a Discord webhook, and local 
 
 ```bash
 uv sync --all-groups
-ollama pull qwen3:8b
+ollama pull llama3.2:3b
 sh scripts/install-2much2read-user-service.sh \
   --gmail-client-secret ~/Downloads/gmail-client.json
 

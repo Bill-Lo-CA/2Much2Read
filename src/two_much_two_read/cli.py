@@ -4,6 +4,7 @@ import json
 from collections.abc import Callable, Mapping
 from typing import Annotated
 
+import httpx
 import typer
 from pydantic import BaseModel, ValidationError
 
@@ -20,6 +21,7 @@ from .mail_operations import (
     inspect_mail,
     list_mails,
 )
+from .ollama import OllamaClient, OllamaSchemaError, create_ollama_client
 from .pipeline import retry_delivery, run_pipeline
 from .subscription_operations import (
     CATEGORY_OPTIONS,
@@ -78,6 +80,15 @@ def choose_category(candidate: SubscriptionCandidate) -> tuple[str, str] | None:
         typer.echo("Please enter a number from 1 to 6.")
 
 
+def choose_category_with_ollama(ollama: OllamaClient, candidate: SubscriptionCandidate) -> tuple[str, str] | None:
+    try:
+        category = ollama.classify_subscription(candidate.name, candidate.sender, candidate.list_id, candidate.subject)
+    except (httpx.HTTPError, OllamaSchemaError) as error:
+        typer.echo(f"Automatic classification failed for {candidate.id}: {error}. Choose manually.")
+        return choose_category(candidate)
+    return next(option for option in CATEGORY_OPTIONS.values() if option[0] == category)
+
+
 @auth_app.command("gmail")
 def auth_gmail() -> None:
     invoke(lambda: authorize_gmail(Settings()))
@@ -132,7 +143,15 @@ def subscriptions_sync(
     limit: Annotated[int, typer.Option(min=1, max=500)] = 100,
 ) -> None:
     settings = Settings()
-    invoke(lambda: sync_subscriptions(settings, gmail_client(settings), limit, apply, choose_category))
+    if apply:
+        ollama = create_ollama_client(settings)
+
+        def category_picker(candidate: SubscriptionCandidate) -> tuple[str, str] | None:
+            return choose_category_with_ollama(ollama, candidate)
+
+    else:
+        category_picker = choose_category
+    invoke(lambda: sync_subscriptions(settings, gmail_client(settings), limit, apply, category_picker))
 
 
 @delivery_app.command("retry")

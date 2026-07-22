@@ -10,6 +10,7 @@ from two_much_two_read import cli, mail_operations
 from two_much_two_read.command_models import FiltersResult, NewsletterRetryResult, NewsletterRunResult
 from two_much_two_read.config import Settings, load_excluded_subscriptions, load_sources
 from two_much_two_read.gmail import display_id
+from two_much_two_read.ollama import OllamaSchemaError
 from two_much_two_read.schemas import EmailExtraction
 
 
@@ -151,6 +152,17 @@ def test_subscriptions_list_and_sync_apply(newsletter_settings: Settings, monkey
 
     monkeypatch.setattr(cli, "Settings", lambda: newsletter_settings)
     monkeypatch.setattr(cli, "gmail_client", lambda settings: FakeGmailClient())
+
+    class FakeOllamaClient:
+        def classify_subscription(self, name: str, sender: str, list_id: str | None, subject: str | None) -> str:
+            assert name == "Example News"
+            assert list_id is not None
+            assert subject == "Daily update"
+            if sender == "news@example.com":
+                return "CYBERSECURITY"
+            raise OllamaSchemaError("invalid classification")
+
+    monkeypatch.setattr(cli, "create_ollama_client", lambda _: FakeOllamaClient())
     runner = CliRunner()
 
     preview = runner.invoke(cli.app, ["subscriptions", "sync"])
@@ -158,9 +170,9 @@ def test_subscriptions_list_and_sync_apply(newsletter_settings: Settings, monkey
     assert json.loads(preview.stdout)["status"] == "preview"
     assert "news-example-com" not in sources_path.read_text(encoding="utf-8")
 
-    synced = runner.invoke(cli.app, ["subscriptions", "sync", "--apply"], input="9\n3\n6\n")
+    synced = runner.invoke(cli.app, ["subscriptions", "sync", "--apply"], input="6\n")
     assert synced.exit_code == 0
-    assert "Please enter a number from 1 to 6." in synced.stdout
+    assert "Automatic classification failed for spam-example-com" in synced.stdout
     assert json.loads(synced.stdout.splitlines()[-1])["status"] == "applied"
     assert "# keep this comment" in sources_path.read_text(encoding="utf-8")
     assert sources_path.stat().st_mode & 0o777 == 0o600
