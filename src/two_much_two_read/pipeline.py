@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -16,6 +17,12 @@ from .mime import extract_gmail_payload
 from .ollama import OllamaClient, OllamaSchemaError, create_ollama_client
 from .schemas import DigestItem
 from .storage import Database
+
+StatusReporter = Callable[[str], None]
+
+
+def _ignore_status(_: str) -> None:
+    pass
 
 
 def _items(database: Database, message_ids: list[int], maximum: int) -> list[DigestItem]:
@@ -58,6 +65,7 @@ def _process_source(
     settings: Settings,
     source: Source,
     remaining: int,
+    status: StatusReporter,
     *,
     force: bool,
     dry_run: bool,
@@ -72,6 +80,7 @@ def _process_source(
     failed = 0
     message_ids: list[int] = []
     gmail_ids = gmail.list_messages(query, remaining)
+    status(f"{source.id}: {len(gmail_ids)} message(s)")
     for gmail_id in gmail_ids:
         message = gmail.get_message(gmail_id)
         payload = message.get("payload")
@@ -95,16 +104,21 @@ def _process_source(
         if message_id is None:
             continue
         discovered += 1
+        subject = headers.get("subject") or gmail_id
+        status(f"{source.id}: extracting {subject}")
         try:
             extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
-        except OllamaSchemaError:
-            database.fail_message(message_id, "OLLAMA_EXTRACTION_FAILED")
+        except OllamaSchemaError as error:
+            reason = str(error).split(" response_preview=", 1)[0]
+            database.fail_message(message_id, reason)
             failed += 1
+            status(f"{source.id}: failed {subject} ({reason})")
             if not dry_run:
                 gmail.add_labels(gmail_id, [failed_label])
             continue
         database.store_extraction(message_id, extraction, replace=force)
         processed += 1
+        status(f"{source.id}: processed {subject}")
         message_ids.append(message_id)
         if not dry_run:
             gmail.add_labels(gmail_id, [processed_label])
@@ -120,8 +134,10 @@ def run_pipeline(
     force: bool = False,
     *,
     now: datetime | None = None,
+    status: StatusReporter | None = None,
 ) -> NewsletterRunResult:
     sources = _enabled_sources(settings, source_id)
+    status = status or _ignore_status
 
     database: Database | None = None
     run_id: int | None = None
@@ -146,11 +162,12 @@ def run_pipeline(
             gmail.ensure_labels()
             ollama = create_ollama_client(settings)
             remaining = max_messages or settings.gmail_max_messages_per_run
+            status(f"Starting {len(sources)} source(s)")
             for source in sources:
                 if remaining <= 0:
                     break
                 used, source_discovered, source_processed, source_failed, source_message_ids = _process_source(
-                    database, gmail, ollama, settings, source, remaining, force=force, dry_run=dry_run
+                    database, gmail, ollama, settings, source, remaining, status, force=force, dry_run=dry_run
                 )
                 remaining -= used
                 discovered += source_discovered
@@ -180,6 +197,7 @@ def run_pipeline(
                     content,
                 )
                 if digest_id is not None and not no_deliver:
+                    status("Delivering digest")
                     deliver_digest(settings, database, digest_id)
                     delivered = 1
             result = NewsletterRunResult(

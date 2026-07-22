@@ -387,7 +387,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
 
         def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
             if content == "bad":
-                raise OllamaSchemaError("OLLAMA_SCHEMA_INVALID")
+                raise OllamaSchemaError("OLLAMA_SCHEMA_INVALID error='missing category' response_preview='newsletter body'")
             return EmailExtraction(
                 source_id=source_id,
                 newsletter_title="Good news",
@@ -411,17 +411,26 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllamaClient())
     monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
 
-    result = run_pipeline(settings, no_deliver=True)
+    statuses: list[str] = []
+    result = run_pipeline(settings, no_deliver=True, status=statuses.append)
 
     assert result.model_dump() == {"status": "partial", "discovered": 2, "processed": 1, "failed": 1, "delivered": 0}
     assert gmail.applied_labels == [
         ("bad", ["NewsletterBot/Failed"]),
         ("good", ["NewsletterBot/Processed"]),
     ]
+    assert statuses == [
+        "Starting 1 source(s)",
+        "alphasignal: 2 message(s)",
+        "alphasignal: extracting bad",
+        "alphasignal: failed bad (OLLAMA_SCHEMA_INVALID error='missing category')",
+        "alphasignal: extracting good",
+        "alphasignal: processed good",
+    ]
     database = Database(settings.database_path)
     rows = database.connection.execute("SELECT gmail_message_id, state, last_error_code FROM messages ORDER BY id").fetchall()
     assert [tuple(row) for row in rows] == [
-        ("bad", "failed", "OLLAMA_EXTRACTION_FAILED"),
+        ("bad", "failed", "OLLAMA_SCHEMA_INVALID error='missing category'"),
         ("good", "processed", None),
     ]
     database.close()
