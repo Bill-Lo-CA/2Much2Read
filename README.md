@@ -88,7 +88,7 @@ systemctl --user enable --now 2busy1miss-runtime.timer
 systemctl --user enable --now 2busy1miss-runtime-agenda.timer
 ```
 
-To remove only the installed units while preserving configuration, OAuth files, and SQLite data:
+To stop active reminder/agenda jobs and remove only the installed units while preserving configuration, OAuth files, and SQLite data:
 
 ```bash
 sh scripts/uninstall-2busy1miss-user-service.sh

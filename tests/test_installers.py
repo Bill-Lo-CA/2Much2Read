@@ -142,12 +142,13 @@ def test_installers_only_start_timers_when_confirmed(
 
 
 @pytest.mark.parametrize(
-    ("script", "units", "disable_call"),
+    ("script", "units", "disable_call", "stop_call"),
     [
         (
             "uninstall-2much2read-user-service.sh",
             ["2much2read-runtime.service", "2much2read-runtime.timer"],
             "disable --now 2much2read-runtime.timer",
+            None,
         ),
         (
             "uninstall-2busy1miss-user-service.sh",
@@ -158,10 +159,13 @@ def test_installers_only_start_timers_when_confirmed(
                 "2busy1miss-runtime-agenda.timer",
             ],
             "disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer",
+            "stop 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service",
         ),
     ],
 )
-def test_uninstallers_remove_only_their_unit_files(tmp_path: Path, script: str, units: list[str], disable_call: str) -> None:
+def test_uninstallers_remove_only_their_unit_files(
+    tmp_path: Path, script: str, units: list[str], disable_call: str, stop_call: str | None
+) -> None:
     root = Path(__file__).parents[1]
     systemd_dir = tmp_path / "home" / ".config" / "systemd" / "user"
     systemd_dir.mkdir(parents=True)
@@ -189,6 +193,8 @@ def test_uninstallers_remove_only_their_unit_files(tmp_path: Path, script: str, 
     assert preserved.read_text(encoding="utf-8") == "keep"
     calls = log.read_text(encoding="utf-8")
     assert disable_call in calls
+    if stop_call is not None:
+        assert stop_call in calls
     assert "daemon-reload" in calls
 
 
