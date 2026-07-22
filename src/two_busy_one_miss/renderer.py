@@ -74,4 +74,4 @@ def render_agenda(day: date, events: list[CalendarEvent]) -> str:
         lines.append(f"{when:<11} | {summary}")
         if event.location:
             lines.append(f"{'':<11} | {_agenda_cell(event.location)}")
-    return _with_links(lines, events)
+    return "\n".join([*lines, "```"])

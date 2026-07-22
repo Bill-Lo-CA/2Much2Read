@@ -63,7 +63,7 @@ def test_render_agenda_lists_events_and_disables_mentions() -> None:
     assert "@here" not in rendered
 
 
-def test_render_calendar_urls_outside_markdown_tables() -> None:
+def test_agenda_omits_metadata_urls_but_reminders_keep_them() -> None:
     timezone = ZoneInfo("America/Montreal")
     start = datetime(2026, 7, 9, 7, 0, tzinfo=timezone)
     event = CalendarEvent(
@@ -83,11 +83,10 @@ def test_render_calendar_urls_outside_markdown_tables() -> None:
         "<https://calendar.example/event>"
     )
 
-    for rendered in (
-        render_agenda(date(2026, 7, 9), [event]),
-        render_reminder(ReminderCandidate(event, "default-5m", "5m", start)),
-    ):
-        assert rendered.endswith(f"```\n{links}")
+    agenda = render_agenda(date(2026, 7, 9), [event])
+    assert agenda.endswith("```")
+    assert links not in agenda
+    assert render_reminder(ReminderCandidate(event, "default-5m", "5m", start)).endswith(f"```\n{links}")
 
 
 def test_calendar_event_links_include_event_meeting_and_description_urls() -> None:
