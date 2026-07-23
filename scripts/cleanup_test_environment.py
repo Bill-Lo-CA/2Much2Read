@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import argparse
 import sqlite3
-from datetime import UTC, datetime
 from pathlib import Path
 
 from two_much_two_read.config import GmailSource, Settings, load_sources
 from two_much_two_read.gmail import GmailClient, credentials, find_label_id
-from two_much_two_read.storage import Database
+from two_much_two_read.storage import SCHEMA_VERSION, Database
 from two_read_runtime.locking import ProcessLock
 
 PROCESSING_LABELS = ["NewsletterBot/Processed", "NewsletterBot/Failed"]
@@ -16,14 +15,24 @@ PROCESSING_LABELS = ["NewsletterBot/Processed", "NewsletterBot/Failed"]
 def database_counts(path: Path) -> dict[str, int]:
     if not path.is_file():
         return {"documents": 0, "items": 0, "digests": 0, "runs": 0}
-    connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+    connection = sqlite3.connect(f"file:{path}?mode=ro&immutable=1", uri=True)
     try:
+        tables = {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        if "documents" not in tables:
+            return {"documents": 0, "items": 0, "digests": 0, "runs": 0}
         return {
             table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
             for table in ("documents", "items", "digests", "runs")
         }
     finally:
         connection.close()
+
+
+def reset_database(path: Path) -> None:
+    for suffix in ("", "-journal", "-shm", "-wal"):
+        Path(f"{path}{suffix}").unlink(missing_ok=True)
+    database = Database(path)
+    database.close()
 
 
 def gmail_message_ids(gmail: GmailClient, queries: list[str]) -> set[str]:
@@ -69,18 +78,10 @@ def main() -> None:
 
     with ProcessLock(settings.lock_path):
         message_ids, _ = inspect()
-        database = Database(settings.database_path)
-        try:
-            timestamp = datetime.now(UTC).strftime("%Y%m%dT%H%M%SZ")
-            backup_path = settings.database_path.with_name(f"{settings.database_path.name}.backup-{timestamp}")
-            database.backup(backup_path)
-            for message_id in message_ids:
-                gmail.remove_labels(message_id, PROCESSING_LABELS)
-            database.reset()
-        finally:
-            database.close()
-        print(f"backup: {backup_path}")
-        print("Reset complete.")
+        reset_database(settings.database_path)
+        for message_id in message_ids:
+            gmail.remove_labels(message_id, PROCESSING_LABELS)
+        print(f"Reset complete: schema v{SCHEMA_VERSION}.")
 
 
 if __name__ == "__main__":
