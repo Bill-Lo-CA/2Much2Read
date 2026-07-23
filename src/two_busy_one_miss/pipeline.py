@@ -95,6 +95,11 @@ class ReminderRetryResult(BaseModel):
     expired: int
 
 
+class ReminderCheckpointResetResult(BaseModel):
+    status: Literal["ok"] = "ok"
+    attempt_id: int
+
+
 def calendar_client(settings: Settings, config: RemindersConfig) -> CalendarClient:
     with ProcessLock(settings.lock_path):
         credentials_value = credentials(
@@ -365,3 +370,14 @@ def retry_delivery(settings: Settings, *, now: datetime | None = None) -> Remind
     finally:
         database.close()
     return ReminderRetryResult(delivered=delivered, failed=failed, failed_by_error_code=failed_by_error_code, expired=expired)
+
+
+def reset_reminder_checkpoint(settings: Settings, attempt_id: int) -> ReminderCheckpointResetResult:
+    database = Database(settings.database_path)
+    try:
+        with ProcessLock(settings.lock_path):
+            if not database.reset_corrupt_delivery(attempt_id):
+                raise ValueError(f"reminder attempt {attempt_id} is not a failed corrupt checkpoint")
+    finally:
+        database.close()
+    return ReminderCheckpointResetResult(attempt_id=attempt_id)

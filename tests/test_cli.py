@@ -7,7 +7,13 @@ import pytest
 from typer.testing import CliRunner
 
 from two_much_two_read import cli, mail_operations
-from two_much_two_read.command_models import FiltersResult, LabelsReconcileResult, NewsletterRetryResult, NewsletterRunResult
+from two_much_two_read.command_models import (
+    DeliveryCheckpointResetResult,
+    FiltersResult,
+    LabelsReconcileResult,
+    NewsletterRetryResult,
+    NewsletterRunResult,
+)
 from two_much_two_read.config import Settings, load_excluded_subscriptions, load_sources
 from two_much_two_read.gmail import display_id
 from two_much_two_read.ollama import OllamaSchemaError
@@ -60,6 +66,15 @@ def test_delivery_retry_keeps_its_json_shape(monkeypatch: pytest.MonkeyPatch) ->
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {"status": "ok", "delivered": 1, "failed": 0, "failed_by_error_code": {}}
+
+
+def test_delivery_reset_checkpoint_requires_an_explicit_digest_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "reset_corrupt_delivery", lambda _, digest_id: DeliveryCheckpointResetResult(digest_id=digest_id))
+
+    result = CliRunner().invoke(cli.app, ["delivery", "reset-checkpoint", "--digest-id", "7"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {"status": "ok", "digest_id": 7}
 
 
 def test_labels_reconcile_emits_a_typed_result(monkeypatch: pytest.MonkeyPatch) -> None:

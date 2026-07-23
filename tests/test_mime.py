@@ -2,7 +2,7 @@ from email.message import EmailMessage
 
 import pytest
 
-from two_much_two_read.mime import EmptyEmailError, extract_mime, html_to_text
+from two_much_two_read.mime import EmptyEmailError, extract_gmail_payload, extract_mime, html_to_text
 
 
 @pytest.mark.parametrize(("plain", "html"), [("plain wins", None), ("plain wins", "<p>html loses</p>")])
@@ -29,3 +29,14 @@ def test_empty_email_fails() -> None:
     message.set_content("")
     with pytest.raises(EmptyEmailError):
         extract_mime(message.as_bytes())
+
+
+def test_gmail_payload_skips_malformed_part_and_uses_valid_text() -> None:
+    payload = {
+        "parts": [
+            {"mimeType": "text/plain", "body": {"data": "%%%"}},
+            {"mimeType": "text/plain", "body": {"data": "dmFsaWQ"}},
+        ]
+    }
+
+    assert extract_gmail_payload(payload) == "valid"

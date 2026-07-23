@@ -23,7 +23,7 @@ from .mail_operations import (
     reconcile_labels,
 )
 from .ollama import OllamaClient, OllamaSchemaError, create_ollama_client
-from .pipeline import retry_delivery, run_pipeline
+from .pipeline import reset_corrupt_delivery, retry_delivery, run_pipeline
 from .subscription_operations import (
     CATEGORY_OPTIONS,
     list_subscriptions,
@@ -163,6 +163,11 @@ def subscriptions_sync(
 @delivery_app.command("retry")
 def delivery_retry() -> None:
     emit(retry_delivery(Settings()))
+
+
+@delivery_app.command("reset-checkpoint")
+def delivery_reset_checkpoint(digest_id: Annotated[int, typer.Option("--digest-id", min=1)]) -> None:
+    invoke(lambda: reset_corrupt_delivery(Settings(), digest_id))
 
 
 @app.command()

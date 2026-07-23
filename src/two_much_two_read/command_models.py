@@ -26,6 +26,10 @@ class NewsletterRetryResult(CommandResult):
     failed_by_error_code: dict[str, int] = Field(default_factory=dict)
 
 
+class DeliveryCheckpointResetResult(CommandResult):
+    digest_id: int
+
+
 class MailSelector(BaseModel):
     source: str | None = None
     query: str | None = None

@@ -16,7 +16,17 @@ from two_read_runtime.progress import run_with_elapsed
 
 from .config import Settings, load_reminders
 from .google_calendar import credentials
-from .pipeline import agenda, calendar_client, discover, next_day_agenda, retry_agenda, retry_delivery, run, test_rules
+from .pipeline import (
+    agenda,
+    calendar_client,
+    discover,
+    next_day_agenda,
+    reset_reminder_checkpoint,
+    retry_agenda,
+    retry_delivery,
+    run,
+    test_rules,
+)
 
 app = typer.Typer(no_args_is_help=True)
 auth_app = typer.Typer(no_args_is_help=True)
@@ -140,3 +150,11 @@ def agenda_retry_command(day: Annotated[str, typer.Argument()]) -> None:
 @app.command("retry-delivery")
 def retry_delivery_command() -> None:
     emit(run_with_elapsed("2busy1miss retry delivery", lambda: retry_delivery(Settings())))
+
+
+@app.command("reset-delivery-checkpoint")
+def reset_delivery_checkpoint(attempt_id: Annotated[int, typer.Option("--attempt-id", min=1)]) -> None:
+    try:
+        emit(reset_reminder_checkpoint(Settings(), attempt_id))
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from base64 import urlsafe_b64encode
 from datetime import datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -308,6 +309,30 @@ def test_retry_delivery_preserves_corrupt_checkpoint_error(tmp_path: Path, monke
     database.close()
 
 
+def test_reset_corrupt_delivery_checkpoint(tmp_path: Path) -> None:
+    settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
+    database = Database(settings.database_path)
+    digest_id = database.save_digest("daily:corrupt", "start", "end", "UTC", "corrupt")
+    assert digest_id is not None
+    database.connection.execute(
+        """UPDATE digests SET state='failed', discord_message_ids_json='not json',
+        last_error_code='DISCORD_MESSAGE_IDS_CORRUPT' WHERE id=?""",
+        (digest_id,),
+    )
+    database.connection.commit()
+    database.close()
+
+    assert pipeline.reset_corrupt_delivery(settings, digest_id).model_dump() == {"status": "ok", "digest_id": digest_id}
+
+    database = Database(settings.database_path)
+    row = database.connection.execute(
+        "SELECT state,discord_message_ids_json,last_error_code FROM digests WHERE id=?", (digest_id,)
+    ).fetchone()
+    assert tuple(row) == ("pending", None, None)
+    assert not database.reset_corrupt_delivery(digest_id)
+    database.close()
+
+
 def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sources_path = tmp_path / "sources.yaml"
     sources_path.write_text(
@@ -441,6 +466,121 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
         ("bad", "failed", "OLLAMA_SCHEMA_INVALID error='missing category'"),
         ("good", "processed", None),
     ]
+    database.close()
+
+
+def test_mime_failure_marks_one_message_failed_and_continues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    good_body = urlsafe_b64encode(b"good newsletter").decode().rstrip("=")
+    gmail = StubGmailClient(
+        ["bad", "good"],
+        {
+            "bad": {
+                "internalDate": "0",
+                "threadId": "bad",
+                "payload": {"mimeType": "text/plain", "headers": [{"name": "Subject", "value": "Bad"}], "body": {}},
+            },
+            "good": {
+                "internalDate": "0",
+                "threadId": "good",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [{"name": "Subject", "value": "Good"}],
+                    "body": {"data": good_body},
+                },
+            },
+        },
+    )
+    extraction = EmailExtraction(
+        source_id="alphasignal",
+        newsletter_title="Good news",
+        newsletter_date=None,
+        overview_zh_tw="摘要",
+        items=[
+            {
+                "title": "Good item",
+                "category": "AI_MODEL",
+                "summary_zh_tw": "內容",
+                "why_it_matters_zh_tw": "原因",
+                "importance": 8,
+                "confidence": 0.9,
+            }
+        ],
+    )
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: StubOllamaClient(extraction))
+
+    assert run_pipeline(settings, no_deliver=True).model_dump() == {
+        "status": "partial",
+        "discovered": 2,
+        "processed": 1,
+        "failed": 1,
+        "delivered": 0,
+        "reason": None,
+    }
+    assert gmail.applied_labels == [("bad", "failed"), ("good", "processed")]
+    database = Database(settings.database_path)
+    rows = database.connection.execute("SELECT gmail_message_id,state,last_error_code FROM messages ORDER BY id").fetchall()
+    assert [tuple(row) for row in rows] == [("bad", "failed", "EMAIL_NO_USABLE_TEXT"), ("good", "processed", None)]
+    database.close()
+
+
+def test_digest_render_failure_leaves_extractions_retryable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    gmail = StubGmailClient(
+        ["newsletter"],
+        {"newsletter": {"internalDate": "0", "threadId": "thread", "payload": {"body": {"body": "newsletter"}}}},
+    )
+    extraction = EmailExtraction(
+        source_id="alphasignal",
+        newsletter_title="News",
+        newsletter_date=None,
+        overview_zh_tw="摘要",
+        items=[
+            {
+                "title": "Item",
+                "category": "AI_MODEL",
+                "summary_zh_tw": "內容",
+                "why_it_matters_zh_tw": "原因",
+                "importance": 8,
+                "confidence": 0.9,
+            }
+        ],
+    )
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: StubOllamaClient(extraction))
+    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args: (_ for _ in ()).throw(RuntimeError("render failed")))
+
+    with pytest.raises(RuntimeError, match="render failed"):
+        run_pipeline(settings, no_deliver=True)
+
+    database = Database(settings.database_path)
+    assert database.connection.execute("SELECT state FROM messages").fetchone()["state"] == "discovered"
+    assert len(database.items_for_messages([1], 10)) == 1
+    database.close()
+    assert gmail.applied_labels == []
+
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args: "digest")
+    assert run_pipeline(settings, no_deliver=True).status == "ok"
+    assert gmail.applied_labels == [("newsletter", "processed")]
+    database = Database(settings.database_path)
+    assert database.connection.execute("SELECT state FROM messages").fetchone()["state"] == "processed"
+    assert len(database.items_for_messages([1], 10)) == 1
     database.close()
 
 

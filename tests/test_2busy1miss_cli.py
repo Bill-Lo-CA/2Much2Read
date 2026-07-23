@@ -28,3 +28,12 @@ def test_doctor_reports_a_failed_discord_test(tmp_path: Path, monkeypatch: pytes
 
     assert result.exit_code == 0
     assert json.loads(result.stdout)["checks"]["discord_test"] == "failed"
+
+
+def test_reset_delivery_checkpoint_requires_an_explicit_attempt_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "reset_reminder_checkpoint", lambda _, attempt_id: {"status": "ok", "attempt_id": attempt_id})
+
+    result = CliRunner().invoke(cli.app, ["reset-delivery-checkpoint", "--attempt-id", "9"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {"status": "ok", "attempt_id": 9}

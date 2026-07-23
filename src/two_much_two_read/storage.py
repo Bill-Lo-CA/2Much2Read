@@ -102,7 +102,9 @@ class Database:
         row = self.connection.execute("SELECT id, state FROM messages WHERE gmail_message_id=?", (gmail_id,)).fetchone()
         return cast(sqlite3.Row | None, row)
 
-    def store_extraction(self, message_id: int, extraction: EmailExtraction, replace: bool = False) -> None:
+    def store_extraction(
+        self, message_id: int, extraction: EmailExtraction, replace: bool = False, finalize: bool = True
+    ) -> None:
         now = datetime.now(UTC).isoformat()
         with self.transaction() as connection:
             if replace:
@@ -129,10 +131,23 @@ class Database:
                         now,
                     ),
                 )
-            connection.execute(
-                "UPDATE messages SET state='processed', last_error_code=NULL, updated_at=? WHERE id=?", (now, message_id)
-            )
-            connection.execute("DELETE FROM message_label_sync WHERE message_id=?", (message_id,))
+            if finalize:
+                self._finalize_extractions(connection, [message_id], now)
+
+    @staticmethod
+    def _finalize_extractions(connection: sqlite3.Connection, message_ids: list[int], now: str) -> None:
+        if not message_ids:
+            return
+        placeholders = ",".join("?" for _ in message_ids)
+        connection.execute(
+            f"UPDATE messages SET state='processed', last_error_code=NULL, updated_at=? WHERE id IN ({placeholders})",
+            (now, *message_ids),
+        )
+        connection.execute(f"DELETE FROM message_label_sync WHERE message_id IN ({placeholders})", message_ids)
+
+    def finalize_extractions(self, message_ids: list[int]) -> None:
+        with self.transaction() as connection:
+            self._finalize_extractions(connection, message_ids, datetime.now(UTC).isoformat())
 
     def fail_message(self, message_id: int, error_code: str) -> None:
         now = datetime.now(UTC).isoformat()
@@ -174,31 +189,41 @@ class Database:
         placeholders = ",".join("?" for _ in message_ids)
         rows = self.connection.execute(
             f"""SELECT i.*, m.received_at FROM items i JOIN messages m ON m.id=i.message_id
-            WHERE m.state='processed' AND i.message_id IN ({placeholders})
+            WHERE i.message_id IN ({placeholders})
             ORDER BY m.received_at DESC LIMIT ?""",
             (*message_ids, limit),
         ).fetchall()
         return [dict(row) for row in rows]
 
-    def save_digest(self, digest_key: str, period_start: str, period_end: str, timezone: str, content: str) -> int | None:
+    def save_digest(
+        self,
+        digest_key: str,
+        period_start: str,
+        period_end: str,
+        timezone: str,
+        content: str,
+        message_ids: list[int] | None = None,
+    ) -> int | None:
         now = datetime.now(UTC).isoformat()
-        cursor = self.connection.execute(
-            """INSERT OR IGNORE INTO digests
-            (digest_key,period_start,period_end,timezone,content_sha256,rendered_content,state,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,'pending',?,?)""",
-            (
-                digest_key,
-                period_start,
-                period_end,
-                timezone,
-                hashlib.sha256(content.encode()).hexdigest(),
-                content,
-                now,
-                now,
-            ),
-        )
-        self.connection.commit()
-        return cursor.lastrowid if cursor.rowcount else None
+        with self.transaction() as connection:
+            cursor = connection.execute(
+                """INSERT OR IGNORE INTO digests
+                (digest_key,period_start,period_end,timezone,content_sha256,rendered_content,state,created_at,updated_at)
+                VALUES(?,?,?,?,?,?,'pending',?,?)""",
+                (
+                    digest_key,
+                    period_start,
+                    period_end,
+                    timezone,
+                    hashlib.sha256(content.encode()).hexdigest(),
+                    content,
+                    now,
+                    now,
+                ),
+            )
+            if cursor.rowcount and message_ids:
+                self._finalize_extractions(connection, message_ids, now)
+            return int(cursor.lastrowid) if cursor.rowcount and cursor.lastrowid is not None else None
 
     def digest_exists(self, digest_key: str) -> bool:
         return self.connection.execute("SELECT 1 FROM digests WHERE digest_key=?", (digest_key,)).fetchone() is not None
@@ -278,6 +303,15 @@ class Database:
             (error_code, now, digest_id),
         )
         self.connection.commit()
+
+    def reset_corrupt_delivery(self, digest_id: int) -> bool:
+        cursor = self.connection.execute(
+            """UPDATE digests SET state='pending', discord_message_ids_json=NULL, last_error_code=NULL, updated_at=?
+            WHERE id=? AND state='failed' AND last_error_code='DISCORD_MESSAGE_IDS_CORRUPT'""",
+            (datetime.now(UTC).isoformat(), digest_id),
+        )
+        self.connection.commit()
+        return bool(cursor.rowcount)
 
     def close(self) -> None:
         self.connection.close()
