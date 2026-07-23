@@ -34,6 +34,7 @@ def test_live_progress_keeps_timer_above_terminal_messages(monkeypatch: pytest.M
     assert "\033[2;" in stderr.getvalue()
     assert "extracting newsletter" in stderr.getvalue()
     assert "job finished in" in stderr.getvalue()
+    assert "\r\033[Kjob finished in" in stderr.getvalue()
     assert "\033[r" in stderr.getvalue()
 
 

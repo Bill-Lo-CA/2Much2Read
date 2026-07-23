@@ -405,7 +405,7 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
 
     result = run_pipeline(settings, max_messages=3, no_deliver=True)
 
-    assert list_calls == [None, None]
+    assert list_calls == [3, 1]
     assert result.processed == 3
 
 

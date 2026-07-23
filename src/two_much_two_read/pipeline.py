@@ -97,7 +97,7 @@ def _process_source(
     processed = 0
     failed = 0
     processed_documents: list[tuple[int, str]] = []
-    gmail_ids = gmail.list_messages(query)
+    gmail_ids = gmail.list_messages(query, remaining)
     status(f"{source.id}: {len(gmail_ids)} message(s)")
     for gmail_id in gmail_ids:
         existing = database.gmail_document(gmail_id)
