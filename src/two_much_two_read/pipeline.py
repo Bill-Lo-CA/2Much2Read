@@ -97,16 +97,15 @@ def _process_source(
     processed = 0
     failed = 0
     processed_documents: list[tuple[int, str]] = []
-    gmail_ids = gmail.list_messages(query, remaining)
-    status(f"{source.id}: {len(gmail_ids)} message(s)")
-    for gmail_id in gmail_ids:
+    status(f"{source.id}: scanning messages")
+    for gmail_id in gmail.iter_messages(query):
+        if discovered >= remaining:
+            break
         existing = database.gmail_document(gmail_id)
         if not force and existing is not None and existing["state"] in ("processed", "failed"):
             if not dry_run and not _sync_processing_label(database, gmail, gmail_id, int(existing["id"]), str(existing["state"])):
                 failed += 1
             continue
-        if discovered >= remaining:
-            break
         message = gmail.get_message(gmail_id)
         payload = message.get("payload")
         if not isinstance(payload, dict):

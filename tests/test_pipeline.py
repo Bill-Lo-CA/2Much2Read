@@ -55,6 +55,9 @@ class StubGmailClient:
     def list_messages(self, query: str, limit: int | None = None) -> list[str]:
         return self.message_ids if limit is None else self.message_ids[:limit]
 
+    def iter_messages(self, query: str):
+        yield from self.message_ids
+
     def get_message(self, message_id: str) -> dict[str, object]:
         return self.messages[message_id]
 
@@ -373,15 +376,15 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
     )
-    list_calls: list[int | None] = []
+    iter_calls: list[str] = []
 
     class FakeGmailClient:
         def ensure_labels(self) -> None:
             pass
 
-        def list_messages(self, query: str, limit: int | None = None) -> list[str]:
-            list_calls.append(limit)
-            return ["first-1", "first-2"] if "first@example.com" in query else ["second-1"]
+        def iter_messages(self, query: str):
+            iter_calls.append(query)
+            yield from ["first-1", "first-2"] if "first@example.com" in query else ["second-1"]
 
         def get_message(self, message_id: str) -> dict[str, object]:
             return {"internalDate": "0", "threadId": message_id, "payload": {"body": message_id}}
@@ -405,7 +408,7 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
 
     result = run_pipeline(settings, max_messages=3, no_deliver=True)
 
-    assert list_calls == [3, 1]
+    assert len(iter_calls) == 2
     assert result.processed == 3
 
 
@@ -425,8 +428,8 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
         def ensure_labels(self) -> None:
             pass
 
-        def list_messages(self, query: str, limit: int | None = None) -> list[str]:
-            return ["bad", "good"]
+        def iter_messages(self, query: str):
+            yield from ["bad", "good"]
 
         def get_message(self, message_id: str) -> dict[str, object]:
             return {"internalDate": "0", "threadId": message_id, "payload": {"body": message_id}}
@@ -481,7 +484,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
     ]
     assert statuses == [
         "Starting 1 source(s)",
-        "alphasignal: 2 message(s)",
+        "alphasignal: scanning messages",
         "alphasignal: extracting bad",
         "alphasignal: failed bad (OLLAMA_SCHEMA_INVALID error='missing category')",
         "alphasignal: extracting good",
@@ -755,8 +758,8 @@ def test_label_sync_failure_is_repaired_without_reextracting(tmp_path: Path, mon
         def ensure_labels(self) -> None:
             pass
 
-        def list_messages(self, query: str, limit: int | None = None) -> list[str]:
-            return ["gmail-1"]
+        def iter_messages(self, query: str):
+            yield "gmail-1"
 
         def get_message(self, message_id: str) -> dict[str, object]:
             calls.append("get")
@@ -829,7 +832,10 @@ def test_stale_label_reconciliation_does_not_use_the_message_limit(tmp_path: Pat
             pass
 
         def list_messages(self, query: str, limit: int | None = None) -> list[str]:
-            return ["stale", "new"]
+            return ["stale"]
+
+        def iter_messages(self, query: str):
+            yield from ["stale", "new"]
 
         def get_message(self, message_id: str) -> dict[str, object]:
             fetched.append(message_id)
@@ -872,8 +878,8 @@ def test_forced_recovery_clears_the_failure_and_remote_failed_label(tmp_path: Pa
         def ensure_labels(self) -> None:
             pass
 
-        def list_messages(self, query: str, limit: int | None = None) -> list[str]:
-            return ["gmail-1"]
+        def iter_messages(self, query: str):
+            yield "gmail-1"
 
         def get_message(self, message_id: str) -> dict[str, object]:
             return {"internalDate": "0", "threadId": "thread", "payload": {"body": "body"}}
@@ -912,8 +918,8 @@ def test_dry_run_skips_gmail_label_writes_and_persistent_database(tmp_path: Path
         def ensure_labels(self) -> None:
             pytest.fail("dry-run must not create labels")
 
-        def list_messages(self, query: str, limit: int | None = None) -> list[str]:
-            return ["gmail-1"]
+        def iter_messages(self, query: str):
+            yield "gmail-1"
 
         def get_message(self, message_id: str) -> dict[str, object]:
             return {"internalDate": "0", "threadId": "thread", "payload": {"body": "body"}}

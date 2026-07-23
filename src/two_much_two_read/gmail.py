@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -143,25 +144,32 @@ class GmailClient:
     def audit_source_filters(self, sources: list[Source]) -> list[FilterStatus]:
         return self._source_filter_statuses(sources, create=False)
 
-    def list_messages(self, query: str, limit: int | None = None) -> list[str]:
-        ids: list[str] = []
+    def iter_messages(self, query: str) -> Iterator[str]:
         page_token: str | None = None
-        while limit is None or len(ids) < limit:
-            page_size = 100 if limit is None else min(100, limit - len(ids))
+        while True:
             response = (
                 self.service.users()
                 .messages()
                 .list(
                     userId="me",
                     q=query,
-                    maxResults=page_size,
+                    maxResults=100,
                     pageToken=page_token,
                 )
                 .execute()
             )
-            ids.extend(message["id"] for message in response.get("messages", []))
+            yield from (message["id"] for message in response.get("messages", []))
             page_token = response.get("nextPageToken")
             if not page_token:
+                break
+
+    def list_messages(self, query: str, limit: int | None = None) -> list[str]:
+        if limit is not None and limit <= 0:
+            return []
+        ids: list[str] = []
+        for message_id in self.iter_messages(query):
+            ids.append(message_id)
+            if limit is not None and len(ids) >= limit:
                 break
         return ids
 

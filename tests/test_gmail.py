@@ -114,6 +114,22 @@ def test_message_metadata_requests_only_subscription_headers() -> None:
     )
 
 
+def test_iter_messages_follows_gmail_page_tokens() -> None:
+    service = MagicMock()
+    service.users().messages().list.return_value.execute.side_effect = [
+        {"messages": [{"id": "first"}], "nextPageToken": "next"},
+        {"messages": [{"id": "second"}]},
+    ]
+    client = object.__new__(GmailClient)
+    client.service = service
+
+    assert list(client.iter_messages("label:newsletter")) == ["first", "second"]
+    assert [call.kwargs for call in service.users().messages().list.call_args_list] == [
+        {"userId": "me", "q": "label:newsletter", "maxResults": 100, "pageToken": None},
+        {"userId": "me", "q": "label:newsletter", "maxResults": 100, "pageToken": "next"},
+    ]
+
+
 def test_ensure_source_filter_creates_label_and_filter() -> None:
     service = MagicMock()
     service.users().settings().filters().list().execute.return_value = {"filter": []}
