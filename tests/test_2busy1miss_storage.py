@@ -116,3 +116,17 @@ def test_agenda_delivery_is_idempotent_and_forceable(tmp_path: Path) -> None:
     assert database.create_agenda_delivery(day, "America/Montreal", "destination", "agenda", force=True) == delivery_id
     assert database.agenda_delivery_state(delivery_id) == "pending"
     database.close()
+
+
+def test_corrupt_agenda_checkpoint_can_be_reset_explicitly(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    delivery_id = database.create_agenda_delivery(date(2026, 7, 9), "America/Montreal", "destination", "agenda")
+    assert delivery_id is not None
+    database.record_agenda_delivery_progress(delivery_id, ["partial"])
+    database.fail_agenda_delivery(delivery_id, "DISCORD_MESSAGE_IDS_CORRUPT")
+
+    assert database.reset_corrupt_agenda_delivery(delivery_id)
+    row = database.pending_agenda_deliveries(date(2026, 7, 9), "America/Montreal", "destination")[0]
+    assert (row["state"], row["discord_message_ids_json"], row["last_error_code"]) == ("pending", None, None)
+    assert not database.reset_corrupt_agenda_delivery(delivery_id)
+    database.close()

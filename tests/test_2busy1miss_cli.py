@@ -37,3 +37,12 @@ def test_reset_delivery_checkpoint_requires_an_explicit_attempt_id(monkeypatch: 
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {"status": "ok", "attempt_id": 9}
+
+
+def test_reset_agenda_checkpoint_requires_an_explicit_delivery_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "reset_agenda_checkpoint", lambda _, delivery_id: {"status": "ok", "delivery_id": delivery_id})
+
+    result = CliRunner().invoke(cli.app, ["reset-agenda-checkpoint", "--delivery-id", "9"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {"status": "ok", "delivery_id": 9}

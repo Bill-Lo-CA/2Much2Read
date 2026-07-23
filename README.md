@@ -121,6 +121,7 @@ uv run 2busy1miss agenda-next-day --force
 uv run 2busy1miss agenda-retry 2026-07-16
 uv run 2busy1miss retry-delivery
 uv run 2busy1miss reset-delivery-checkpoint --attempt-id ID
+uv run 2busy1miss reset-agenda-checkpoint --delivery-id ID
 ```
 
 Manual and next-day agendas use the same durable delivery record, de-duplicated by date, timezone, and Discord destination; `agenda-retry` retries failed records and `--force` is the explicit resend path. `2busy1miss-runtime-agenda.timer` runs at `AGENDA_SCHEDULE_TIME` in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone and synchronizes the configured reminder horizon. Its persistent catch-up is ignored before that configured time, so a morning startup cannot send the next day's agenda early. Empty days are sent as `No events`. Reminder messages use the same Markdown code-block style as agendas; a retry after an event starts marks the job `expired` instead of sending it.
@@ -140,6 +141,7 @@ then run the usual retry command:
 ```bash
 uv run 2much2read delivery reset-checkpoint --digest-id ID
 uv run 2busy1miss reset-delivery-checkpoint --attempt-id ID
+uv run 2busy1miss reset-agenda-checkpoint --delivery-id ID
 ```
 
 These commands accept only `DISCORD_MESSAGE_IDS_CORRUPT` failures and clear the

@@ -74,6 +74,11 @@ class AgendaRetryResult(BaseModel):
     failed_by_error_code: dict[str, int]
 
 
+class AgendaCheckpointResetResult(BaseModel):
+    status: Literal["ok"] = "ok"
+    delivery_id: int
+
+
 class ReminderRunResult(BaseModel):
     status: Literal["ok"] = "ok"
     sent: int
@@ -340,6 +345,17 @@ def retry_agenda(settings: Settings, day: date) -> AgendaRetryResult:
         finally:
             database.close()
     return AgendaRetryResult(day=day, delivered=delivered, failed=failed, failed_by_error_code=failed_by_error_code)
+
+
+def reset_agenda_checkpoint(settings: Settings, delivery_id: int) -> AgendaCheckpointResetResult:
+    database = Database(settings.database_path)
+    try:
+        with ProcessLock(settings.lock_path):
+            if not database.reset_corrupt_agenda_delivery(delivery_id):
+                raise ValueError(f"agenda delivery {delivery_id} is not a failed corrupt checkpoint")
+    finally:
+        database.close()
+    return AgendaCheckpointResetResult(delivery_id=delivery_id)
 
 
 def run(settings: Settings, dry_run: bool, *, now: datetime | None = None) -> ReminderRunResult | ReminderDryRunResult:

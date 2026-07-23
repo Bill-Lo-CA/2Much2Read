@@ -21,6 +21,7 @@ from .pipeline import (
     calendar_client,
     discover,
     next_day_agenda,
+    reset_agenda_checkpoint,
     reset_reminder_checkpoint,
     retry_agenda,
     retry_delivery,
@@ -156,5 +157,13 @@ def retry_delivery_command() -> None:
 def reset_delivery_checkpoint(attempt_id: Annotated[int, typer.Option("--attempt-id", min=1)]) -> None:
     try:
         emit(reset_reminder_checkpoint(Settings(), attempt_id))
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+
+
+@app.command("reset-agenda-checkpoint")
+def reset_agenda_checkpoint_command(delivery_id: Annotated[int, typer.Option("--delivery-id", min=1)]) -> None:
+    try:
+        emit(reset_agenda_checkpoint(Settings(), delivery_id))
     except ValueError as error:
         raise typer.BadParameter(str(error)) from error
