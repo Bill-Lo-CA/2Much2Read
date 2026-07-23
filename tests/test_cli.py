@@ -88,10 +88,40 @@ def test_labels_reconcile_emits_a_typed_result(monkeypatch: pytest.MonkeyPatch) 
 
 @pytest.mark.parametrize(
     "arguments",
-    [[], ["--source", "one", "--query", "from:two"], ["--source", "one", "--subscription", "two"]],
+    [["--source", "one", "--query", "from:two"], ["--source", "one", "--subscription", "two"]],
 )
-def test_mails_require_exactly_one_selector(arguments: list[str]) -> None:
+def test_mails_list_allows_at_most_one_selector(arguments: list[str]) -> None:
     result = CliRunner().invoke(cli.app, ["mails", "list", *arguments])
+
+    assert result.exit_code == 2
+    assert "at most one of" in result.output
+
+
+def test_mails_list_without_selector_lists_all_mail(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeGmailClient:
+        def list_messages(self, query: str, limit: int) -> list[str]:
+            assert (query, limit) == ("", 20)
+            return []
+
+    monkeypatch.setattr(cli, "Settings", lambda: newsletter_settings)
+    monkeypatch.setattr(mail_operations, "gmail_client", lambda settings: FakeGmailClient())
+
+    result = CliRunner().invoke(cli.app, ["mails", "list"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {"status": "ok", "mails": []}
+
+
+@pytest.mark.parametrize("arguments", [["--query", ""], ["--query", " "], ["--source", ""], ["--subscription", ""]])
+def test_mails_list_rejects_blank_selectors(arguments: list[str]) -> None:
+    result = CliRunner().invoke(cli.app, ["mails", "list", *arguments])
+
+    assert result.exit_code == 2
+    assert "selector values must not be blank" in result.output
+
+
+def test_mails_inspect_requires_a_selector() -> None:
+    result = CliRunner().invoke(cli.app, ["mails", "inspect", "--id", "message-id"])
 
     assert result.exit_code == 2
     assert "exactly one of" in result.output

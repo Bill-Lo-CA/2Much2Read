@@ -3,7 +3,54 @@ from pathlib import Path
 import pytest
 
 from two_much_two_read import config
-from two_much_two_read.config import ExcludedSubscription, Settings, Source, load_sources, update_subscription_files
+from two_much_two_read.config import (
+    ExcludedSubscription,
+    GmailSource,
+    HackerNewsSource,
+    Settings,
+    Source,
+    load_sources,
+    update_subscription_files,
+)
+
+
+def test_source_variants_preserve_legacy_gmail_entries(tmp_path: Path) -> None:
+    path = tmp_path / "sources.yaml"
+    path.write_text(
+        """sources:
+  - id: newsletter
+    name: Newsletter
+    gmail_query: from:newsletter@example.com
+  - type: hackernews
+    id: hn-best
+    name: Hacker News Best
+    max_story_candidates: 12
+""",
+        encoding="utf-8",
+    )
+
+    sources = load_sources(path).sources
+
+    assert isinstance(sources[0], GmailSource)
+    assert sources[0].type == "gmail"
+    assert isinstance(sources[1], HackerNewsSource)
+    assert sources[1].max_story_candidates == 12
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        "{type: hackernews, id: hn, name: HN, gmail_query: from:news@example.com}",
+        "{type: gmail, id: mail, name: Mail, gmail_query: from:mail@example.com, feed: beststories}",
+        "{type: hackernews, id: hn, name: HN, max_articles_per_run: 31}",
+    ],
+)
+def test_rejects_mixed_or_invalid_source_variants(tmp_path: Path, source: str) -> None:
+    path = tmp_path / "sources.yaml"
+    path.write_text(f"sources:\n  - {source}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        load_sources(path)
 
 
 def test_rejects_duplicate_source_ids(tmp_path: Path) -> None:
@@ -128,3 +175,19 @@ def test_subscription_file_update_restores_both_files_when_second_replace_fails(
 
     assert sources_path.read_text(encoding="utf-8") == original_sources
     assert excluded_path.read_text(encoding="utf-8") == original_excluded
+
+
+def test_subscription_file_updates_emit_explicit_gmail_types(tmp_path: Path) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    excluded_path = tmp_path / "excluded-subscriptions.yaml"
+    sources_path.write_text("sources:\n", encoding="utf-8")
+    excluded_path.write_text("excluded_subscriptions: []\n", encoding="utf-8")
+
+    update_subscription_files(
+        sources_path,
+        [Source(id="new", name="New", gmail_query="from:new@example.com")],
+        excluded_path,
+        [],
+    )
+
+    assert "type: gmail" in sources_path.read_text(encoding="utf-8")

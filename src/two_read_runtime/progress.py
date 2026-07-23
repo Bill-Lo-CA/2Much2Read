@@ -98,6 +98,7 @@ def run_with_live_progress(label: str, operation: Callable[[StatusReporter], Res
         stop.set()
         thread.join(timeout=max(interval, 0.1))
         with lock:
-            refresh_timer(f"{outcome} in {elapsed()}")
-            output.write("\033[r")
+            final_status = f"{outcome} in {elapsed()}"
+            refresh_timer(final_status)
+            output.write(f"\r\033[K{label} {final_status}\n\033[r")
             output.flush()

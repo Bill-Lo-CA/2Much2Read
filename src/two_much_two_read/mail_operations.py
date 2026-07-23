@@ -15,7 +15,7 @@ from .command_models import (
     MailSummary,
     ParsedMail,
 )
-from .config import Settings, load_sources
+from .config import GmailSource, Settings, load_sources
 from .gmail import FilterStatus, GmailClient, credentials, display_id, message_headers
 from .mime import extract_gmail_payload
 from .ollama import create_ollama_client
@@ -43,13 +43,17 @@ def mail_query(settings: Settings, gmail: GmailClient, selector: MailSelector, l
         if source is None:
             available = ", ".join(item.id for item in sources) or "(none)"
             raise ValueError(f"unknown source id {selector.source!r}; available source IDs: {available}")
+        if not isinstance(source, GmailSource):
+            raise ValueError(f"source {selector.source!r} is not a Gmail source")
         return source.gmail_query
-    candidates = configured_candidates(settings, gmail, limit)
-    candidate = next((item for item in candidates if item.id == selector.subscription), None)
-    if candidate is None:
-        available = ", ".join(item.id for item in candidates) or "(none)"
-        raise ValueError(f"unknown subscription id {selector.subscription!r}; available subscription IDs: {available}")
-    return candidate.proposal.gmail_query
+    if selector.subscription is not None:
+        candidates = configured_candidates(settings, gmail, limit)
+        candidate = next((item for item in candidates if item.id == selector.subscription), None)
+        if candidate is None:
+            available = ", ".join(item.id for item in candidates) or "(none)"
+            raise ValueError(f"unknown subscription id {selector.subscription!r}; available subscription IDs: {available}")
+        return candidate.proposal.gmail_query
+    return ""
 
 
 def list_mails(settings: Settings, selector: MailSelector, limit: int) -> MailListResult:
@@ -89,6 +93,8 @@ def inspect_mail(settings: Settings, selector: MailSelector, message_id: str, li
                 (item for item in load_sources(settings.sources_config_path).sources if item.id == source_id),
                 None,
             )
+            if source is not None and not isinstance(source, GmailSource):
+                raise ValueError(f"source {source_id!r} is not a Gmail source")
             max_items = source.max_items_per_email if source else 10
             extraction = (
                 create_ollama_client(settings)
@@ -128,7 +134,7 @@ def authorize_gmail(settings: Settings) -> CommandResult:
 
 
 def ensure_labels(settings: Settings) -> LabelsResult:
-    sources = load_sources(settings.sources_config_path).sources
+    sources = [source for source in load_sources(settings.sources_config_path).sources if isinstance(source, GmailSource)]
     gmail = gmail_client(settings)
     gmail.ensure_labels()
     source_labels = gmail.ensure_source_labels(sources)
@@ -149,7 +155,7 @@ def reconcile_labels(settings: Settings) -> LabelsReconcileResult:
                 )
             )
             gmail.ensure_labels()
-            for message in database.messages_for_label_reconciliation():
+            for message in database.gmail_documents_for_label_reconciliation():
                 try:
                     gmail.sync_processing_label(str(message["gmail_message_id"]), str(message["state"]))
                 except Exception:
@@ -164,7 +170,7 @@ def reconcile_labels(settings: Settings) -> LabelsReconcileResult:
 
 
 def filters(settings: Settings, ensure: bool) -> FiltersResult:
-    sources = load_sources(settings.sources_config_path).sources
+    sources = [source for source in load_sources(settings.sources_config_path).sources if isinstance(source, GmailSource)]
     gmail = gmail_client(settings)
     results: list[FilterStatus] = gmail.ensure_source_filters(sources) if ensure else gmail.audit_source_filters(sources)
     status = "ok" if ensure or all(item.status == "exists" for item in results) else "warning"

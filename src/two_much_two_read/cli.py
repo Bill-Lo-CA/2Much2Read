@@ -54,11 +54,13 @@ def emit(result: BaseModel | Mapping[str, object]) -> None:
     typer.echo(json.dumps(values, ensure_ascii=False, default=str))
 
 
-def selector(source: str | None, query: str | None, subscription: str | None) -> MailSelector:
+def selector(source: str | None, query: str | None, subscription: str | None, *, allow_all: bool = False) -> MailSelector:
+    if source is None and query is None and subscription is None and not allow_all:
+        raise typer.BadParameter("exactly one of --source, --query, or --subscription is required")
     try:
         return MailSelector(source=source, query=query, subscription=subscription)
     except ValidationError as error:
-        raise typer.BadParameter("exactly one of --source, --query, or --subscription is required") from error
+        raise typer.BadParameter(str(error.errors()[0]["msg"])) from error
 
 
 def invoke(operation: Callable[[], BaseModel]) -> None:
@@ -122,7 +124,7 @@ def mails_list(
     subscription: SubscriptionOption = None,
     limit: Annotated[int, typer.Option(min=1, max=100)] = 20,
 ) -> None:
-    invoke(lambda: list_mails(Settings(), selector(source, query, subscription), limit))
+    invoke(lambda: list_mails(Settings(), selector(source, query, subscription, allow_all=True), limit))
 
 
 @mails_app.command("inspect")

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 from .config import Source
 
@@ -35,10 +35,17 @@ class MailSelector(BaseModel):
     query: str | None = None
     subscription: str | None = None
 
+    @field_validator("source", "query", "subscription")
+    @classmethod
+    def nonblank(cls, value: str | None) -> str | None:
+        if value is not None and not value.strip():
+            raise ValueError("selector values must not be blank")
+        return value
+
     @model_validator(mode="after")
-    def exactly_one(self) -> MailSelector:
-        if sum(value is not None for value in (self.source, self.query, self.subscription)) != 1:
-            raise ValueError("exactly one of --source, --query, or --subscription is required")
+    def at_most_one(self) -> MailSelector:
+        if sum(value is not None for value in (self.source, self.query, self.subscription)) > 1:
+            raise ValueError("at most one of --source, --query, or --subscription is allowed")
         return self
 
 

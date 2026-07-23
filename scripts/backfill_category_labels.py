@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from two_much_two_read.config import Settings, load_sources
+from two_much_two_read.config import GmailSource, Settings, load_sources
 from two_much_two_read.gmail import GmailClient, credentials, find_label_id, source_backfill_query
 from two_read_runtime.locking import ProcessLock
 
@@ -17,7 +17,11 @@ def main() -> None:
         parser.error("--limit-per-source must be at least 1")
 
     settings = Settings()
-    sources = [source for source in load_sources(settings.sources_config_path).sources if source.enabled]
+    sources = [
+        source
+        for source in load_sources(settings.sources_config_path).sources
+        if source.enabled and isinstance(source, GmailSource)
+    ]
     requested = set(args.source or [])
     unknown = requested - {source.id for source in sources}
     if unknown:

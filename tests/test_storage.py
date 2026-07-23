@@ -1,41 +1,60 @@
+import sqlite3
+from datetime import UTC, datetime
 from pathlib import Path
 
-from two_much_two_read.schemas import DigestItem, EmailExtraction
-from two_much_two_read.storage import Database
+import pytest
+
+from two_much_two_read.schemas import DigestItem, EmailExtraction, ResolvedContent, SourceDocument
+from two_much_two_read.storage import Database, DatabaseSchemaResetRequiredError
 
 
-def test_message_and_digest_idempotency(tmp_path: Path) -> None:
-    database = Database(tmp_path / "test.sqlite3")
-    message_id = database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body")
-    assert message_id is not None
-    assert database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body") == message_id
-    database.store_extraction(
-        message_id,
-        EmailExtraction(
-            source_id="source",
-            newsletter_title="News",
-            newsletter_date=None,
-            overview_zh_tw="摘要",
-            items=[
-                DigestItem(
-                    title="Title",
-                    category="OTHER",
-                    summary_zh_tw="摘要",
-                    why_it_matters_zh_tw="原因",
-                    source_url=None,
-                    importance=5,
-                    confidence=0.8,
-                    tags=[],
-                )
-            ],
-        ),
+def discover(database: Database, gmail_id: str, body: str = "body", *, force: bool = False) -> int | None:
+    return database.discover_gmail_document(
+        gmail_id,
+        f"thread-{gmail_id}",
+        "source",
+        datetime(2026, 7, 23, tzinfo=UTC),
+        "subject",
+        "sender",
+        body,
+        False,
+        force,
     )
-    assert len(database.items_for_messages([message_id], 10)) == 1
-    assert database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body") is None
-    failed_id = database.discover("gmail-2", "thread-2", "source", "now", "subject", "sender", "body")
+
+
+def extraction(title: str = "Title") -> EmailExtraction:
+    return EmailExtraction(
+        source_id="source",
+        newsletter_title="News",
+        newsletter_date=None,
+        overview_zh_tw="摘要",
+        items=[
+            DigestItem(
+                title=title,
+                category="OTHER",
+                summary_zh_tw="摘要",
+                why_it_matters_zh_tw="原因",
+                source_url=None,
+                importance=5,
+                confidence=0.8,
+                tags=[],
+            )
+        ],
+    )
+
+
+def test_document_and_digest_idempotency(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    document_id = discover(database, "gmail-1")
+    assert document_id is not None
+    assert discover(database, "gmail-1") == document_id
+    database.store_extraction(document_id, extraction())
+    assert len(database.items_for_documents([document_id], 10)) == 1
+    assert discover(database, "gmail-1") is None
+    failed_id = discover(database, "gmail-2")
     assert failed_id is not None
-    database.fail_message(failed_id, "OLLAMA_SCHEMA_INVALID")
-    assert database.discover("gmail-2", "thread-2", "source", "now", "subject", "sender", "body") is None
+    database.fail_document(failed_id, "OLLAMA_SCHEMA_INVALID")
+    assert discover(database, "gmail-2") is None
     digest_id = database.save_digest("daily:1", "start", "end", "UTC", "digest")
     assert digest_id is not None
     assert database.pending_digest(digest_id)["rendered_content"] == "digest"
@@ -43,93 +62,92 @@ def test_message_and_digest_idempotency(tmp_path: Path) -> None:
     database.close()
 
 
+def test_generic_document_identity_is_source_scoped(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    document = SourceDocument(
+        source_type="hackernews",
+        source_id="hn-best",
+        external_id="123",
+        title="Article",
+        published_at=datetime(2026, 7, 23, tzinfo=UTC),
+    )
+    content = ResolvedContent(document=document, text="article text", basis="article", truncated=False)
+
+    document_id = database.discover_document(document, content)
+
+    assert document_id is not None
+    row = database.connection.execute("SELECT source_type,source_id,external_id,content_basis FROM documents").fetchone()
+    assert tuple(row) == ("hackernews", "hn-best", "123", "article")
+    database.close()
+
+
 def test_force_replaces_existing_extraction(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
-    message_id = database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body")
-    assert message_id is not None
-    extraction = EmailExtraction(
-        source_id="source",
-        newsletter_title="News",
-        newsletter_date=None,
-        overview_zh_tw="摘要",
-        items=[
-            DigestItem(
-                title="Old title",
-                category="OTHER",
-                summary_zh_tw="摘要",
-                why_it_matters_zh_tw="原因",
-                importance=5,
-                confidence=0.8,
-            )
-        ],
-    )
-    database.store_extraction(message_id, extraction)
+    document_id = discover(database, "gmail-1")
+    assert document_id is not None
+    database.store_extraction(document_id, extraction("Old title"))
 
-    forced_id = database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "new body", force=True)
-    assert forced_id == message_id
-    assert database.items_for_messages([message_id], 10)[0]["title"] == "Old title"
-    extraction.items[0].title = "New title"
-    database.store_extraction(forced_id, extraction, replace=True)
-    assert database.items_for_messages([message_id], 10)[0]["title"] == "New title"
+    forced_id = discover(database, "gmail-1", "new body", force=True)
+    assert forced_id == document_id
+    assert database.items_for_documents([document_id], 10)[0]["title"] == "Old title"
+    database.store_extraction(forced_id, extraction("New title"), replace=True)
+    assert database.items_for_documents([document_id], 10)[0]["title"] == "New title"
     database.close()
 
 
-def test_items_for_messages_excludes_prior_runs(tmp_path: Path) -> None:
+def test_items_for_documents_excludes_prior_runs(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
-    first_id = database.discover("gmail-1", "thread-1", "source", "2026-07-01", "subject", "sender", "body")
-    second_id = database.discover("gmail-2", "thread-2", "source", "2026-07-02", "subject", "sender", "body")
+    first_id = discover(database, "gmail-1")
+    second_id = discover(database, "gmail-2")
     assert first_id is not None and second_id is not None
-    extraction = EmailExtraction(
-        source_id="source",
-        newsletter_title="News",
-        newsletter_date=None,
-        overview_zh_tw="摘要",
-        items=[
-            DigestItem(
-                title="Item",
-                category="OTHER",
-                summary_zh_tw="摘要",
-                why_it_matters_zh_tw="原因",
-                importance=5,
-                confidence=0.8,
-            )
-        ],
-    )
-    database.store_extraction(first_id, extraction)
-    database.store_extraction(second_id, extraction)
+    database.store_extraction(first_id, extraction("Item"))
+    database.store_extraction(second_id, extraction("Item"))
 
-    assert [row["message_id"] for row in database.items_for_messages([second_id], 10)] == [second_id]
+    assert [row["document_id"] for row in database.items_for_documents([second_id], 10)] == [second_id]
     database.close()
 
 
-def test_save_digest_finalizes_staged_extractions_atomically(tmp_path: Path) -> None:
+def test_save_digest_finalizes_staged_documents_atomically(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
-    message_id = database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body")
-    assert message_id is not None
+    document_id = discover(database, "gmail-1")
+    assert document_id is not None
     database.store_extraction(
-        message_id,
+        document_id,
         EmailExtraction(source_id="source", newsletter_title="News", newsletter_date=None, overview_zh_tw="摘要", items=[]),
         finalize=False,
     )
 
-    assert database.message("gmail-1")["state"] == "discovered"
-    assert database.save_digest("daily:1", "start", "end", "UTC", "digest", [message_id]) is not None
-    assert database.message("gmail-1")["state"] == "processed"
+    assert database.gmail_document("gmail-1")["state"] == "discovered"
+    assert database.save_digest("daily:1", "start", "end", "UTC", "digest", [document_id]) is not None
+    assert database.gmail_document("gmail-1")["state"] == "processed"
     database.close()
+
+
+def test_legacy_schema_requires_an_explicit_reset(tmp_path: Path) -> None:
+    path = tmp_path / "legacy.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        "CREATE TABLE schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);"
+        "INSERT INTO schema_version VALUES(1, 'now');"
+    )
+    connection.close()
+
+    with pytest.raises(DatabaseSchemaResetRequiredError, match="DATABASE_SCHEMA_RESET_REQUIRED"):
+        Database(path)
 
 
 def test_backup_and_reset(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
-    assert database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body") is not None
+    assert discover(database, "gmail-1") is not None
     backup_path = tmp_path / "backup.sqlite3"
 
     database.backup(backup_path)
     counts = database.reset()
 
-    assert counts["messages"] == 1
-    assert database.counts() == {"messages": 0, "items": 0, "digests": 0, "runs": 0}
+    assert counts["documents"] == 1
+    assert database.counts() == {"documents": 0, "gmail_document_state": 0, "items": 0, "digests": 0, "runs": 0}
     assert backup_path.stat().st_mode & 0o777 == 0o600
     backup = Database(backup_path)
-    assert backup.counts()["messages"] == 1
+    assert backup.counts()["documents"] == 1
     backup.close()
     database.close()

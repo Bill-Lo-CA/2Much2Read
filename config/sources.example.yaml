@@ -5,7 +5,8 @@
 # - dev-newspaper
 # - product-business-newspaper
 sources:
-  - id: alphasignal
+  - type: gmail
+    id: alphasignal
     name: AlphaSignal
     enabled: true
     category: AI

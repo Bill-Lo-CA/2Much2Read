@@ -1,9 +1,29 @@
 from __future__ import annotations
 
-from datetime import date
+from datetime import date, datetime
 from typing import Literal
 
 from pydantic import BaseModel, Field, HttpUrl, field_validator
+
+
+class SourceDocument(BaseModel):
+    source_type: Literal["gmail", "hackernews"]
+    source_id: str
+    external_id: str
+    title: str
+    author: str | None = None
+    published_at: datetime
+    source_url: HttpUrl | None = None
+    discussion_url: HttpUrl | None = None
+    metadata: dict[str, object] = Field(default_factory=dict)
+
+
+class ResolvedContent(BaseModel):
+    document: SourceDocument
+    text: str
+    basis: Literal["newsletter", "article", "hn_self_post", "metadata"]
+    final_url: HttpUrl | None = None
+    truncated: bool
 
 
 class DigestItem(BaseModel):
