@@ -77,6 +77,26 @@ def test_allows_only_explicit_user_mentions() -> None:
 
 
 @respx.mock
+def test_keeps_many_mention_tokens_intact() -> None:
+    user_ids = [f"{index:019d}" for index in range(87)]
+    route = respx.post("https://discord.example/webhook").mock(return_value=httpx.Response(200, json={"id": "123"}))
+
+    assert deliver(
+        "https://discord.example/webhook",
+        "body",
+        "2bored1made",
+        allowed_user_ids=user_ids,
+        mention_user_ids=user_ids,
+    ) == ["123", "123"]
+
+    contents = [str(json.loads(call.request.content)["content"]) for call in route.calls]
+    assert all(len(content) <= 2000 for content in contents)
+    assert {token for content in contents for token in content.split() if token.startswith("<@") and token.endswith(">")} == {
+        f"<@{user_id}>" for user_id in user_ids
+    }
+
+
+@respx.mock
 def test_resumes_after_saved_chunk_progress() -> None:
     route = respx.post("https://discord.example/webhook").mock(return_value=httpx.Response(200, json={"id": "2"}))
     progress: list[list[str]] = []

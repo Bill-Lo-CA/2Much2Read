@@ -143,6 +143,7 @@ uv run 2bored1made send --message "Build failed" --mention 123456789012345678
 
 Only user IDs listed in `DISCORD_ALLOWED_MENTION_IDS` can be tagged. Repeating
 `--mention` tags more than one configured user; all other `@` text is neutralized.
+Long notifications split only between complete mention tokens, never inside one.
 
 ## Delivery behavior
 

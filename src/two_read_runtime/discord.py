@@ -90,6 +90,25 @@ def chunk_text(text: str, limit: int = 2000) -> list[str]:
     ]
 
 
+def _chunk_with_mentions(text: str, user_ids: list[str], limit: int = 2000) -> list[str]:
+    prefix_chunks: list[str] = []
+    prefix = ""
+    for user_id in user_ids:
+        candidate = f"{prefix} <@{user_id}>".strip()
+        if prefix and len(candidate) > limit:
+            prefix_chunks.append(prefix)
+            prefix = f"<@{user_id}>"
+        else:
+            prefix = candidate
+    if not text:
+        return [*prefix_chunks, prefix]
+    body_limit = limit - len(prefix) - 1
+    if body_limit < 13:
+        return [*prefix_chunks, prefix, *chunk_text(text, limit)]
+    body_chunks = chunk_text(text, body_limit)
+    return [*prefix_chunks, f"{prefix} {body_chunks[0]}", *body_chunks[1:]]
+
+
 def deliver(
     webhook_url: str,
     content: str,
@@ -97,14 +116,18 @@ def deliver(
     message_ids: list[str] | None = None,
     on_progress: Callable[[list[str]], None] | None = None,
     allowed_user_ids: list[str] | None = None,
+    mention_user_ids: list[str] | None = None,
 ) -> list[str]:
     if not webhook_url:
         raise DiscordDeliveryError("DISCORD_WEBHOOK_URL is required")
     allowed_user_ids = list(dict.fromkeys(allowed_user_ids or []))
     if not all(user_id.isascii() and user_id.isdecimal() for user_id in allowed_user_ids):
         raise DiscordDeliveryError("Discord allowed user IDs must contain digits only")
+    mention_user_ids = list(dict.fromkeys(mention_user_ids or []))
+    if not set(mention_user_ids).issubset(allowed_user_ids):
+        raise DiscordDeliveryError("Discord mention user IDs must be allowed")
     message_ids = list(message_ids or [])
-    chunks = chunk_text(content)
+    chunks = _chunk_with_mentions(content, mention_user_ids) if mention_user_ids else chunk_text(content)
     if len(message_ids) > len(chunks):
         raise DiscordDeliveryError("stored Discord delivery progress exceeds message chunks")
     for chunk in chunks[len(message_ids) :]:

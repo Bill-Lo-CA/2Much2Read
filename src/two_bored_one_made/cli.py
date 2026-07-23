@@ -34,13 +34,14 @@ def send(
     mention_ids = list(dict.fromkeys(mention or []))
     if invalid_ids := set(mention_ids) - settings.allowed_mention_ids:
         raise typer.BadParameter(f"mention IDs are not allowed: {', '.join(sorted(invalid_ids))}")
-    content = " ".join([*(f"<@{user_id}>" for user_id in mention_ids), message.replace("@", "@\u200b")])
+    content = message.replace("@", "@\u200b")
     result = SendResult(
         discord_message_ids=deliver(
             settings.discord_webhook_url,
             content,
             settings.discord_username,
             allowed_user_ids=mention_ids,
+            mention_user_ids=mention_ids,
         )
     )
     typer.echo(json.dumps(result.model_dump()))

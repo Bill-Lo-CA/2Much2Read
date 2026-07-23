@@ -12,10 +12,12 @@ def test_send_mentions_only_configured_user_ids(monkeypatch) -> None:
         "Settings",
         lambda: Settings(discord_webhook_url="https://discord.example", discord_allowed_mention_ids="123,456"),
     )
-    calls: list[tuple[str, str, str, list[str]]] = []
+    calls: list[tuple[str, str, str, list[str], list[str]]] = []
 
-    def fake_deliver(webhook_url: str, content: str, username: str, *, allowed_user_ids: list[str]) -> list[str]:
-        calls.append((webhook_url, content, username, allowed_user_ids))
+    def fake_deliver(
+        webhook_url: str, content: str, username: str, *, allowed_user_ids: list[str], mention_user_ids: list[str]
+    ) -> list[str]:
+        calls.append((webhook_url, content, username, allowed_user_ids, mention_user_ids))
         return ["message-id"]
 
     monkeypatch.setattr(cli, "deliver", fake_deliver)
@@ -30,8 +32,9 @@ def test_send_mentions_only_configured_user_ids(monkeypatch) -> None:
     assert calls == [
         (
             "https://discord.example",
-            "<@123> Build @\u200beveryone <@\u200b456>",
+            "Build @\u200beveryone <@\u200b456>",
             "2bored1made",
+            ["123"],
             ["123"],
         )
     ]
