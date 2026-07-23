@@ -32,9 +32,10 @@ dev = [
 [project.scripts]
 2much2read = "two_much_two_read.cli:app"
 2busy1miss = "two_busy_one_miss.cli:app"
+2bored1made = "two_bored_one_made.cli:app"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/two_busy_one_miss", "src/two_much_two_read", "src/two_read_runtime"]
+packages = ["src/two_bored_one_made", "src/two_busy_one_miss", "src/two_much_two_read", "src/two_read_runtime"]
 
 [tool.ruff]
 line-length = 130
@@ -46,7 +47,7 @@ select = ["E", "F", "I", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.11"
 strict = true
-packages = ["two_busy_one_miss", "two_much_two_read", "two_read_runtime"]
+packages = ["two_bored_one_made", "two_busy_one_miss", "two_much_two_read", "two_read_runtime"]
 mypy_path = "src"
 
 [tool.pytest.ini_options]

@@ -1,10 +1,11 @@
 # 2Much2Read
 
-Two local-first tools that post only their final output to a private Discord webhook:
+Three local-first tools that post only their final output to a private Discord webhook:
 
 - `2much2read` reads configured Gmail newsletters, summarizes them with local Ollama, and records digests in SQLite.
 - `2busy1miss` syncs configured Google Calendar events into SQLite reminder jobs,
   then sends due reminders without repeatedly querying Google.
+- `2bored1made` sends a direct local notification, with optional whitelisted Discord user mentions.
 
 They are separate commands, OAuth clients, OAuth tokens, YAML files, SQLite databases, and environment files. They share only configuration-path resolution, Discord delivery, and a process lock implementation.
 
@@ -16,6 +17,7 @@ Both tools use one private root, not the repository `.env`:
 ~/.config/2much2read-runtime/
   .2much2read.env
   .2busy1miss.env
+  .2bored1made.env
   gmail-client-secret.json
   gmail-token.json
   calendar-client-secret.json
@@ -28,7 +30,7 @@ Both tools use one private root, not the repository `.env`:
   2busy1miss.sqlite3
 ```
 
-The two environment files may contain duplicate variable names because each command and systemd unit loads only its own file. Do not source both files in one shell. The installers set both runtime directories to mode `0700`, set copied environment/YAML files, OAuth credentials/tokens, and lock files to `0600`, and keep SQLite databases inside the protected data directory.
+The environment files may contain duplicate variable names because each command and systemd unit loads only its own file. Do not source them together. The installers set both runtime directories to mode `0700`, set copied environment/YAML files, OAuth credentials/tokens, and lock files to `0600`, and keep SQLite databases inside the protected data directory.
 
 ## Destructive reset
 
@@ -125,6 +127,22 @@ uv run 2busy1miss reset-agenda-checkpoint --delivery-id ID
 ```
 
 Manual and next-day agendas use the same durable delivery record, de-duplicated by date, timezone, and Discord destination; `agenda-retry` retries failed records and `--force` is the explicit resend path. `2busy1miss-runtime-agenda.timer` runs at `AGENDA_SCHEDULE_TIME` in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone and synchronizes the configured reminder horizon. Its persistent catch-up is ignored before that configured time, so a morning startup cannot send the next day's agenda early. Empty days are sent as `No events`. Reminder messages use the same Markdown code-block style as agendas; a retry after an event starts marks the job `expired` instead of sending it.
+
+## 2bored1made
+
+This is a direct notification skeleton: no database, retry queue, YAML hooks, or timer.
+
+```bash
+uv sync --all-groups
+sh scripts/install-2bored1made.sh
+# Edit ~/.config/2much2read-runtime/.2bored1made.env:
+# DISCORD_WEBHOOK_URL=...
+# DISCORD_ALLOWED_MENTION_IDS=123456789012345678
+uv run 2bored1made send --message "Build failed" --mention 123456789012345678
+```
+
+Only user IDs listed in `DISCORD_ALLOWED_MENTION_IDS` can be tagged. Repeating
+`--mention` tags more than one configured user; all other `@` text is neutralized.
 
 ## Delivery behavior
 

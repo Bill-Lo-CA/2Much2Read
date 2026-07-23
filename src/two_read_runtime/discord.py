@@ -96,9 +96,13 @@ def deliver(
     username: str,
     message_ids: list[str] | None = None,
     on_progress: Callable[[list[str]], None] | None = None,
+    allowed_user_ids: list[str] | None = None,
 ) -> list[str]:
     if not webhook_url:
         raise DiscordDeliveryError("DISCORD_WEBHOOK_URL is required")
+    allowed_user_ids = list(dict.fromkeys(allowed_user_ids or []))
+    if not all(user_id.isascii() and user_id.isdecimal() for user_id in allowed_user_ids):
+        raise DiscordDeliveryError("Discord allowed user IDs must contain digits only")
     message_ids = list(message_ids or [])
     chunks = chunk_text(content)
     if len(message_ids) > len(chunks):
@@ -106,10 +110,13 @@ def deliver(
     for chunk in chunks[len(message_ids) :]:
         for attempt in range(4):
             try:
+                allowed_mentions: dict[str, list[str]] = {"parse": []}
+                if allowed_user_ids:
+                    allowed_mentions["users"] = allowed_user_ids
                 response = httpx.post(
                     webhook_url,
                     params={"wait": "true"},
-                    json={"content": chunk, "username": username, "allowed_mentions": {"parse": []}},
+                    json={"content": chunk, "username": username, "allowed_mentions": allowed_mentions},
                     timeout=30,
                 )
                 if response.status_code == 429:

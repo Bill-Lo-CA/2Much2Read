@@ -1,3 +1,5 @@
+import json
+
 import httpx
 import pytest
 import respx
@@ -63,6 +65,15 @@ def test_disables_mentions() -> None:
     assert deliver("https://discord.example/webhook", "hello", "2much2read") == ["123"]
     assert route.calls[0].request.read()
     assert b'"allowed_mentions":{"parse":[]}' in route.calls[0].request.content
+
+
+@respx.mock
+def test_allows_only_explicit_user_mentions() -> None:
+    route = respx.post("https://discord.example/webhook").mock(return_value=httpx.Response(200, json={"id": "123"}))
+
+    assert deliver("https://discord.example/webhook", "<@123> hello", "2bored1made", allowed_user_ids=["123"]) == ["123"]
+
+    assert json.loads(route.calls[0].request.content)["allowed_mentions"] == {"parse": [], "users": ["123"]}
 
 
 @respx.mock
