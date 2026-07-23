@@ -406,6 +406,34 @@ def test_retry_agenda_delivers_only_the_current_destination(tmp_path: Path, monk
     }
 
 
+def test_reset_agenda_checkpoint_allows_retry(tmp_path: Path, monkeypatch) -> None:
+    timezone = "America/Montreal"
+    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone)
+    settings = Settings(
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        discord_webhook_url="https://busy.example/webhook",
+    )
+    day = date(2026, 7, 9)
+    database = Database(settings.database_path)
+    delivery_id = database.create_agenda_delivery(
+        day, timezone, sha256(settings.discord_webhook_url.encode()).hexdigest(), "agenda"
+    )
+    assert delivery_id is not None
+    database.record_agenda_delivery_progress(delivery_id, ["partial"])
+    database.fail_agenda_delivery(delivery_id, "DISCORD_MESSAGE_IDS_CORRUPT")
+    database.close()
+
+    assert pipeline.reset_agenda_checkpoint(settings, delivery_id).model_dump() == {
+        "status": "ok",
+        "delivery_id": delivery_id,
+    }
+    monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
+    monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["discord-id"])
+
+    assert pipeline.retry_agenda(settings, day).delivered == 1
+
+
 def test_run_reads_scheduled_jobs_without_calendar_and_expires_started_events(tmp_path: Path, monkeypatch) -> None:
     timezone = ZoneInfo("America/Montreal")
     now = datetime(2026, 7, 9, 9, 56, tzinfo=timezone)

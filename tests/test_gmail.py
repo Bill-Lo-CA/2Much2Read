@@ -73,6 +73,32 @@ def test_ensure_labels_creates_only_processing_labels() -> None:
     assert names == ["NewsletterBot/Processed", "NewsletterBot/Failed"]
 
 
+@pytest.mark.parametrize(
+    ("state", "expected_add", "expected_remove"),
+    [
+        ("processed", "Processed", "Failed"),
+        ("failed", "Failed", "Processed"),
+    ],
+)
+def test_sync_processing_label_changes_only_the_processing_labels(state: str, expected_add: str, expected_remove: str) -> None:
+    service = MagicMock()
+    client = object.__new__(GmailClient)
+    client.service = service
+    client.labels = {
+        "NewsletterBot/Processed": "Processed",
+        "NewsletterBot/Failed": "Failed",
+        "Inbox": "Inbox",
+    }
+
+    client.sync_processing_label("gmail-1", state)
+
+    service.users().messages().modify.assert_called_once_with(
+        userId="me",
+        id="gmail-1",
+        body={"addLabelIds": [expected_add], "removeLabelIds": [expected_remove]},
+    )
+
+
 def test_message_metadata_requests_only_subscription_headers() -> None:
     service = MagicMock()
     service.users().messages().get.return_value.execute.return_value = {"id": "message-1"}

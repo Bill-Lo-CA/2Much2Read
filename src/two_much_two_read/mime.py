@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import re
 from email import policy
 from email.message import Message
@@ -76,17 +77,24 @@ def extract_gmail_payload(payload: dict[str, object]) -> str:
             body = node.get("body")
             data = body.get("data") if isinstance(body, dict) else None
             if isinstance(data, str):
-                raw = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
-                charset = "utf-8"
-                headers = node.get("headers", [])
-                if isinstance(headers, list):
-                    content_type = next(
-                        (str(h.get("value", "")) for h in headers if isinstance(h, dict) and h.get("name") == "Content-Type"),
-                        "",
-                    )
-                    match = re.search(r"charset=[\"']?([^;\"']+)", content_type, re.I)
-                    charset = match.group(1) if match else charset
-                found.append(raw.decode(charset, errors="replace"))
+                try:
+                    raw = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+                except (ValueError, binascii.Error):
+                    raw = None
+                if raw is not None:
+                    charset = "utf-8"
+                    headers = node.get("headers", [])
+                    if isinstance(headers, list):
+                        content_type = next(
+                            (str(h.get("value", "")) for h in headers if isinstance(h, dict) and h.get("name") == "Content-Type"),
+                            "",
+                        )
+                        match = re.search(r"charset=[\"']?([^;\"']+)", content_type, re.I)
+                        charset = match.group(1) if match else charset
+                    try:
+                        found.append(raw.decode(charset, errors="replace"))
+                    except LookupError:
+                        found.append(raw.decode("utf-8", errors="replace"))
         parts = node.get("parts", [])
         if isinstance(parts, list):
             for part in parts:

@@ -264,6 +264,15 @@ class Database:
         )
         self.connection.commit()
 
+    def reset_corrupt_delivery(self, attempt_id: int) -> bool:
+        cursor = self.connection.execute(
+            """UPDATE reminder_attempts SET state='pending', discord_message_ids_json=NULL, last_error_code=NULL, updated_at=?
+            WHERE id=? AND state='failed' AND last_error_code='DISCORD_MESSAGE_IDS_CORRUPT'""",
+            (datetime.now(UTC).isoformat(), attempt_id),
+        )
+        self.connection.commit()
+        return bool(cursor.rowcount)
+
     def create_agenda_delivery(
         self, day: date, timezone: str, destination_hash: str, content: str, *, force: bool = False
     ) -> int | None:
@@ -326,6 +335,15 @@ class Database:
             (error_code, now, delivery_id),
         )
         self.connection.commit()
+
+    def reset_corrupt_agenda_delivery(self, delivery_id: int) -> bool:
+        cursor = self.connection.execute(
+            """UPDATE agenda_deliveries SET state='pending', discord_message_ids_json=NULL, last_error_code=NULL, updated_at=?
+            WHERE id=? AND state='failed' AND last_error_code='DISCORD_MESSAGE_IDS_CORRUPT'""",
+            (datetime.now(UTC).isoformat(), delivery_id),
+        )
+        self.connection.commit()
+        return bool(cursor.rowcount)
 
     def counts(self) -> dict[str, int]:
         return {

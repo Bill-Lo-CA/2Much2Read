@@ -12,17 +12,22 @@ class CommandResult(BaseModel):
 
 
 class NewsletterRunResult(CommandResult):
-    status: Literal["ok", "partial", "no_content"]
+    status: Literal["ok", "partial", "no_content", "skipped"]
     discovered: int
     processed: int
     failed: int
     delivered: int
+    reason: Literal["daily_digest_exists"] | None = None
 
 
 class NewsletterRetryResult(CommandResult):
     delivered: int
     failed: int
     failed_by_error_code: dict[str, int] = Field(default_factory=dict)
+
+
+class DeliveryCheckpointResetResult(CommandResult):
+    digest_id: int
 
 
 class MailSelector(BaseModel):
@@ -110,6 +115,12 @@ class SubscriptionSyncResult(CommandResult):
 
 class LabelsResult(CommandResult):
     labels: list[str]
+
+
+class LabelsReconcileResult(CommandResult):
+    status: Literal["ok", "partial"] = "ok"
+    reconciled: int
+    failed: int
 
 
 class FilterView(BaseModel):

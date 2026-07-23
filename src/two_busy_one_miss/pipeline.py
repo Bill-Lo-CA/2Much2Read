@@ -74,6 +74,11 @@ class AgendaRetryResult(BaseModel):
     failed_by_error_code: dict[str, int]
 
 
+class AgendaCheckpointResetResult(BaseModel):
+    status: Literal["ok"] = "ok"
+    delivery_id: int
+
+
 class ReminderRunResult(BaseModel):
     status: Literal["ok"] = "ok"
     sent: int
@@ -93,6 +98,11 @@ class ReminderRetryResult(BaseModel):
     failed: int
     failed_by_error_code: dict[str, int]
     expired: int
+
+
+class ReminderCheckpointResetResult(BaseModel):
+    status: Literal["ok"] = "ok"
+    attempt_id: int
 
 
 def calendar_client(settings: Settings, config: RemindersConfig) -> CalendarClient:
@@ -337,6 +347,17 @@ def retry_agenda(settings: Settings, day: date) -> AgendaRetryResult:
     return AgendaRetryResult(day=day, delivered=delivered, failed=failed, failed_by_error_code=failed_by_error_code)
 
 
+def reset_agenda_checkpoint(settings: Settings, delivery_id: int) -> AgendaCheckpointResetResult:
+    database = Database(settings.database_path)
+    try:
+        with ProcessLock(settings.lock_path):
+            if not database.reset_corrupt_agenda_delivery(delivery_id):
+                raise ValueError(f"agenda delivery {delivery_id} is not a failed corrupt checkpoint")
+    finally:
+        database.close()
+    return AgendaCheckpointResetResult(delivery_id=delivery_id)
+
+
 def run(settings: Settings, dry_run: bool, *, now: datetime | None = None) -> ReminderRunResult | ReminderDryRunResult:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
@@ -365,3 +386,14 @@ def retry_delivery(settings: Settings, *, now: datetime | None = None) -> Remind
     finally:
         database.close()
     return ReminderRetryResult(delivered=delivered, failed=failed, failed_by_error_code=failed_by_error_code, expired=expired)
+
+
+def reset_reminder_checkpoint(settings: Settings, attempt_id: int) -> ReminderCheckpointResetResult:
+    database = Database(settings.database_path)
+    try:
+        with ProcessLock(settings.lock_path):
+            if not database.reset_corrupt_delivery(attempt_id):
+                raise ValueError(f"reminder attempt {attempt_id} is not a failed corrupt checkpoint")
+    finally:
+        database.close()
+    return ReminderCheckpointResetResult(attempt_id=attempt_id)

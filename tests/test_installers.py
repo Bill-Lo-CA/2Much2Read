@@ -133,12 +133,60 @@ def test_installers_only_start_timers_when_confirmed(
         )
         assert "OnCalendar=*-*-* 21:00:00" in agenda_timer.read_text(encoding="utf-8")
     else:
+        newsletter_timer = tmp_path / "home" / ".config" / "systemd" / "user" / "2much2read-runtime.timer"
+        assert "OnCalendar=*-*-* 08:00:00 America/Montreal" in newsletter_timer.read_text(encoding="utf-8")
+        newsletter_env = tmp_path / "home" / ".config" / "2much2read-runtime" / ".2much2read.env"
+        newsletter_env.write_text("DIGEST_SCHEDULE_TIME=09:45\nDIGEST_SCHEDULE_TIMEZONE=America/Toronto\n", encoding="utf-8")
+        subprocess.run(
+            ["sh", f"scripts/{script}", secret_option, str(client_secret)],
+            cwd=root,
+            env=environment,
+            check=True,
+            text=True,
+            capture_output=True,
+            input=answer,
+        )
+        assert "OnCalendar=*-*-* 09:45:00 America/Toronto" in newsletter_timer.read_text(encoding="utf-8")
         if starts:
             assert f"enable --now {timer}" in calls
         expected = (
             "Timer enabled." if starts else f"Timer remains disabled. Enable when ready: systemctl --user enable --now {timer}"
         )
         assert expected in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("setting", "message"),
+    [
+        ("DIGEST_SCHEDULE_TIME=25:00\n", "DIGEST_SCHEDULE_TIME must use HH:MM"),
+        ("DIGEST_SCHEDULE_TIMEZONE=Invalid/Timezone\n", "DIGEST_SCHEDULE_TIMEZONE must name a system timezone"),
+    ],
+)
+def test_newsletter_installer_rejects_invalid_schedule(tmp_path: Path, setting: str, message: str) -> None:
+    root = Path(__file__).parents[1]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    systemctl.chmod(0o755)
+    home = tmp_path / "home"
+    config_dir = home / ".config" / "2much2read-runtime"
+    config_dir.mkdir(parents=True)
+    (config_dir / ".2much2read.env").write_text(setting, encoding="utf-8")
+    client_secret = tmp_path / "client-secret.json"
+    client_secret.write_text("client secret", encoding="utf-8")
+
+    result = subprocess.run(
+        ["sh", "scripts/install-2much2read-user-service.sh", "--gmail-client-secret", str(client_secret)],
+        cwd=root,
+        env=os.environ | {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert message in result.stderr
+    assert not (home / ".config" / "systemd" / "user" / "2much2read-runtime.timer").exists()
 
 
 @pytest.mark.parametrize(
@@ -206,6 +254,12 @@ def test_2busy1miss_agenda_timer_is_an_installer_template() -> None:
     assert "OnCalendar=*-*-* __AGENDA_SCHEDULE_TIME__:00" in timer
     assert "Persistent=true" in timer
     assert "ExecStart=__EXECUTABLE__ agenda-next-day --scheduled" in service
+
+
+def test_2much2read_timer_is_an_installer_template() -> None:
+    timer = (Path(__file__).parents[1] / "deploy/systemd/2much2read-runtime.timer").read_text(encoding="utf-8")
+
+    assert "OnCalendar=*-*-* __DIGEST_SCHEDULE_TIME__:00 __DIGEST_SCHEDULE_TIMEZONE__" in timer
 
 
 def test_2busy1miss_dispatcher_runs_every_minute() -> None:

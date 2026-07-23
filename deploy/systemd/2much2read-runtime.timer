@@ -2,7 +2,7 @@
 Description=Daily 2much2read Digest
 
 [Timer]
-OnCalendar=*-*-* 08:00:00 America/Montreal
+OnCalendar=*-*-* __DIGEST_SCHEDULE_TIME__:00 __DIGEST_SCHEDULE_TIMEZONE__
 Persistent=true
 RandomizedDelaySec=5m
 

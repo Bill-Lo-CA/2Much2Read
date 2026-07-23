@@ -102,6 +102,22 @@ def test_items_for_messages_excludes_prior_runs(tmp_path: Path) -> None:
     database.close()
 
 
+def test_save_digest_finalizes_staged_extractions_atomically(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    message_id = database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body")
+    assert message_id is not None
+    database.store_extraction(
+        message_id,
+        EmailExtraction(source_id="source", newsletter_title="News", newsletter_date=None, overview_zh_tw="摘要", items=[]),
+        finalize=False,
+    )
+
+    assert database.message("gmail-1")["state"] == "discovered"
+    assert database.save_digest("daily:1", "start", "end", "UTC", "digest", [message_id]) is not None
+    assert database.message("gmail-1")["state"] == "processed"
+    database.close()
+
+
 def test_backup_and_reset(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     assert database.discover("gmail-1", "thread-1", "source", "now", "subject", "sender", "body") is not None
