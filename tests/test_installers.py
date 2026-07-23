@@ -6,6 +6,37 @@ from pathlib import Path
 import pytest
 
 
+def test_2bored1made_installer_copies_the_env_file_once(tmp_path: Path) -> None:
+    root = Path(__file__).parents[1]
+    home = tmp_path / "home"
+    environment = os.environ | {"HOME": str(home)}
+
+    subprocess.run(
+        ["sh", "scripts/install-2bored1made.sh"],
+        cwd=root,
+        env=environment,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    installed_env = home / ".config" / "2much2read-runtime" / ".2bored1made.env"
+    assert installed_env.read_text(encoding="utf-8") == (root / "config" / "2bored1made.env.example").read_text(encoding="utf-8")
+    assert installed_env.stat().st_mode & 0o777 == 0o600
+    installed_env.write_text("DISCORD_WEBHOOK_URL=https://configured.example\n", encoding="utf-8")
+
+    subprocess.run(
+        ["sh", "scripts/install-2bored1made.sh"],
+        cwd=root,
+        env=environment,
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert installed_env.read_text(encoding="utf-8") == "DISCORD_WEBHOOK_URL=https://configured.example\n"
+
+
 @pytest.mark.parametrize(
     ("script", "timer", "service", "secret_option", "secret_name", "answer", "starts"),
     [
