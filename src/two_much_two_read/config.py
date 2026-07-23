@@ -96,8 +96,6 @@ class ExcludedSubscriptions(BaseModel):
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
-    app_env: str = "development"
-    log_level: str = "INFO"
     gmail_credentials_path: Path = Field(default_factory=lambda: config_dir() / "gmail-client-secret.json")
     gmail_token_path: Path = Field(default_factory=lambda: config_dir() / "gmail-token.json")
     gmail_max_messages_per_run: int = Field(default=50, ge=1)
@@ -113,7 +111,6 @@ class Settings(BaseSettings):
     ollama_keep_alive: str = "10m"
     discord_webhook_url: str = ""
     discord_username: str = "2much2read"
-    digest_language: str = "zh-TW"
     digest_timezone: str = "America/Montreal"
     digest_max_items: int = Field(default=10, ge=1)
     digest_top_items: int = Field(default=5, ge=0)
