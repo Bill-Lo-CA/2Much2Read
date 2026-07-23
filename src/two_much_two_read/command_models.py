@@ -12,11 +12,12 @@ class CommandResult(BaseModel):
 
 
 class NewsletterRunResult(CommandResult):
-    status: Literal["ok", "partial", "no_content"]
+    status: Literal["ok", "partial", "no_content", "skipped"]
     discovered: int
     processed: int
     failed: int
     delivered: int
+    reason: Literal["daily_digest_exists"] | None = None
 
 
 class NewsletterRetryResult(CommandResult):
@@ -110,6 +111,12 @@ class SubscriptionSyncResult(CommandResult):
 
 class LabelsResult(CommandResult):
     labels: list[str]
+
+
+class LabelsReconcileResult(CommandResult):
+    status: Literal["ok", "partial"] = "ok"
+    reconciled: int
+    failed: int
 
 
 class FilterView(BaseModel):

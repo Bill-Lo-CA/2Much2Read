@@ -7,7 +7,7 @@ import pytest
 from typer.testing import CliRunner
 
 from two_much_two_read import cli, mail_operations
-from two_much_two_read.command_models import FiltersResult, NewsletterRetryResult, NewsletterRunResult
+from two_much_two_read.command_models import FiltersResult, LabelsReconcileResult, NewsletterRetryResult, NewsletterRunResult
 from two_much_two_read.config import Settings, load_excluded_subscriptions, load_sources
 from two_much_two_read.gmail import display_id
 from two_much_two_read.ollama import OllamaSchemaError
@@ -60,6 +60,15 @@ def test_delivery_retry_keeps_its_json_shape(monkeypatch: pytest.MonkeyPatch) ->
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {"status": "ok", "delivered": 1, "failed": 0, "failed_by_error_code": {}}
+
+
+def test_labels_reconcile_emits_a_typed_result(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "reconcile_labels", lambda _: LabelsReconcileResult(reconciled=2, failed=0))
+
+    result = CliRunner().invoke(cli.app, ["labels", "reconcile"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {"status": "ok", "reconciled": 2, "failed": 0}
 
 
 @pytest.mark.parametrize(

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 import httpx
 import pytest
 
-from two_much_two_read import pipeline
+from two_much_two_read import mail_operations, pipeline
 from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult
 from two_much_two_read.config import Settings
 from two_much_two_read.ollama import OllamaSchemaError
@@ -30,19 +30,19 @@ class StubGmailClient:
     def __init__(self, message_ids: list[str], messages: dict[str, dict[str, object]]) -> None:
         self.message_ids = message_ids
         self.messages = messages
-        self.applied_labels: list[tuple[str, list[str]]] = []
+        self.applied_labels: list[tuple[str, str]] = []
 
     def ensure_labels(self) -> None:
         pass
 
-    def list_messages(self, query: str, limit: int) -> list[str]:
-        return self.message_ids[:limit]
+    def list_messages(self, query: str, limit: int | None = None) -> list[str]:
+        return self.message_ids if limit is None else self.message_ids[:limit]
 
     def get_message(self, message_id: str) -> dict[str, object]:
         return self.messages[message_id]
 
-    def add_labels(self, message_id: str, labels: list[str]) -> None:
-        self.applied_labels.append((message_id, labels))
+    def sync_processing_label(self, message_id: str, state: str) -> None:
+        self.applied_labels.append((message_id, state))
 
 
 class StubOllamaClient:
@@ -131,6 +131,7 @@ def test_empty_news_day_records_no_content_run(newsletter_settings: Settings, mo
         "processed": 0,
         "failed": 0,
         "delivered": 0,
+        "reason": None,
     }
 
     database = Database(settings.database_path)
@@ -320,20 +321,20 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
     )
-    list_calls: list[int] = []
+    list_calls: list[int | None] = []
 
     class FakeGmailClient:
         def ensure_labels(self) -> None:
             pass
 
-        def list_messages(self, query: str, limit: int) -> list[str]:
+        def list_messages(self, query: str, limit: int | None = None) -> list[str]:
             list_calls.append(limit)
             return ["first-1", "first-2"] if "first@example.com" in query else ["second-1"]
 
         def get_message(self, message_id: str) -> dict[str, object]:
             return {"internalDate": "0", "threadId": message_id, "payload": {"body": message_id}}
 
-        def add_labels(self, message_id: str, labels: list[str]) -> None:
+        def sync_processing_label(self, message_id: str, state: str) -> None:
             pass
 
     class FakeOllamaClient:
@@ -352,7 +353,7 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
 
     result = run_pipeline(settings, max_messages=3, no_deliver=True)
 
-    assert list_calls == [3, 1]
+    assert list_calls == [None, None]
     assert result.processed == 3
 
 
@@ -367,19 +368,19 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
 
     class FakeGmailClient:
         def __init__(self) -> None:
-            self.applied_labels: list[tuple[str, list[str]]] = []
+            self.applied_labels: list[tuple[str, str]] = []
 
         def ensure_labels(self) -> None:
             pass
 
-        def list_messages(self, query: str, limit: int) -> list[str]:
+        def list_messages(self, query: str, limit: int | None = None) -> list[str]:
             return ["bad", "good"]
 
         def get_message(self, message_id: str) -> dict[str, object]:
             return {"internalDate": "0", "threadId": message_id, "payload": {"body": message_id}}
 
-        def add_labels(self, message_id: str, labels: list[str]) -> None:
-            self.applied_labels.append((message_id, labels))
+        def sync_processing_label(self, message_id: str, state: str) -> None:
+            self.applied_labels.append((message_id, state))
 
     class FakeOllamaClient:
         def __init__(self, *args: object) -> None:
@@ -414,10 +415,17 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
     statuses: list[str] = []
     result = run_pipeline(settings, no_deliver=True, status=statuses.append)
 
-    assert result.model_dump() == {"status": "partial", "discovered": 2, "processed": 1, "failed": 1, "delivered": 0}
+    assert result.model_dump() == {
+        "status": "partial",
+        "discovered": 2,
+        "processed": 1,
+        "failed": 1,
+        "delivered": 0,
+        "reason": None,
+    }
     assert gmail.applied_labels == [
-        ("bad", ["NewsletterBot/Failed"]),
-        ("good", ["NewsletterBot/Processed"]),
+        ("bad", "failed"),
+        ("good", "processed"),
     ]
     assert statuses == [
         "Starting 1 source(s)",
@@ -487,5 +495,296 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
         "processed": 1,
         "failed": 0,
         "delivered": 0,
+        "reason": None,
     }
-    assert gmail.applied_labels == [("transient", ["NewsletterBot/Processed"])]
+    assert gmail.applied_labels == [("transient", "processed")]
+
+
+@pytest.mark.parametrize("state", ["pending", "failed", "delivered"])
+def test_existing_daily_digest_skips_before_gmail_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    now = datetime(2026, 7, 22, 8, tzinfo=ZoneInfo("America/Montreal"))
+    database = Database(settings.database_path)
+    digest_id = database.save_digest("daily:2026-07-22:America/Montreal:all", "start", "end", "America/Montreal", "digest")
+    assert digest_id is not None
+    if state == "failed":
+        database.fail_delivery(digest_id)
+    elif state == "delivered":
+        database.finish_delivery(digest_id, ["discord-1"])
+    database.close()
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: pytest.fail("Gmail must not be accessed"))
+
+    assert run_pipeline(settings, now=now).model_dump() == {
+        "status": "skipped",
+        "discovered": 0,
+        "processed": 0,
+        "failed": 0,
+        "delivered": 0,
+        "reason": "daily_digest_exists",
+    }
+    database = Database(settings.database_path)
+    assert database.connection.execute("SELECT status FROM runs ORDER BY id DESC").fetchone()[0] == "skipped"
+    database.close()
+
+
+def test_forced_run_uses_a_separate_digest_key_after_daily_reservation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    now = datetime(2026, 7, 22, 8, tzinfo=ZoneInfo("America/Montreal"))
+    database = Database(settings.database_path)
+    assert database.save_digest("daily:2026-07-22:America/Montreal:all", "start", "end", "America/Montreal", "digest")
+    database.close()
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "_process_source", lambda *args, **kwargs: (0, 0, 0, 0, []))
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args: "forced digest")
+
+    assert run_pipeline(settings, force=True, no_deliver=True, now=now).status == "ok"
+    database = Database(settings.database_path)
+    keys = [row[0] for row in database.connection.execute("SELECT digest_key FROM digests ORDER BY id")]
+    assert keys == [
+        "daily:2026-07-22:America/Montreal:all",
+        "daily:2026-07-22:America/Montreal:all:force:2026-07-22T12:00:00+00:00",
+    ]
+    database.close()
+
+
+def test_label_sync_failure_is_repaired_without_reextracting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    calls: list[str] = []
+
+    class FakeGmailClient:
+        fail_sync = True
+
+        def ensure_labels(self) -> None:
+            pass
+
+        def list_messages(self, query: str, limit: int | None = None) -> list[str]:
+            return ["gmail-1"]
+
+        def get_message(self, message_id: str) -> dict[str, object]:
+            calls.append("get")
+            return {"internalDate": "0", "threadId": message_id, "payload": {"body": "body"}}
+
+        def sync_processing_label(self, message_id: str, state: str) -> None:
+            calls.append(f"label:{state}")
+            if self.fail_sync:
+                raise RuntimeError("Gmail unavailable")
+
+    class FakeOllama:
+        def extract(self, *args: object) -> EmailExtraction:
+            calls.append("extract")
+            return EmailExtraction(
+                source_id="alphasignal", newsletter_title="News", newsletter_date=None, overview_zh_tw="摘要", items=[]
+            )
+
+    gmail = FakeGmailClient()
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllama())
+    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+
+    assert (
+        run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 22, tzinfo=ZoneInfo("America/Montreal"))).status
+        == "partial"
+    )
+    database = Database(settings.database_path)
+    assert tuple(database.connection.execute("SELECT state,error_code FROM message_label_sync").fetchone()) == (
+        "failed",
+        "GMAIL_LABEL_SYNC_FAILED",
+    )
+    database.close()
+
+    gmail.fail_sync = False
+    assert run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 23, tzinfo=ZoneInfo("America/Montreal"))).processed == 0
+    assert calls == ["get", "extract", "label:processed", "label:processed"]
+    database = Database(settings.database_path)
+    assert tuple(database.connection.execute("SELECT state,error_code FROM message_label_sync").fetchone()) == ("synced", None)
+    database.close()
+
+
+def test_stale_label_reconciliation_does_not_use_the_message_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    database = Database(settings.database_path)
+    stale_id = database.discover("stale", "stale", "alphasignal", "now", "subject", "sender", "body")
+    assert stale_id is not None
+    database.store_extraction(
+        stale_id,
+        EmailExtraction(source_id="alphasignal", newsletter_title="Old", newsletter_date=None, overview_zh_tw="摘要", items=[]),
+    )
+    database.close()
+    fetched: list[str] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+        def list_messages(self, query: str, limit: int | None = None) -> list[str]:
+            return ["stale", "new"]
+
+        def get_message(self, message_id: str) -> dict[str, object]:
+            fetched.append(message_id)
+            return {"internalDate": "0", "threadId": message_id, "payload": {"body": message_id}}
+
+        def sync_processing_label(self, message_id: str, state: str) -> None:
+            assert message_id == "stale" or state == "processed"
+
+    class FakeOllama:
+        def extract(self, *args: object) -> EmailExtraction:
+            return EmailExtraction(
+                source_id="alphasignal", newsletter_title="New", newsletter_date=None, overview_zh_tw="摘要", items=[]
+            )
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllama())
+    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+
+    assert run_pipeline(settings, max_messages=1, no_deliver=True).processed == 1
+    assert fetched == ["new"]
+
+
+def test_forced_recovery_clears_the_failure_and_remote_failed_label(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    database = Database(settings.database_path)
+    message_id = database.discover("gmail-1", "thread", "alphasignal", "now", "subject", "sender", "body")
+    assert message_id is not None
+    database.fail_message(message_id, "OLLAMA_SCHEMA_INVALID")
+    database.close()
+    synced: list[tuple[str, str]] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+        def list_messages(self, query: str, limit: int | None = None) -> list[str]:
+            return ["gmail-1"]
+
+        def get_message(self, message_id: str) -> dict[str, object]:
+            return {"internalDate": "0", "threadId": "thread", "payload": {"body": "body"}}
+
+        def sync_processing_label(self, message_id: str, state: str) -> None:
+            synced.append((message_id, state))
+
+    class FakeOllama:
+        def extract(self, *args: object) -> EmailExtraction:
+            return EmailExtraction(
+                source_id="alphasignal", newsletter_title="Recovered", newsletter_date=None, overview_zh_tw="摘要", items=[]
+            )
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllama())
+    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+
+    assert run_pipeline(settings, force=True, no_deliver=True).processed == 1
+    assert synced == [("gmail-1", "processed")]
+    database = Database(settings.database_path)
+    assert tuple(database.connection.execute("SELECT state,last_error_code FROM messages").fetchone()) == ("processed", None)
+    database.close()
+
+
+def test_dry_run_skips_gmail_label_writes_and_persistent_database(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pytest.fail("dry-run must not create labels")
+
+        def list_messages(self, query: str, limit: int | None = None) -> list[str]:
+            return ["gmail-1"]
+
+        def get_message(self, message_id: str) -> dict[str, object]:
+            return {"internalDate": "0", "threadId": "thread", "payload": {"body": "body"}}
+
+        def sync_processing_label(self, message_id: str, state: str) -> None:
+            pytest.fail("dry-run must not modify labels")
+
+    class FakeOllama:
+        def extract(self, *args: object) -> EmailExtraction:
+            return EmailExtraction(
+                source_id="alphasignal", newsletter_title="Preview", newsletter_date=None, overview_zh_tw="摘要", items=[]
+            )
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllama())
+    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+
+    assert run_pipeline(settings, dry_run=True).processed == 1
+    assert not settings.database_path.exists()
+
+
+def test_labels_reconcile_repairs_terminal_messages_and_records_retries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
+    database = Database(settings.database_path)
+    processed_id = database.discover("processed", "thread", "source", "now", "subject", "sender", "body")
+    failed_id = database.discover("failed", "thread", "source", "now", "subject", "sender", "body")
+    assert processed_id is not None and failed_id is not None
+    database.store_extraction(
+        processed_id,
+        EmailExtraction(source_id="source", newsletter_title="News", newsletter_date=None, overview_zh_tw="摘要", items=[]),
+    )
+    database.fail_message(failed_id, "OLLAMA_SCHEMA_INVALID")
+    database.close()
+    calls: list[tuple[str, str]] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+        def sync_processing_label(self, gmail_id: str, state: str) -> None:
+            calls.append((gmail_id, state))
+            if gmail_id == "failed":
+                raise RuntimeError("Gmail unavailable")
+
+    monkeypatch.setattr(mail_operations, "credentials", lambda *args: object())
+    monkeypatch.setattr(mail_operations, "GmailClient", lambda _: FakeGmailClient())
+
+    assert mail_operations.reconcile_labels(settings).model_dump() == {"status": "partial", "reconciled": 1, "failed": 1}
+    assert calls == [("processed", "processed"), ("failed", "failed")]
+    database = Database(settings.database_path)
+    rows = database.connection.execute("SELECT state,error_code FROM message_label_sync ORDER BY message_id").fetchall()
+    assert [tuple(row) for row in rows] == [("synced", None), ("failed", "GMAIL_LABEL_SYNC_FAILED")]
+    database.close()

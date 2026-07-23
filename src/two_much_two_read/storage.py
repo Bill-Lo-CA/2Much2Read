@@ -22,6 +22,11 @@ CREATE TABLE IF NOT EXISTS messages(
   attempt_count INTEGER NOT NULL DEFAULT 0, last_error_code TEXT,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
+CREATE TABLE IF NOT EXISTS message_label_sync(
+  message_id INTEGER PRIMARY KEY REFERENCES messages(id),
+  state TEXT NOT NULL CHECK(state IN ('synced','failed')),
+  error_code TEXT, updated_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS items(
   id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL REFERENCES messages(id), normalized_title TEXT NOT NULL,
   title TEXT NOT NULL, category TEXT NOT NULL, summary_zh_tw TEXT NOT NULL,
@@ -93,6 +98,10 @@ class Database:
         self.connection.commit()
         return int(cursor.lastrowid) if cursor.rowcount and cursor.lastrowid is not None else None
 
+    def message(self, gmail_id: str) -> sqlite3.Row | None:
+        row = self.connection.execute("SELECT id, state FROM messages WHERE gmail_message_id=?", (gmail_id,)).fetchone()
+        return cast(sqlite3.Row | None, row)
+
     def store_extraction(self, message_id: int, extraction: EmailExtraction, replace: bool = False) -> None:
         now = datetime.now(UTC).isoformat()
         with self.transaction() as connection:
@@ -120,7 +129,10 @@ class Database:
                         now,
                     ),
                 )
-            connection.execute("UPDATE messages SET state='processed', updated_at=? WHERE id=?", (now, message_id))
+            connection.execute(
+                "UPDATE messages SET state='processed', last_error_code=NULL, updated_at=? WHERE id=?", (now, message_id)
+            )
+            connection.execute("DELETE FROM message_label_sync WHERE message_id=?", (message_id,))
 
     def fail_message(self, message_id: int, error_code: str) -> None:
         now = datetime.now(UTC).isoformat()
@@ -130,6 +142,31 @@ class Database:
             (error_code, now, message_id),
         )
         self.connection.commit()
+
+    def mark_label_synced(self, message_id: int) -> None:
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """INSERT INTO message_label_sync(message_id,state,error_code,updated_at) VALUES(?,'synced',NULL,?)
+            ON CONFLICT(message_id) DO UPDATE SET state='synced',error_code=NULL,updated_at=excluded.updated_at""",
+            (message_id, now),
+        )
+        self.connection.commit()
+
+    def fail_label_sync(self, message_id: int) -> None:
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute(
+            """INSERT INTO message_label_sync(message_id,state,error_code,updated_at)
+            VALUES(?,'failed','GMAIL_LABEL_SYNC_FAILED',?)
+            ON CONFLICT(message_id) DO UPDATE SET
+                state='failed',error_code='GMAIL_LABEL_SYNC_FAILED',updated_at=excluded.updated_at""",
+            (message_id, now),
+        )
+        self.connection.commit()
+
+    def messages_for_label_reconciliation(self) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            "SELECT id, gmail_message_id, state FROM messages WHERE state IN ('processed','failed') ORDER BY id"
+        ).fetchall()
 
     def items_for_messages(self, message_ids: list[int], limit: int) -> list[dict[str, object]]:
         if not message_ids:
@@ -162,6 +199,9 @@ class Database:
         )
         self.connection.commit()
         return cursor.lastrowid if cursor.rowcount else None
+
+    def digest_exists(self, digest_key: str) -> bool:
+        return self.connection.execute("SELECT 1 FROM digests WHERE digest_key=?", (digest_key,)).fetchone() is not None
 
     def pending_digests(self) -> list[sqlite3.Row]:
         return self.connection.execute("SELECT * FROM digests WHERE state IN ('pending','failed') ORDER BY id").fetchall()

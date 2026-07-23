@@ -58,6 +58,21 @@ def _enabled_sources(settings: Settings, source_id: str | None) -> list[Source]:
     return sources
 
 
+def _digest_key(settings: Settings, source_id: str | None, now: datetime, force: bool) -> str:
+    key = f"daily:{now.date()}:{settings.digest_timezone}:{source_id or 'all'}"
+    return f"{key}:force:{now.astimezone(UTC).isoformat()}" if force else key
+
+
+def _sync_processing_label(database: Database, gmail: GmailClient, gmail_id: str, message_id: int, state: str) -> bool:
+    try:
+        gmail.sync_processing_label(gmail_id, state)
+    except Exception:
+        database.fail_label_sync(message_id)
+        return False
+    database.mark_label_synced(message_id)
+    return True
+
+
 def _process_source(
     database: Database,
     gmail: GmailClient,
@@ -79,9 +94,16 @@ def _process_source(
     processed = 0
     failed = 0
     message_ids: list[int] = []
-    gmail_ids = gmail.list_messages(query, remaining)
+    gmail_ids = gmail.list_messages(query)
     status(f"{source.id}: {len(gmail_ids)} message(s)")
     for gmail_id in gmail_ids:
+        existing = database.message(gmail_id)
+        if not force and existing is not None and existing["state"] in ("processed", "failed"):
+            if not dry_run and not _sync_processing_label(database, gmail, gmail_id, int(existing["id"]), str(existing["state"])):
+                failed += 1
+            continue
+        if discovered >= remaining:
+            break
         message = gmail.get_message(gmail_id)
         payload = message.get("payload")
         if not isinstance(payload, dict):
@@ -114,15 +136,15 @@ def _process_source(
             failed += 1
             status(f"{source.id}: failed {subject} ({reason})")
             if not dry_run:
-                gmail.add_labels(gmail_id, [failed_label])
+                _sync_processing_label(database, gmail, gmail_id, message_id, "failed")
             continue
         database.store_extraction(message_id, extraction, replace=force)
         processed += 1
         status(f"{source.id}: processed {subject}")
         message_ids.append(message_id)
-        if not dry_run:
-            gmail.add_labels(gmail_id, [processed_label])
-    return len(gmail_ids), discovered, processed, failed, message_ids
+        if not dry_run and not _sync_processing_label(database, gmail, gmail_id, message_id, "processed"):
+            failed += 1
+    return discovered, discovered, processed, failed, message_ids
 
 
 def run_pipeline(
@@ -151,15 +173,25 @@ def run_pipeline(
     try:
         with ProcessLock(settings.lock_path):
             database = Database(Path(":memory:") if dry_run else settings.database_path)
+            timezone = ZoneInfo(settings.digest_timezone)
+            now = (now or datetime.now(timezone)).astimezone(timezone)
+            digest_key = _digest_key(settings, source_id, now, force)
             if not dry_run:
                 run_id = database.start_run("newsletter_digest")
+                if not force and database.digest_exists(digest_key):
+                    result = NewsletterRunResult(
+                        status="skipped", reason="daily_digest_exists", discovered=0, processed=0, failed=0, delivered=0
+                    )
+                    run_status = result.status
+                    return result
             creds = credentials(
                 settings.gmail_credentials_path,
                 settings.gmail_token_path,
                 settings.gmail_oauth_callback_port,
             )
             gmail = GmailClient(creds)
-            gmail.ensure_labels()
+            if not dry_run:
+                gmail.ensure_labels()
             ollama = create_ollama_client(settings)
             remaining = max_messages or settings.gmail_max_messages_per_run
             status(f"Starting {len(sources)} source(s)")
@@ -175,8 +207,6 @@ def run_pipeline(
                 failed += source_failed
                 processed_message_ids.extend(source_message_ids)
 
-            timezone = ZoneInfo(settings.digest_timezone)
-            now = (now or datetime.now(timezone)).astimezone(timezone)
             content = render_digest(
                 _items(database, processed_message_ids, settings.digest_max_items)[: settings.digest_max_items],
                 now,
@@ -186,9 +216,6 @@ def run_pipeline(
             )
             if content and not dry_run:
                 period_start = now - timedelta(days=1)
-                digest_key = f"daily:{now.date()}:{settings.digest_timezone}:{source_id or 'all'}"
-                if force:
-                    digest_key += f":force:{now.astimezone(UTC).isoformat()}"
                 digest_id = database.save_digest(
                     digest_key,
                     period_start.isoformat(),

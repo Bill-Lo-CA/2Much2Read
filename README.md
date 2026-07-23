@@ -56,10 +56,15 @@ The installer copies the supplied client credential to `gmail-client-secret.json
 systemctl --user enable --now 2much2read-runtime.timer
 ```
 
+`DIGEST_SCHEDULE_TIME` and `DIGEST_SCHEDULE_TIMEZONE` control the newsletter timer
+(defaults: `08:00` and `America/Montreal`). After changing either setting, rerun the
+installer to render the systemd timer. Manual CLI runs are unchanged.
+
 Useful commands:
 
 ```bash
 uv run 2much2read labels ensure
+uv run 2much2read labels reconcile
 uv run 2much2read filters ensure
 uv run 2much2read mails list --source SOURCE_ID
 uv run 2much2read delivery retry

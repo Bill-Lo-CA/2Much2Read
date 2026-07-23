@@ -190,6 +190,21 @@ class GmailClient:
             userId="me", id=message_id, body={"addLabelIds": [self.labels[name] for name in names]}
         ).execute()
 
+    def sync_processing_label(self, message_id: str, state: str) -> None:
+        labels = {
+            "processed": (f"{LABEL_PREFIX}Processed", f"{LABEL_PREFIX}Failed"),
+            "failed": (f"{LABEL_PREFIX}Failed", f"{LABEL_PREFIX}Processed"),
+        }
+        try:
+            add_name, remove_name = labels[state]
+        except KeyError as error:
+            raise ValueError(f"unknown processing state: {state}") from error
+        self.service.users().messages().modify(
+            userId="me",
+            id=message_id,
+            body={"addLabelIds": [self.labels[add_name]], "removeLabelIds": [self.labels[remove_name]]},
+        ).execute()
+
     def add_label_id(self, message_id: str, label_id: str) -> None:
         self.service.users().messages().modify(userId="me", id=message_id, body={"addLabelIds": [label_id]}).execute()
 

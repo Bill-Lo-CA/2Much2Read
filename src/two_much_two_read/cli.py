@@ -20,6 +20,7 @@ from .mail_operations import (
     gmail_client,
     inspect_mail,
     list_mails,
+    reconcile_labels,
 )
 from .ollama import OllamaClient, OllamaSchemaError, create_ollama_client
 from .pipeline import retry_delivery, run_pipeline
@@ -97,6 +98,11 @@ def auth_gmail() -> None:
 @labels_app.command("ensure")
 def labels_ensure() -> None:
     invoke(lambda: ensure_labels(Settings()))
+
+
+@labels_app.command("reconcile")
+def labels_reconcile() -> None:
+    emit(reconcile_labels(Settings()))
 
 
 @filters_app.command("ensure")

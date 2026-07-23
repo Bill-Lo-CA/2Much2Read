@@ -6,6 +6,7 @@ from .command_models import (
     CommandResult,
     FiltersResult,
     FilterView,
+    LabelsReconcileResult,
     LabelsResult,
     MailInspectionResult,
     MailListResult,
@@ -18,6 +19,7 @@ from .config import Settings, load_sources
 from .gmail import FilterStatus, GmailClient, credentials, display_id, message_headers
 from .mime import extract_gmail_payload
 from .ollama import create_ollama_client
+from .storage import Database
 from .subscription_operations import configured_candidates
 
 
@@ -131,6 +133,34 @@ def ensure_labels(settings: Settings) -> LabelsResult:
     gmail.ensure_labels()
     source_labels = gmail.ensure_source_labels(sources)
     return LabelsResult(labels=sorted(["NewsletterBot/Failed", "NewsletterBot/Processed", *source_labels]))
+
+
+def reconcile_labels(settings: Settings) -> LabelsReconcileResult:
+    reconciled = 0
+    failed = 0
+    with ProcessLock(settings.lock_path):
+        database = Database(settings.database_path)
+        try:
+            gmail = GmailClient(
+                credentials(
+                    settings.gmail_credentials_path,
+                    settings.gmail_token_path,
+                    settings.gmail_oauth_callback_port,
+                )
+            )
+            gmail.ensure_labels()
+            for message in database.messages_for_label_reconciliation():
+                try:
+                    gmail.sync_processing_label(str(message["gmail_message_id"]), str(message["state"]))
+                except Exception:
+                    database.fail_label_sync(int(message["id"]))
+                    failed += 1
+                else:
+                    database.mark_label_synced(int(message["id"]))
+                    reconciled += 1
+        finally:
+            database.close()
+    return LabelsReconcileResult(status="partial" if failed else "ok", reconciled=reconciled, failed=failed)
 
 
 def filters(settings: Settings, ensure: bool) -> FiltersResult:
