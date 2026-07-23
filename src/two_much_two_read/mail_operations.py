@@ -46,12 +46,14 @@ def mail_query(settings: Settings, gmail: GmailClient, selector: MailSelector, l
         if not isinstance(source, GmailSource):
             raise ValueError(f"source {selector.source!r} is not a Gmail source")
         return source.gmail_query
-    candidates = configured_candidates(settings, gmail, limit)
-    candidate = next((item for item in candidates if item.id == selector.subscription), None)
-    if candidate is None:
-        available = ", ".join(item.id for item in candidates) or "(none)"
-        raise ValueError(f"unknown subscription id {selector.subscription!r}; available subscription IDs: {available}")
-    return candidate.proposal.gmail_query
+    if selector.subscription is not None:
+        candidates = configured_candidates(settings, gmail, limit)
+        candidate = next((item for item in candidates if item.id == selector.subscription), None)
+        if candidate is None:
+            available = ", ".join(item.id for item in candidates) or "(none)"
+            raise ValueError(f"unknown subscription id {selector.subscription!r}; available subscription IDs: {available}")
+        return candidate.proposal.gmail_query
+    return ""
 
 
 def list_mails(settings: Settings, selector: MailSelector, limit: int) -> MailListResult:
