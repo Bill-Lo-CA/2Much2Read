@@ -78,9 +78,9 @@ def main() -> None:
 
     with ProcessLock(settings.lock_path):
         message_ids, _ = inspect()
-        reset_database(settings.database_path)
         for message_id in message_ids:
             gmail.remove_labels(message_id, PROCESSING_LABELS)
+        reset_database(settings.database_path)
         print(f"Reset complete: schema v{SCHEMA_VERSION}.")
 
 
