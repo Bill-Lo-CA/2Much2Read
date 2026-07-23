@@ -6,7 +6,7 @@ import stat
 import tempfile
 from contextlib import suppress
 from pathlib import Path
-from typing import Any
+from typing import Annotated, Any, Literal
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -43,16 +43,13 @@ class GmailFilter(BaseModel):
         return value
 
 
-class Source(BaseModel):
+class SourceBase(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     id: str
     name: str
     enabled: bool = True
     category: str = "OTHER"
-    gmail_query: str
-    gmail_filter: GmailFilter | None = None
-    max_items_per_email: int = Field(default=10, ge=1, le=50)
 
     @field_validator("id")
     @classmethod
@@ -64,10 +61,46 @@ class Source(BaseModel):
         return value
 
 
+class GmailSource(SourceBase):
+    type: Literal["gmail"] = "gmail"
+    gmail_query: str
+    gmail_filter: GmailFilter | None = None
+    max_items_per_email: int = Field(default=10, ge=1, le=50)
+
+
+class HackerNewsSource(SourceBase):
+    type: Literal["hackernews"] = "hackernews"
+    feed: Literal["topstories", "beststories", "newstories", "askstories", "showstories"] = "beststories"
+    max_story_candidates: int = Field(default=60, ge=1, le=200)
+    max_articles_per_run: int = Field(default=10, ge=1, le=30)
+    max_age_hours: int = Field(default=36, ge=1, le=168)
+    min_score: int = Field(default=0, ge=0, le=100_000)
+    min_comments: int = Field(default=0, ge=0, le=100_000)
+    require_full_text: bool = True
+    allow_metadata_fallback: bool = False
+
+
+Source = GmailSource
+SourceConfig = Annotated[GmailSource | HackerNewsSource, Field(discriminator="type")]
+
+
 class Sources(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    sources: list[Source]
+    sources: list[SourceConfig]
+
+    @model_validator(mode="before")
+    @classmethod
+    def default_legacy_gmail_type(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or not isinstance(value.get("sources"), list):
+            return value
+        sources: list[object] = []
+        for source in value["sources"]:
+            if isinstance(source, dict) and "type" not in source and "gmail_query" in source:
+                sources.append({"type": "gmail", **source})
+            else:
+                sources.append(source)
+        return {**value, "sources": sources}
 
     @model_validator(mode="after")
     def unique_ids(self) -> Sources:
@@ -194,10 +227,15 @@ def _appended_sources_content(path: Path, additions: list[Source]) -> tuple[str,
     original = path.read_text(encoding="utf-8")
     if not re.search(r"(?m)^sources:\s*$", original):
         raise ValueError("sources configuration must use a top-level block-style 'sources:' list")
+    source_data = []
+    for source in additions:
+        data = source.model_dump(exclude_defaults=True)
+        data["type"] = source.type
+        source_data.append(data)
     rendered = [
         f"  {line}"
         for line in yaml.safe_dump(
-            {"sources": [source.model_dump(exclude_defaults=True) for source in additions]},
+            {"sources": source_data},
             allow_unicode=True,
             sort_keys=False,
         ).splitlines()[1:]

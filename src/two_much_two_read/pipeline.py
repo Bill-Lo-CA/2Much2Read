@@ -10,7 +10,7 @@ from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resu
 from two_read_runtime.locking import ProcessLock
 
 from .command_models import DeliveryCheckpointResetResult, NewsletterRetryResult, NewsletterRunResult
-from .config import Settings, Source, load_sources
+from .config import GmailSource, Settings, load_sources
 from .digest import render_digest
 from .gmail import GmailClient, credentials, message_headers
 from .mime import EmptyEmailError, extract_gmail_payload
@@ -25,9 +25,9 @@ def _ignore_status(_: str) -> None:
     pass
 
 
-def _items(database: Database, message_ids: list[int], maximum: int) -> list[DigestItem]:
+def _items(database: Database, document_ids: list[int], maximum: int) -> list[DigestItem]:
     result: list[DigestItem] = []
-    for row in database.items_for_messages(message_ids, maximum * 5):
+    for row in database.items_for_documents(document_ids, maximum * 5):
         result.append(
             DigestItem.model_validate(
                 {
@@ -45,7 +45,7 @@ def _items(database: Database, message_ids: list[int], maximum: int) -> list[Dig
     return result
 
 
-def _enabled_sources(settings: Settings, source_id: str | None) -> list[Source]:
+def _enabled_sources(settings: Settings, source_id: str | None) -> list[GmailSource]:
     sources = [source for source in load_sources(settings.sources_config_path).sources if source.enabled]
     if source_id:
         matching_sources = [source for source in sources if source.id == source_id]
@@ -55,7 +55,10 @@ def _enabled_sources(settings: Settings, source_id: str | None) -> list[Source]:
         sources = matching_sources
     if not sources:
         raise ValueError("no enabled sources configured")
-    return sources
+    unsupported = [source.id for source in sources if not isinstance(source, GmailSource)]
+    if unsupported:
+        raise ValueError(f"Hacker News sources are not available yet: {', '.join(unsupported)}")
+    return [source for source in sources if isinstance(source, GmailSource)]
 
 
 def _digest_key(settings: Settings, source_id: str | None, now: datetime, force: bool) -> str:
@@ -63,13 +66,13 @@ def _digest_key(settings: Settings, source_id: str | None, now: datetime, force:
     return f"{key}:force:{now.astimezone(UTC).isoformat()}" if force else key
 
 
-def _sync_processing_label(database: Database, gmail: GmailClient, gmail_id: str, message_id: int, state: str) -> bool:
+def _sync_processing_label(database: Database, gmail: GmailClient, gmail_id: str, document_id: int, state: str) -> bool:
     try:
         gmail.sync_processing_label(gmail_id, state)
     except Exception:
-        database.fail_label_sync(message_id)
+        database.fail_label_sync(document_id)
         return False
-    database.mark_label_synced(message_id)
+    database.mark_label_synced(document_id)
     return True
 
 
@@ -78,7 +81,7 @@ def _process_source(
     gmail: GmailClient,
     ollama: OllamaClient,
     settings: Settings,
-    source: Source,
+    source: GmailSource,
     remaining: int,
     status: StatusReporter,
     *,
@@ -93,11 +96,11 @@ def _process_source(
     discovered = 0
     processed = 0
     failed = 0
-    processed_messages: list[tuple[int, str]] = []
+    processed_documents: list[tuple[int, str]] = []
     gmail_ids = gmail.list_messages(query)
     status(f"{source.id}: {len(gmail_ids)} message(s)")
     for gmail_id in gmail_ids:
-        existing = database.message(gmail_id)
+        existing = database.gmail_document(gmail_id)
         if not force and existing is not None and existing["state"] in ("processed", "failed"):
             if not dry_run and not _sync_processing_label(database, gmail, gmail_id, int(existing["id"]), str(existing["state"])):
                 failed += 1
@@ -109,12 +112,12 @@ def _process_source(
         if not isinstance(payload, dict):
             continue
         headers = message_headers(message)
-        received = datetime.fromtimestamp(int(str(message.get("internalDate", "0"))) / 1000, tz=UTC).isoformat()
+        received = datetime.fromtimestamp(int(str(message.get("internalDate", "0"))) / 1000, tz=UTC)
         subject = headers.get("subject") or gmail_id
         try:
             body = extract_gmail_payload(payload)
         except EmptyEmailError:
-            message_id = database.discover(
+            document_id = database.discover_gmail_document(
                 gmail_id,
                 str(message.get("threadId", "")),
                 source.id,
@@ -122,20 +125,21 @@ def _process_source(
                 headers.get("subject", ""),
                 headers.get("from", ""),
                 "",
+                False,
                 force=force,
             )
-            if message_id is None:
+            if document_id is None:
                 continue
             discovered += 1
-            database.fail_message(message_id, "EMAIL_NO_USABLE_TEXT")
+            database.fail_document(document_id, "EMAIL_NO_USABLE_TEXT")
             failed += 1
             status(f"{source.id}: failed {subject} (EMAIL_NO_USABLE_TEXT)")
             if not dry_run:
-                _sync_processing_label(database, gmail, gmail_id, message_id, "failed")
+                _sync_processing_label(database, gmail, gmail_id, document_id, "failed")
             continue
         truncated = len(body) > 45_000
         body = body[:45_000] if truncated else body
-        message_id = database.discover(
+        document_id = database.discover_gmail_document(
             gmail_id,
             str(message.get("threadId", "")),
             source.id,
@@ -143,9 +147,10 @@ def _process_source(
             headers.get("subject", ""),
             headers.get("from", ""),
             body,
+            truncated,
             force=force,
         )
-        if message_id is None:
+        if document_id is None:
             continue
         discovered += 1
         status(f"{source.id}: extracting {subject}")
@@ -153,17 +158,17 @@ def _process_source(
             extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
         except OllamaSchemaError as error:
             reason = str(error).split(" response_preview=", 1)[0]
-            database.fail_message(message_id, reason)
+            database.fail_document(document_id, reason)
             failed += 1
             status(f"{source.id}: failed {subject} ({reason})")
             if not dry_run:
-                _sync_processing_label(database, gmail, gmail_id, message_id, "failed")
+                _sync_processing_label(database, gmail, gmail_id, document_id, "failed")
             continue
-        database.store_extraction(message_id, extraction, replace=True, finalize=False)
+        database.store_extraction(document_id, extraction, replace=True, finalize=False)
         processed += 1
         status(f"{source.id}: processed {subject}")
-        processed_messages.append((message_id, gmail_id))
-    return discovered, discovered, processed, failed, processed_messages
+        processed_documents.append((document_id, gmail_id))
+    return discovered, discovered, processed, failed, processed_documents
 
 
 def run_pipeline(
@@ -185,7 +190,7 @@ def run_pipeline(
     run_status = "failed"
     error_summary: str | None = None
     processed = 0
-    processed_messages: list[tuple[int, str]] = []
+    processed_documents: list[tuple[int, str]] = []
     discovered = 0
     failed = 0
     delivered = 0
@@ -217,19 +222,19 @@ def run_pipeline(
             for source in sources:
                 if remaining <= 0:
                     break
-                used, source_discovered, source_processed, source_failed, source_messages = _process_source(
+                used, source_discovered, source_processed, source_failed, source_documents = _process_source(
                     database, gmail, ollama, settings, source, remaining, status, force=force, dry_run=dry_run
                 )
                 remaining -= used
                 discovered += source_discovered
                 processed += source_processed
                 failed += source_failed
-                processed_messages.extend(source_messages)
+                processed_documents.extend(source_documents)
 
-            processed_message_ids = [message_id for message_id, _ in processed_messages]
+            processed_document_ids = [document_id for document_id, _ in processed_documents]
 
             content = render_digest(
-                _items(database, processed_message_ids, settings.digest_max_items)[: settings.digest_max_items],
+                _items(database, processed_document_ids, settings.digest_max_items)[: settings.digest_max_items],
                 now,
                 ", ".join(dict.fromkeys(source.category for source in sources)),
                 ", ".join(source.name for source in sources),
@@ -246,15 +251,15 @@ def run_pipeline(
                         now.isoformat(),
                         settings.digest_timezone,
                         content,
-                        processed_message_ids,
+                        processed_document_ids,
                     )
                     finalized = digest_id is not None
-                elif processed_message_ids:
-                    database.finalize_extractions(processed_message_ids)
+                elif processed_document_ids:
+                    database.finalize_documents(processed_document_ids)
                     finalized = True
                 if finalized:
-                    for message_id, gmail_id in processed_messages:
-                        if not _sync_processing_label(database, gmail, gmail_id, message_id, "processed"):
+                    for document_id, gmail_id in processed_documents:
+                        if not _sync_processing_label(database, gmail, gmail_id, document_id, "processed"):
                             failed += 1
                 if digest_id is not None and not no_deliver:
                     status("Delivering digest")

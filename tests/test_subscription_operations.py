@@ -40,3 +40,20 @@ def test_subscription_candidates_handle_shared_senders_and_source_id_collisions(
     assert [candidate.id for candidate in candidates] == ["alpha-example-com-2", "beta-example-com"]
     assert all(candidate.query_ambiguous for candidate in candidates)
     assert all(candidate.base_query == 'from:news@example.com from:"Digest"' for candidate in candidates)
+
+
+def test_subscription_candidates_reserve_non_gmail_source_ids() -> None:
+    message = {
+        "labelIds": [],
+        "payload": {
+            "headers": [
+                {"name": "From", "value": "Digest <news@example.com>"},
+                {"name": "List-ID", "value": "<hn-best>"},
+                {"name": "List-Unsubscribe", "value": "<mailto:unsubscribe@example.com>"},
+            ]
+        },
+    }
+
+    candidates = subscription_candidates([message], [], set(), {}, {"hn-best"})
+
+    assert candidates[0].id == "hn-best-2"

@@ -10,6 +10,7 @@ from .command_models import SubscriptionCandidate, SubscriptionListResult, Subsc
 from .config import (
     ExcludedSubscription,
     GmailFilter,
+    GmailSource,
     Settings,
     Source,
     excluded_subscriptions_path,
@@ -62,7 +63,11 @@ def sender_from_source(source: Source) -> str | None:
 
 
 def subscription_candidates(
-    messages: list[dict[str, Any]], configured: list[Source], excluded_keys: set[str], labels: dict[str, str]
+    messages: list[dict[str, Any]],
+    configured: list[Source],
+    excluded_keys: set[str],
+    labels: dict[str, str],
+    used_ids: set[str] | None = None,
 ) -> list[SubscriptionCandidate]:
     configured_by_sender: dict[str, list[Source]] = {}
     for source in configured:
@@ -103,7 +108,7 @@ def subscription_candidates(
         identity = from_identity(str(item["from_header"]))
         from_counts[identity] = from_counts.get(identity, 0) + 1
 
-    used_ids = {source.id for source in configured}
+    used_ids = set(used_ids or ()) | {source.id for source in configured}
     candidates: list[SubscriptionCandidate] = []
     for item in (grouped[key] for key in sorted(grouped)):
         sender = str(item["sender"])
@@ -158,12 +163,13 @@ def subscription_candidates(
 
 
 def configured_candidates(settings: Settings, gmail: GmailClient, limit: int) -> list[SubscriptionCandidate]:
-    configured = load_sources(settings.sources_config_path).sources
+    sources = load_sources(settings.sources_config_path).sources
+    configured = [source for source in sources if isinstance(source, GmailSource)]
     path = excluded_subscriptions_path(settings.sources_config_path)
     excluded = {item.key for item in load_excluded_subscriptions(path).excluded_subscriptions}
     messages = [gmail.get_message_metadata(message_id) for message_id in gmail.list_messages("newer_than:30d", limit)]
     labels = {label_id: name for name, label_id in gmail.labels.items()}
-    return subscription_candidates(messages, configured, excluded, labels)
+    return subscription_candidates(messages, configured, excluded, labels, {source.id for source in sources})
 
 
 def list_subscriptions(settings: Settings, gmail: GmailClient, limit: int) -> SubscriptionListResult:

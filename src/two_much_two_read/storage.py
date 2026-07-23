@@ -11,24 +11,29 @@ from pathlib import Path
 from typing import cast
 
 from .digest import canonical_url, normalized_title
-from .schemas import EmailExtraction
+from .schemas import EmailExtraction, ResolvedContent, SourceDocument
 
-SCHEMA = """
+SCHEMA_VERSION = 2
+SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS messages(
-  id INTEGER PRIMARY KEY, gmail_message_id TEXT NOT NULL UNIQUE, gmail_thread_id TEXT NOT NULL,
-  source_id TEXT NOT NULL, received_at TEXT NOT NULL, subject TEXT NOT NULL, sender TEXT NOT NULL,
-  body_sha256 TEXT NOT NULL, state TEXT NOT NULL CHECK(state IN ('discovered','processing','processed','failed')),
+CREATE TABLE IF NOT EXISTS documents(
+  id INTEGER PRIMARY KEY, source_type TEXT NOT NULL CHECK(source_type IN ('gmail','hackernews')),
+  source_id TEXT NOT NULL, external_id TEXT NOT NULL, published_at TEXT NOT NULL, title TEXT NOT NULL,
+  author TEXT, source_url TEXT, discussion_url TEXT,
+  content_basis TEXT NOT NULL CHECK(content_basis IN ('newsletter','article','hn_self_post','metadata')),
+  content_sha256 TEXT NOT NULL, content_characters INTEGER NOT NULL,
+  state TEXT NOT NULL CHECK(state IN ('discovered','processing','processed','failed')),
   attempt_count INTEGER NOT NULL DEFAULT 0, last_error_code TEXT,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE(source_type, source_id, external_id)
 );
-CREATE TABLE IF NOT EXISTS message_label_sync(
-  message_id INTEGER PRIMARY KEY REFERENCES messages(id),
-  state TEXT NOT NULL CHECK(state IN ('synced','failed')),
-  error_code TEXT, updated_at TEXT NOT NULL
+CREATE TABLE IF NOT EXISTS gmail_document_state(
+  document_id INTEGER PRIMARY KEY REFERENCES documents(id), gmail_message_id TEXT NOT NULL UNIQUE,
+  gmail_thread_id TEXT NOT NULL, label_sync_state TEXT CHECK(label_sync_state IN ('synced','failed')),
+  label_sync_error_code TEXT, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS items(
-  id INTEGER PRIMARY KEY, message_id INTEGER NOT NULL REFERENCES messages(id), normalized_title TEXT NOT NULL,
+  id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL REFERENCES documents(id), normalized_title TEXT NOT NULL,
   title TEXT NOT NULL, category TEXT NOT NULL, summary_zh_tw TEXT NOT NULL,
   why_it_matters_zh_tw TEXT NOT NULL, source_url TEXT, canonical_url TEXT,
   importance INTEGER NOT NULL, confidence REAL NOT NULL, tags_json TEXT NOT NULL, created_at TEXT NOT NULL
@@ -44,8 +49,12 @@ CREATE TABLE IF NOT EXISTS runs(
   discovered_count INTEGER NOT NULL DEFAULT 0, processed_count INTEGER NOT NULL DEFAULT 0,
   failed_count INTEGER NOT NULL DEFAULT 0, delivered_digest_count INTEGER NOT NULL DEFAULT 0, error_summary TEXT
 );
-INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(1, datetime('now'));
+INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES({SCHEMA_VERSION}, datetime('now'));
 """
+
+
+class DatabaseSchemaResetRequiredError(ValueError):
+    pass
 
 
 class Database:
@@ -53,44 +62,61 @@ class Database:
         path.parent.mkdir(parents=True, exist_ok=True)
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
+        version = self._schema_version()
+        if version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
+            self.connection.close()
+            raise DatabaseSchemaResetRequiredError(
+                f"DATABASE_SCHEMA_RESET_REQUIRED: back up {path} and remove it before rerunning 2much2read"
+            )
         self.connection.execute("PRAGMA journal_mode=WAL")
         self.connection.execute("PRAGMA foreign_keys=ON")
         self.connection.execute("PRAGMA busy_timeout=5000")
         self.connection.executescript(SCHEMA)
+
+    def _schema_version(self) -> int | None:
+        row = self.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
+        if row is None:
+            return None
+        row = self.connection.execute("SELECT version FROM schema_version ORDER BY version DESC LIMIT 1").fetchone()
+        return int(row[0]) if row is not None else -1
+
+    def _has_user_tables(self) -> bool:
+        return bool(
+            self.connection.execute(
+                "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1"
+            ).fetchone()
+        )
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
         with self.connection:
             yield self.connection
 
-    def discover(
-        self,
-        gmail_id: str,
-        thread_id: str,
-        source_id: str,
-        received_at: str,
-        subject: str,
-        sender: str,
-        body: str,
-        force: bool = False,
-    ) -> int | None:
+    def discover_document(self, document: SourceDocument, content: ResolvedContent, force: bool = False) -> int | None:
         now = datetime.now(UTC).isoformat()
-        body_sha256 = hashlib.sha256(body.encode()).hexdigest()
-        existing = self.connection.execute("SELECT id, state FROM messages WHERE gmail_message_id=?", (gmail_id,)).fetchone()
+        existing = self.connection.execute(
+            "SELECT id, state FROM documents WHERE source_type=? AND source_id=? AND external_id=?",
+            (document.source_type, document.source_id, document.external_id),
+        ).fetchone()
         if existing and (force or existing["state"] == "discovered"):
             return int(existing["id"])
         cursor = self.connection.execute(
-            """INSERT OR IGNORE INTO messages
-            (gmail_message_id,gmail_thread_id,source_id,received_at,subject,sender,body_sha256,state,created_at,updated_at)
-            VALUES(?,?,?,?,?,?,?,'discovered',?,?)""",
+            """INSERT OR IGNORE INTO documents
+            (source_type,source_id,external_id,published_at,title,author,source_url,discussion_url,
+             content_basis,content_sha256,content_characters,state,created_at,updated_at)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,'discovered',?,?)""",
             (
-                gmail_id,
-                thread_id,
-                source_id,
-                received_at,
-                subject,
-                sender,
-                body_sha256,
+                document.source_type,
+                document.source_id,
+                document.external_id,
+                document.published_at.isoformat(),
+                document.title,
+                document.author,
+                str(document.source_url) if document.source_url else None,
+                str(document.discussion_url) if document.discussion_url else None,
+                content.basis,
+                hashlib.sha256(content.text.encode()).hexdigest(),
+                len(content.text),
                 now,
                 now,
             ),
@@ -98,26 +124,66 @@ class Database:
         self.connection.commit()
         return int(cursor.lastrowid) if cursor.rowcount and cursor.lastrowid is not None else None
 
-    def message(self, gmail_id: str) -> sqlite3.Row | None:
-        row = self.connection.execute("SELECT id, state FROM messages WHERE gmail_message_id=?", (gmail_id,)).fetchone()
+    def discover_gmail_document(
+        self,
+        gmail_id: str,
+        thread_id: str,
+        source_id: str,
+        received_at: datetime,
+        subject: str,
+        sender: str,
+        body: str,
+        truncated: bool,
+        force: bool = False,
+    ) -> int | None:
+        document = SourceDocument(
+            source_type="gmail",
+            source_id=source_id,
+            external_id=gmail_id,
+            title=subject,
+            author=sender or None,
+            published_at=received_at,
+        )
+        document_id = self.discover_document(
+            document,
+            ResolvedContent(document=document, text=body, basis="newsletter", truncated=truncated),
+            force,
+        )
+        if document_id is not None:
+            now = datetime.now(UTC).isoformat()
+            self.connection.execute(
+                """INSERT INTO gmail_document_state(document_id,gmail_message_id,gmail_thread_id,updated_at)
+                VALUES(?,?,?,?) ON CONFLICT(document_id) DO UPDATE SET
+                gmail_message_id=excluded.gmail_message_id,gmail_thread_id=excluded.gmail_thread_id,updated_at=excluded.updated_at""",
+                (document_id, gmail_id, thread_id, now),
+            )
+            self.connection.commit()
+        return document_id
+
+    def gmail_document(self, gmail_id: str) -> sqlite3.Row | None:
+        row = self.connection.execute(
+            """SELECT d.id, d.state FROM documents d JOIN gmail_document_state g ON g.document_id=d.id
+            WHERE g.gmail_message_id=?""",
+            (gmail_id,),
+        ).fetchone()
         return cast(sqlite3.Row | None, row)
 
     def store_extraction(
-        self, message_id: int, extraction: EmailExtraction, replace: bool = False, finalize: bool = True
+        self, document_id: int, extraction: EmailExtraction, replace: bool = False, finalize: bool = True
     ) -> None:
         now = datetime.now(UTC).isoformat()
         with self.transaction() as connection:
             if replace:
-                connection.execute("DELETE FROM items WHERE message_id=?", (message_id,))
+                connection.execute("DELETE FROM items WHERE document_id=?", (document_id,))
             for item in extraction.items:
                 url = str(item.source_url) if item.source_url else None
                 connection.execute(
                     """INSERT INTO items
-                    (message_id,normalized_title,title,category,summary_zh_tw,why_it_matters_zh_tw,
+                    (document_id,normalized_title,title,category,summary_zh_tw,why_it_matters_zh_tw,
                      source_url,canonical_url,importance,confidence,tags_json,created_at)
                     VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
-                        message_id,
+                        document_id,
                         normalized_title(item.title),
                         item.title,
                         item.category,
@@ -132,66 +198,69 @@ class Database:
                     ),
                 )
             if finalize:
-                self._finalize_extractions(connection, [message_id], now)
+                self._finalize_documents(connection, [document_id], now)
 
     @staticmethod
-    def _finalize_extractions(connection: sqlite3.Connection, message_ids: list[int], now: str) -> None:
-        if not message_ids:
+    def _finalize_documents(connection: sqlite3.Connection, document_ids: list[int], now: str) -> None:
+        if not document_ids:
             return
-        placeholders = ",".join("?" for _ in message_ids)
+        placeholders = ",".join("?" for _ in document_ids)
         connection.execute(
-            f"UPDATE messages SET state='processed', last_error_code=NULL, updated_at=? WHERE id IN ({placeholders})",
-            (now, *message_ids),
+            f"UPDATE documents SET state='processed', last_error_code=NULL, updated_at=? WHERE id IN ({placeholders})",
+            (now, *document_ids),
         )
-        connection.execute(f"DELETE FROM message_label_sync WHERE message_id IN ({placeholders})", message_ids)
+        connection.execute(
+            f"""UPDATE gmail_document_state SET label_sync_state=NULL,label_sync_error_code=NULL,updated_at=?
+            WHERE document_id IN ({placeholders})""",
+            (now, *document_ids),
+        )
 
-    def finalize_extractions(self, message_ids: list[int]) -> None:
+    def finalize_documents(self, document_ids: list[int]) -> None:
         with self.transaction() as connection:
-            self._finalize_extractions(connection, message_ids, datetime.now(UTC).isoformat())
+            self._finalize_documents(connection, document_ids, datetime.now(UTC).isoformat())
 
-    def fail_message(self, message_id: int, error_code: str) -> None:
+    def fail_document(self, document_id: int, error_code: str) -> None:
         now = datetime.now(UTC).isoformat()
         self.connection.execute(
-            """UPDATE messages SET state='failed', attempt_count=attempt_count+1,
+            """UPDATE documents SET state='failed', attempt_count=attempt_count+1,
             last_error_code=?, updated_at=? WHERE id=?""",
-            (error_code, now, message_id),
+            (error_code, now, document_id),
         )
         self.connection.commit()
 
-    def mark_label_synced(self, message_id: int) -> None:
+    def mark_label_synced(self, document_id: int) -> None:
         now = datetime.now(UTC).isoformat()
         self.connection.execute(
-            """INSERT INTO message_label_sync(message_id,state,error_code,updated_at) VALUES(?,'synced',NULL,?)
-            ON CONFLICT(message_id) DO UPDATE SET state='synced',error_code=NULL,updated_at=excluded.updated_at""",
-            (message_id, now),
+            """UPDATE gmail_document_state SET label_sync_state='synced',label_sync_error_code=NULL,updated_at=?
+            WHERE document_id=?""",
+            (now, document_id),
         )
         self.connection.commit()
 
-    def fail_label_sync(self, message_id: int) -> None:
+    def fail_label_sync(self, document_id: int) -> None:
         now = datetime.now(UTC).isoformat()
         self.connection.execute(
-            """INSERT INTO message_label_sync(message_id,state,error_code,updated_at)
-            VALUES(?,'failed','GMAIL_LABEL_SYNC_FAILED',?)
-            ON CONFLICT(message_id) DO UPDATE SET
-                state='failed',error_code='GMAIL_LABEL_SYNC_FAILED',updated_at=excluded.updated_at""",
-            (message_id, now),
+            """UPDATE gmail_document_state SET label_sync_state='failed',label_sync_error_code='GMAIL_LABEL_SYNC_FAILED',
+            updated_at=? WHERE document_id=?""",
+            (now, document_id),
         )
         self.connection.commit()
 
-    def messages_for_label_reconciliation(self) -> list[sqlite3.Row]:
+    def gmail_documents_for_label_reconciliation(self) -> list[sqlite3.Row]:
         return self.connection.execute(
-            "SELECT id, gmail_message_id, state FROM messages WHERE state IN ('processed','failed') ORDER BY id"
+            """SELECT d.id, g.gmail_message_id, d.state FROM documents d
+            JOIN gmail_document_state g ON g.document_id=d.id
+            WHERE d.state IN ('processed','failed') ORDER BY d.id"""
         ).fetchall()
 
-    def items_for_messages(self, message_ids: list[int], limit: int) -> list[dict[str, object]]:
-        if not message_ids:
+    def items_for_documents(self, document_ids: list[int], limit: int) -> list[dict[str, object]]:
+        if not document_ids:
             return []
-        placeholders = ",".join("?" for _ in message_ids)
+        placeholders = ",".join("?" for _ in document_ids)
         rows = self.connection.execute(
-            f"""SELECT i.*, m.received_at FROM items i JOIN messages m ON m.id=i.message_id
-            WHERE i.message_id IN ({placeholders})
-            ORDER BY m.received_at DESC LIMIT ?""",
-            (*message_ids, limit),
+            f"""SELECT i.*, d.published_at FROM items i JOIN documents d ON d.id=i.document_id
+            WHERE i.document_id IN ({placeholders}) ORDER BY d.published_at DESC LIMIT ?""",
+            (*document_ids, limit),
         ).fetchall()
         return [dict(row) for row in rows]
 
@@ -202,7 +271,7 @@ class Database:
         period_end: str,
         timezone: str,
         content: str,
-        message_ids: list[int] | None = None,
+        document_ids: list[int] | None = None,
     ) -> int | None:
         now = datetime.now(UTC).isoformat()
         with self.transaction() as connection:
@@ -221,8 +290,8 @@ class Database:
                     now,
                 ),
             )
-            if cursor.rowcount and message_ids:
-                self._finalize_extractions(connection, message_ids, now)
+            if cursor.rowcount and document_ids:
+                self._finalize_documents(connection, document_ids, now)
             return int(cursor.lastrowid) if cursor.rowcount and cursor.lastrowid is not None else None
 
     def digest_exists(self, digest_key: str) -> bool:
@@ -260,7 +329,7 @@ class Database:
     def counts(self) -> dict[str, int]:
         return {
             table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            for table in ("messages", "items", "digests", "runs")
+            for table in ("documents", "gmail_document_state", "items", "digests", "runs")
         }
 
     def backup(self, path: Path) -> None:
@@ -274,7 +343,7 @@ class Database:
     def reset(self) -> dict[str, int]:
         counts = self.counts()
         with self.transaction() as connection:
-            for table in ("items", "messages", "digests", "runs"):
+            for table in ("items", "gmail_document_state", "documents", "digests", "runs"):
                 connection.execute(f"DELETE FROM {table}")
         return counts
 

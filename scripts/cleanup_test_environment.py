@@ -5,7 +5,7 @@ import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
-from two_much_two_read.config import Settings, load_sources
+from two_much_two_read.config import GmailSource, Settings, load_sources
 from two_much_two_read.gmail import GmailClient, credentials, find_label_id
 from two_much_two_read.storage import Database
 from two_read_runtime.locking import ProcessLock
@@ -15,12 +15,12 @@ PROCESSING_LABELS = ["NewsletterBot/Processed", "NewsletterBot/Failed"]
 
 def database_counts(path: Path) -> dict[str, int]:
     if not path.is_file():
-        return {"messages": 0, "items": 0, "digests": 0, "runs": 0}
+        return {"documents": 0, "items": 0, "digests": 0, "runs": 0}
     connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
     try:
         return {
             table: int(connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            for table in ("messages", "items", "digests", "runs")
+            for table in ("documents", "items", "digests", "runs")
         }
     finally:
         connection.close()
@@ -42,7 +42,9 @@ def main() -> None:
     parser.add_argument("--apply", action="store_true", help="perform the reset; otherwise only show counts")
     args = parser.parse_args()
     settings = Settings()
-    queries = [source.gmail_query for source in load_sources(settings.sources_config_path).sources]
+    queries = [
+        source.gmail_query for source in load_sources(settings.sources_config_path).sources if isinstance(source, GmailSource)
+    ]
     with ProcessLock(settings.lock_path):
         gmail = GmailClient(
             credentials(

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from base64 import urlsafe_b64encode
-from datetime import datetime
+from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -24,6 +24,22 @@ def write_sources(path: Path, *, enabled: bool = True) -> None:
         f"sources:\n  - id: alphasignal\n    name: AlphaSignal\n    enabled: {str(enabled).lower()}\n"
         "    gmail_query: 'from:alphasignal.ai'\n",
         encoding="utf-8",
+    )
+
+
+def discover_gmail_document(
+    database: Database, gmail_id: str, source_id: str, body: str = "body", *, force: bool = False
+) -> int | None:
+    return database.discover_gmail_document(
+        gmail_id,
+        "thread",
+        source_id,
+        datetime(2026, 7, 23, tzinfo=UTC),
+        "subject",
+        "sender",
+        body,
+        False,
+        force,
     )
 
 
@@ -113,6 +129,17 @@ def test_no_enabled_sources_has_distinct_error(tmp_path: Path) -> None:
     write_sources(sources_path, enabled=False)
 
     with pytest.raises(ValueError, match="no enabled sources configured"):
+        run_pipeline(Settings(sources_config_path=sources_path), dry_run=True)
+
+
+def test_hacker_news_source_is_explicitly_unavailable_until_its_ingestion_pr(tmp_path: Path) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n  - type: hackernews\n    id: hn-best\n    name: Hacker News Best\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="Hacker News sources are not available yet: hn-best"):
         run_pipeline(Settings(sources_config_path=sources_path), dry_run=True)
 
 
@@ -461,7 +488,10 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
         "alphasignal: processed good",
     ]
     database = Database(settings.database_path)
-    rows = database.connection.execute("SELECT gmail_message_id, state, last_error_code FROM messages ORDER BY id").fetchall()
+    rows = database.connection.execute(
+        """SELECT g.gmail_message_id,d.state,d.last_error_code FROM documents d
+        JOIN gmail_document_state g ON g.document_id=d.id ORDER BY d.id"""
+    ).fetchall()
     assert [tuple(row) for row in rows] == [
         ("bad", "failed", "OLLAMA_SCHEMA_INVALID error='missing category'"),
         ("good", "processed", None),
@@ -527,7 +557,10 @@ def test_mime_failure_marks_one_message_failed_and_continues(tmp_path: Path, mon
     }
     assert gmail.applied_labels == [("bad", "failed"), ("good", "processed")]
     database = Database(settings.database_path)
-    rows = database.connection.execute("SELECT gmail_message_id,state,last_error_code FROM messages ORDER BY id").fetchall()
+    rows = database.connection.execute(
+        """SELECT g.gmail_message_id,d.state,d.last_error_code FROM documents d
+        JOIN gmail_document_state g ON g.document_id=d.id ORDER BY d.id"""
+    ).fetchall()
     assert [tuple(row) for row in rows] == [("bad", "failed", "EMAIL_NO_USABLE_TEXT"), ("good", "processed", None)]
     database.close()
 
@@ -570,8 +603,8 @@ def test_digest_render_failure_leaves_extractions_retryable(tmp_path: Path, monk
         run_pipeline(settings, no_deliver=True)
 
     database = Database(settings.database_path)
-    assert database.connection.execute("SELECT state FROM messages").fetchone()["state"] == "discovered"
-    assert len(database.items_for_messages([1], 10)) == 1
+    assert database.connection.execute("SELECT state FROM documents").fetchone()["state"] == "discovered"
+    assert len(database.items_for_documents([1], 10)) == 1
     database.close()
     assert gmail.applied_labels == []
 
@@ -579,8 +612,8 @@ def test_digest_render_failure_leaves_extractions_retryable(tmp_path: Path, monk
     assert run_pipeline(settings, no_deliver=True).status == "ok"
     assert gmail.applied_labels == [("newsletter", "processed")]
     database = Database(settings.database_path)
-    assert database.connection.execute("SELECT state FROM messages").fetchone()["state"] == "processed"
-    assert len(database.items_for_messages([1], 10)) == 1
+    assert database.connection.execute("SELECT state FROM documents").fetchone()["state"] == "processed"
+    assert len(database.items_for_documents([1], 10)) == 1
     database.close()
 
 
@@ -607,7 +640,7 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
 
     assert gmail.applied_labels == []
     database = Database(settings.database_path)
-    assert database.connection.execute("SELECT state FROM messages").fetchone()["state"] == "discovered"
+    assert database.connection.execute("SELECT state FROM documents").fetchone()["state"] == "discovered"
     assert tuple(database.connection.execute("SELECT status,error_summary FROM runs").fetchone()) == ("failed", "ConnectError")
     database.close()
 
@@ -752,7 +785,9 @@ def test_label_sync_failure_is_repaired_without_reextracting(tmp_path: Path, mon
         == "partial"
     )
     database = Database(settings.database_path)
-    assert tuple(database.connection.execute("SELECT state,error_code FROM message_label_sync").fetchone()) == (
+    assert tuple(
+        database.connection.execute("SELECT label_sync_state,label_sync_error_code FROM gmail_document_state").fetchone()
+    ) == (
         "failed",
         "GMAIL_LABEL_SYNC_FAILED",
     )
@@ -762,7 +797,12 @@ def test_label_sync_failure_is_repaired_without_reextracting(tmp_path: Path, mon
     assert run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 23, tzinfo=ZoneInfo("America/Montreal"))).processed == 0
     assert calls == ["get", "extract", "label:processed", "label:processed"]
     database = Database(settings.database_path)
-    assert tuple(database.connection.execute("SELECT state,error_code FROM message_label_sync").fetchone()) == ("synced", None)
+    assert tuple(
+        database.connection.execute("SELECT label_sync_state,label_sync_error_code FROM gmail_document_state").fetchone()
+    ) == (
+        "synced",
+        None,
+    )
     database.close()
 
 
@@ -775,7 +815,7 @@ def test_stale_label_reconciliation_does_not_use_the_message_limit(tmp_path: Pat
         lock_path=tmp_path / "digest.lock",
     )
     database = Database(settings.database_path)
-    stale_id = database.discover("stale", "stale", "alphasignal", "now", "subject", "sender", "body")
+    stale_id = discover_gmail_document(database, "stale", "alphasignal")
     assert stale_id is not None
     database.store_extraction(
         stale_id,
@@ -822,9 +862,9 @@ def test_forced_recovery_clears_the_failure_and_remote_failed_label(tmp_path: Pa
         lock_path=tmp_path / "digest.lock",
     )
     database = Database(settings.database_path)
-    message_id = database.discover("gmail-1", "thread", "alphasignal", "now", "subject", "sender", "body")
+    message_id = discover_gmail_document(database, "gmail-1", "alphasignal")
     assert message_id is not None
-    database.fail_message(message_id, "OLLAMA_SCHEMA_INVALID")
+    database.fail_document(message_id, "OLLAMA_SCHEMA_INVALID")
     database.close()
     synced: list[tuple[str, str]] = []
 
@@ -855,7 +895,7 @@ def test_forced_recovery_clears_the_failure_and_remote_failed_label(tmp_path: Pa
     assert run_pipeline(settings, force=True, no_deliver=True).processed == 1
     assert synced == [("gmail-1", "processed")]
     database = Database(settings.database_path)
-    assert tuple(database.connection.execute("SELECT state,last_error_code FROM messages").fetchone()) == ("processed", None)
+    assert tuple(database.connection.execute("SELECT state,last_error_code FROM documents").fetchone()) == ("processed", None)
     database.close()
 
 
@@ -899,14 +939,14 @@ def test_dry_run_skips_gmail_label_writes_and_persistent_database(tmp_path: Path
 def test_labels_reconcile_repairs_terminal_messages_and_records_retries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
     database = Database(settings.database_path)
-    processed_id = database.discover("processed", "thread", "source", "now", "subject", "sender", "body")
-    failed_id = database.discover("failed", "thread", "source", "now", "subject", "sender", "body")
+    processed_id = discover_gmail_document(database, "processed", "source")
+    failed_id = discover_gmail_document(database, "failed", "source")
     assert processed_id is not None and failed_id is not None
     database.store_extraction(
         processed_id,
         EmailExtraction(source_id="source", newsletter_title="News", newsletter_date=None, overview_zh_tw="摘要", items=[]),
     )
-    database.fail_message(failed_id, "OLLAMA_SCHEMA_INVALID")
+    database.fail_document(failed_id, "OLLAMA_SCHEMA_INVALID")
     database.close()
     calls: list[tuple[str, str]] = []
 
@@ -925,6 +965,8 @@ def test_labels_reconcile_repairs_terminal_messages_and_records_retries(tmp_path
     assert mail_operations.reconcile_labels(settings).model_dump() == {"status": "partial", "reconciled": 1, "failed": 1}
     assert calls == [("processed", "processed"), ("failed", "failed")]
     database = Database(settings.database_path)
-    rows = database.connection.execute("SELECT state,error_code FROM message_label_sync ORDER BY message_id").fetchall()
+    rows = database.connection.execute(
+        "SELECT label_sync_state,label_sync_error_code FROM gmail_document_state ORDER BY document_id"
+    ).fetchall()
     assert [tuple(row) for row in rows] == [("synced", None), ("failed", "GMAIL_LABEL_SYNC_FAILED")]
     database.close()
