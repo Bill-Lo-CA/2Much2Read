@@ -13,7 +13,7 @@ from typing import cast
 from .digest import canonical_url, normalized_title
 from .schemas import EmailExtraction, ResolvedContent, SourceDocument
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS documents(
@@ -36,7 +36,7 @@ CREATE TABLE IF NOT EXISTS hackernews_document_state(
   document_id INTEGER PRIMARY KEY REFERENCES documents(id), hn_item_id INTEGER NOT NULL,
   feed TEXT NOT NULL, feed_rank INTEGER NOT NULL, score INTEGER NOT NULL, descendants INTEGER NOT NULL,
   requested_url TEXT, final_url TEXT,
-  fetch_status TEXT NOT NULL CHECK(fetch_status IN ('not_requested')), fetched_at TEXT, updated_at TEXT NOT NULL
+  fetch_status TEXT NOT NULL, fetched_at TEXT, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS items(
   id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL REFERENCES documents(id), normalized_title TEXT NOT NULL,
@@ -68,6 +68,23 @@ CREATE TABLE IF NOT EXISTS hackernews_document_state(
 INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(3, datetime('now'));
 """
 
+MIGRATE_V3_TO_V4 = """
+BEGIN;
+ALTER TABLE hackernews_document_state RENAME TO hackernews_document_state_v3;
+CREATE TABLE hackernews_document_state(
+  document_id INTEGER PRIMARY KEY REFERENCES documents(id), hn_item_id INTEGER NOT NULL,
+  feed TEXT NOT NULL, feed_rank INTEGER NOT NULL, score INTEGER NOT NULL, descendants INTEGER NOT NULL,
+  requested_url TEXT, final_url TEXT,
+  fetch_status TEXT NOT NULL, fetched_at TEXT, updated_at TEXT NOT NULL
+);
+INSERT INTO hackernews_document_state
+SELECT document_id,hn_item_id,feed,feed_rank,score,descendants,requested_url,final_url,fetch_status,fetched_at,updated_at
+FROM hackernews_document_state_v3;
+DROP TABLE hackernews_document_state_v3;
+INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(4, datetime('now'));
+COMMIT;
+"""
+
 
 class DatabaseSchemaResetRequiredError(ValueError):
     pass
@@ -81,6 +98,9 @@ class Database:
         version = self._schema_version()
         if version == 2:
             self.connection.executescript(MIGRATE_V2_TO_V3)
+            version = 3
+        if version == 3:
+            self.connection.executescript(MIGRATE_V3_TO_V4)
         elif version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
             self.connection.close()
             raise DatabaseSchemaResetRequiredError(
@@ -232,6 +252,12 @@ class Database:
             VALUES(?,?,?,?,?,?,?,'not_requested',?)
             ON CONFLICT(document_id) DO UPDATE SET hn_item_id=excluded.hn_item_id,feed=excluded.feed,
             feed_rank=excluded.feed_rank,score=excluded.score,descendants=excluded.descendants,
+            final_url=CASE WHEN hackernews_document_state.requested_url IS NOT excluded.requested_url
+                THEN NULL ELSE final_url END,
+            fetch_status=CASE WHEN hackernews_document_state.requested_url IS NOT excluded.requested_url
+                THEN 'not_requested' ELSE fetch_status END,
+            fetched_at=CASE WHEN hackernews_document_state.requested_url IS NOT excluded.requested_url
+                THEN NULL ELSE fetched_at END,
             requested_url=excluded.requested_url,updated_at=excluded.updated_at""",
             (
                 document_id,
@@ -246,6 +272,46 @@ class Database:
         )
         self.connection.commit()
         return document_id, created
+
+    def hackernews_fetch_status(self, document_id: int) -> str:
+        row = self.connection.execute(
+            "SELECT fetch_status FROM hackernews_document_state WHERE document_id=?", (document_id,)
+        ).fetchone()
+        assert row is not None
+        return str(row["fetch_status"])
+
+    def store_hackernews_resolution(self, document_id: int, content: ResolvedContent) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self.transaction() as connection:
+            connection.execute(
+                """UPDATE documents SET content_basis=?,content_sha256=?,content_characters=?,state='discovered',
+                last_error_code=NULL,updated_at=? WHERE id=?""",
+                (
+                    content.basis,
+                    hashlib.sha256(content.text.encode()).hexdigest(),
+                    len(content.text),
+                    now,
+                    document_id,
+                ),
+            )
+            connection.execute(
+                """UPDATE hackernews_document_state SET final_url=?,fetch_status='fetched',fetched_at=?,updated_at=?
+                WHERE document_id=?""",
+                (str(content.final_url) if content.final_url else None, now, now, document_id),
+            )
+
+    def record_hackernews_fetch_failure(self, document_id: int, error_code: str) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self.transaction() as connection:
+            connection.execute(
+                """UPDATE documents SET state='failed',attempt_count=attempt_count+1,last_error_code=?,updated_at=?
+                WHERE id=?""",
+                (error_code, now, document_id),
+            )
+            connection.execute(
+                """UPDATE hackernews_document_state SET fetch_status=?,fetched_at=?,updated_at=? WHERE document_id=?""",
+                (error_code, now, now, document_id),
+            )
 
     def store_extraction(
         self, document_id: int, extraction: EmailExtraction, replace: bool = False, finalize: bool = True

@@ -6,6 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
+from two_much_two_read.article_fetcher import ArticleFetcher, ArticleResponse, ValidatedURL
 from two_much_two_read.config import HackerNewsSource, Settings
 from two_much_two_read.hackernews import (
     HackerNewsClient,
@@ -16,7 +17,7 @@ from two_much_two_read.hackernews import (
 )
 from two_much_two_read.storage import Database
 
-NOW = datetime(2026, 7, 23, tzinfo=UTC)
+NOW = datetime.now(UTC)
 
 
 def source(**values: object) -> HackerNewsSource:
@@ -158,8 +159,8 @@ def test_list_inspect_and_sync_are_bounded_and_deduplicated(tmp_path: Path) -> N
 
     assert [story.story_id for story in listed.stories] == [1]
     assert inspected.story.story_id == 1
-    assert first_sync.model_dump() == {"status": "ok", "discovered": 2, "existing": 0, "skipped": 0}
-    assert second_sync.model_dump() == {"status": "ok", "discovered": 0, "existing": 2, "skipped": 0}
+    assert first_sync.model_dump() == {"status": "ok", "discovered": 2, "existing": 0, "skipped": 0, "fetched": 0, "failed": 0}
+    assert second_sync.model_dump() == {"status": "ok", "discovered": 0, "existing": 2, "skipped": 0, "fetched": 0, "failed": 0}
     database = Database(settings.database_path)
     row = database.connection.execute(
         """SELECT d.source_type,d.external_id,d.content_basis,d.content_characters,h.feed,h.feed_rank,h.fetch_status
@@ -167,3 +168,90 @@ def test_list_inspect_and_sync_are_bounded_and_deduplicated(tmp_path: Path) -> N
     ).fetchone()
     assert tuple(row) == ("hackernews", "1", "metadata", 0, "beststories", 1, "not_requested")
     database.close()
+
+
+def test_inspect_fetches_a_safe_article_without_writing_local_state(tmp_path: Path) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text("sources:\n  - type: hackernews\n    id: hn-best\n    name: HN Best\n", encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    active_client, http_client = client({"/v0/beststories.json": [1], "/v0/item/1.json": item(1)})
+
+    def article_handler(request: ValidatedURL) -> ArticleResponse:
+        if request.target == "/robots.txt":
+            return ArticleResponse(200, {}, b"User-agent: *\nAllow: /")
+        return ArticleResponse(200, {"content-type": "text/html"}, ("<article><p>Useful text. </p>" * 50).encode())
+
+    try:
+        result = inspect_hackernews(
+            settings,
+            "hn-best",
+            1,
+            active_client,
+            fetch_article=True,
+            article_fetcher=ArticleFetcher(lambda _: ["93.184.216.34"], article_handler),
+        )
+    finally:
+        http_client.close()
+
+    assert result.story.fetch_status == "fetched"
+    assert result.story.content_basis == "article"
+    assert str(result.story.final_url) == "https://example.com/1"
+    assert result.story.content_characters >= 500
+    assert result.story.content_preview is not None
+    assert not settings.database_path.exists()
+
+
+def test_sync_fetch_articles_persists_metadata_but_not_article_text(tmp_path: Path) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text("sources:\n  - type: hackernews\n    id: hn-best\n    name: HN Best\n", encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    active_client, http_client = client({"/v0/beststories.json": [1], "/v0/item/1.json": item(1)})
+    article_requests = 0
+
+    def article_handler(request: ValidatedURL) -> ArticleResponse:
+        nonlocal article_requests
+        if request.target == "/robots.txt":
+            return ArticleResponse(200, {}, b"User-agent: *\nAllow: /")
+        article_requests += 1
+        return ArticleResponse(200, {"content-type": "text/html"}, ("<article><p>Useful text. </p>" * 50).encode())
+
+    fetcher = ArticleFetcher(lambda _: ["93.184.216.34"], article_handler)
+    try:
+        first = sync_hackernews(settings, "hn-best", client=active_client, fetch_articles=True, article_fetcher=fetcher)
+        second = sync_hackernews(settings, "hn-best", client=active_client, fetch_articles=True, article_fetcher=fetcher)
+    finally:
+        http_client.close()
+
+    assert first.model_dump() == {"status": "ok", "discovered": 1, "existing": 0, "skipped": 0, "fetched": 1, "failed": 0}
+    assert second.model_dump() == {"status": "ok", "discovered": 0, "existing": 1, "skipped": 0, "fetched": 0, "failed": 0}
+    assert article_requests == 1
+    database = Database(settings.database_path)
+    row = database.connection.execute(
+        """SELECT d.content_basis,d.content_sha256,d.content_characters,d.state,h.final_url,h.fetch_status
+        FROM documents d JOIN hackernews_document_state h ON h.document_id=d.id"""
+    ).fetchone()
+    database.close()
+    assert row["content_basis"] == "article"
+    assert row["content_characters"] >= 500
+    assert row["state"] == "discovered"
+    assert row["final_url"] == "https://example.com/1"
+    assert row["fetch_status"] == "fetched"
+    assert len(str(row[1])) == 64
+
+    active_client, http_client = client({"/v0/beststories.json": [1], "/v0/item/1.json": item(1)})
+    try:
+        inspected = inspect_hackernews(settings, "hn-best", 1, active_client)
+    finally:
+        http_client.close()
+    assert inspected.story.fetch_status == "fetched"
+    assert inspected.story.content_basis == "article"
+    assert inspected.story.content_characters >= 500
+    assert inspected.story.content_preview is None

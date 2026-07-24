@@ -97,9 +97,13 @@ def test_hackernews_commands_emit_typed_results(monkeypatch: pytest.MonkeyPatch)
         content_kind="external",
     )
     monkeypatch.setattr(cli, "list_hackernews", lambda _, source, limit: HackerNewsListResult(stories=[story], skipped=0))
-    monkeypatch.setattr(cli, "inspect_hackernews", lambda _, source, story_id: HackerNewsInspectResult(story=story))
     monkeypatch.setattr(
-        cli, "sync_hackernews", lambda _, source, force: HackerNewsSyncResult(discovered=1, existing=0, skipped=0)
+        cli, "inspect_hackernews", lambda _, source, story_id, *, fetch_article: HackerNewsInspectResult(story=story)
+    )
+    monkeypatch.setattr(
+        cli,
+        "sync_hackernews",
+        lambda _, source, force, *, fetch_articles: HackerNewsSyncResult(discovered=1, existing=0, skipped=0),
     )
 
     runner = CliRunner()
@@ -116,6 +120,8 @@ def test_hackernews_commands_emit_typed_results(monkeypatch: pytest.MonkeyPatch)
         "discovered": 1,
         "existing": 0,
         "skipped": 0,
+        "fetched": 0,
+        "failed": 0,
     }
 
 

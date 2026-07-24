@@ -148,9 +148,55 @@ def test_v2_schema_upgrades_without_losing_documents(tmp_path: Path) -> None:
 
     upgraded = Database(path)
 
-    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 3
+    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 4
     assert upgraded.connection.execute("SELECT gmail_message_id FROM gmail_document_state").fetchone()[0] == "gmail-1"
     assert upgraded.connection.execute("SELECT 1 FROM sqlite_master WHERE name='hackernews_document_state'").fetchone()[0] == 1
+    upgraded.close()
+
+
+def test_v3_hackernews_state_upgrades_without_losing_metadata(tmp_path: Path) -> None:
+    path = tmp_path / "v3.sqlite3"
+    database = Database(path)
+    document_id = database.discover_document(
+        SourceDocument(
+            source_type="hackernews",
+            source_id="hn-best",
+            external_id="123",
+            title="Article",
+            published_at=datetime(2026, 7, 23, tzinfo=UTC),
+        ),
+        ResolvedContent(
+            document=SourceDocument(
+                source_type="hackernews",
+                source_id="hn-best",
+                external_id="123",
+                title="Article",
+                published_at=datetime(2026, 7, 23, tzinfo=UTC),
+            ),
+            text="",
+            basis="metadata",
+            truncated=False,
+        ),
+    )
+    assert document_id is not None
+    database.connection.execute("DROP TABLE hackernews_document_state")
+    database.connection.executescript(
+        """CREATE TABLE hackernews_document_state(
+        document_id INTEGER PRIMARY KEY REFERENCES documents(id), hn_item_id INTEGER NOT NULL,
+        feed TEXT NOT NULL, feed_rank INTEGER NOT NULL, score INTEGER NOT NULL, descendants INTEGER NOT NULL,
+        requested_url TEXT, final_url TEXT,
+        fetch_status TEXT NOT NULL CHECK(fetch_status IN ('not_requested')), fetched_at TEXT, updated_at TEXT NOT NULL
+        );
+        INSERT INTO hackernews_document_state VALUES(1,123,'beststories',1,10,2,'https://example.com',NULL,'not_requested',NULL,'now');
+        DELETE FROM schema_version; INSERT INTO schema_version VALUES(3,'now');"""
+    )
+    database.close()
+
+    upgraded = Database(path)
+
+    row = upgraded.connection.execute("SELECT hn_item_id,requested_url,fetch_status FROM hackernews_document_state").fetchone()
+    assert tuple(row) == (123, "https://example.com", "not_requested")
+    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4
     upgraded.close()
 
 

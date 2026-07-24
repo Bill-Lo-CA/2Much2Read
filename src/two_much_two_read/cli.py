@@ -182,14 +182,20 @@ def hackernews_list(source: Annotated[str, typer.Option()], limit: Annotated[int
 
 @hackernews_app.command("inspect")
 def hackernews_inspect(
-    source: Annotated[str, typer.Option()], story_id: Annotated[int, typer.Option("--story-id", min=1)]
+    source: Annotated[str, typer.Option()],
+    story_id: Annotated[int, typer.Option("--story-id", min=1)],
+    fetch_article: Annotated[bool, typer.Option()] = False,
 ) -> None:
-    invoke(lambda: inspect_hackernews(Settings(), source, story_id))
+    invoke(lambda: inspect_hackernews(Settings(), source, story_id, fetch_article=fetch_article))
 
 
 @hackernews_app.command("sync")
-def hackernews_sync(source: Annotated[str, typer.Option()], force: Annotated[bool, typer.Option()] = False) -> None:
-    invoke(lambda: sync_hackernews(Settings(), source, force))
+def hackernews_sync(
+    source: Annotated[str, typer.Option()],
+    force: Annotated[bool, typer.Option()] = False,
+    fetch_articles: Annotated[bool, typer.Option()] = False,
+) -> None:
+    invoke(lambda: sync_hackernews(Settings(), source, force, fetch_articles=fetch_articles))
 
 
 @app.command()
