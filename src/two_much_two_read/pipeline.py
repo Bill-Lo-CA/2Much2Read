@@ -6,16 +6,21 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import httpx
+
 from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code
 from two_read_runtime.locking import ProcessLock
 
+from .article_extractor import ArticleExtractionError
+from .article_fetcher import ArticleFetcher, ArticleFetchError
 from .command_models import DeliveryCheckpointResetResult, NewsletterRetryResult, NewsletterRunResult
-from .config import GmailSource, Settings, load_sources
-from .digest import render_digest
+from .config import GmailSource, HackerNewsSource, Settings, load_sources
+from .digest import DigestEntry, render_digest
 from .gmail import GmailClient, credentials, message_headers
+from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
 from .mime import EmptyEmailError, extract_gmail_payload
 from .ollama import OllamaClient, OllamaSchemaError, create_ollama_client
-from .schemas import DigestItem
+from .schemas import DigestItem, ResolvedContent
 from .storage import Database
 
 StatusReporter = Callable[[str], None]
@@ -25,27 +30,37 @@ def _ignore_status(_: str) -> None:
     pass
 
 
-def _items(database: Database, document_ids: list[int], maximum: int) -> list[DigestItem]:
-    result: list[DigestItem] = []
+def _items(database: Database, document_ids: list[int], maximum: int) -> list[DigestEntry]:
+    result: list[DigestEntry] = []
     for row in database.items_for_documents(document_ids, maximum * 5):
+        item = DigestItem.model_validate(
+            {
+                "title": row["title"],
+                "category": row["category"],
+                "summary_zh_tw": row["summary_zh_tw"],
+                "why_it_matters_zh_tw": row["why_it_matters_zh_tw"],
+                "source_url": row["source_url"],
+                "importance": row["importance"],
+                "confidence": row["confidence"],
+                "tags": json.loads(str(row["tags_json"])),
+            }
+        )
         result.append(
-            DigestItem.model_validate(
-                {
-                    "title": row["title"],
-                    "category": row["category"],
-                    "summary_zh_tw": row["summary_zh_tw"],
-                    "why_it_matters_zh_tw": row["why_it_matters_zh_tw"],
-                    "source_url": row["source_url"],
-                    "importance": row["importance"],
-                    "confidence": row["confidence"],
-                    "tags": json.loads(str(row["tags_json"])),
-                }
+            DigestEntry(
+                item=item,
+                published_at=datetime.fromisoformat(str(row["published_at"])),
+                article_url=str(row["source_url"]) if row["source_url"] else None,
+                discussion_url=str(row["discussion_url"]) if row["discussion_url"] else None,
+                hn_score=int(str(row["hn_score"])) if row["hn_score"] is not None else None,
+                hn_comments=int(str(row["hn_comments"])) if row["hn_comments"] is not None else None,
+                hn_item_id=str(row["external_id"]) if row["source_type"] == "hackernews" else None,
+                content_basis=str(row["content_basis"]),
             )
         )
     return result
 
 
-def _enabled_sources(settings: Settings, source_id: str | None) -> list[GmailSource]:
+def _enabled_sources(settings: Settings, source_id: str | None) -> list[GmailSource | HackerNewsSource]:
     sources = [source for source in load_sources(settings.sources_config_path).sources if source.enabled]
     if source_id:
         matching_sources = [source for source in sources if source.id == source_id]
@@ -55,10 +70,7 @@ def _enabled_sources(settings: Settings, source_id: str | None) -> list[GmailSou
         sources = matching_sources
     if not sources:
         raise ValueError("no enabled sources configured")
-    unsupported = [source.id for source in sources if not isinstance(source, GmailSource)]
-    if unsupported:
-        raise ValueError(f"Hacker News sources are not available yet: {', '.join(unsupported)}")
-    return [source for source in sources if isinstance(source, GmailSource)]
+    return sources
 
 
 def _digest_key(settings: Settings, source_id: str | None, now: datetime, force: bool) -> str:
@@ -87,7 +99,7 @@ def _process_source(
     *,
     force: bool,
     dry_run: bool,
-) -> tuple[int, int, int, int, list[tuple[int, str]]]:
+) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
     processed_label = "NewsletterBot/Processed"
     failed_label = "NewsletterBot/Failed"
     query = f"({source.gmail_query}) newer_than:{settings.gmail_lookback_days}d"
@@ -96,6 +108,7 @@ def _process_source(
     discovered = 0
     processed = 0
     failed = 0
+    processed_document_ids: list[int] = []
     processed_documents: list[tuple[int, str]] = []
     status(f"{source.id}: scanning messages")
     for gmail_id in gmail.iter_messages(query):
@@ -166,8 +179,129 @@ def _process_source(
         database.store_extraction(document_id, extraction, replace=True, finalize=False)
         processed += 1
         status(f"{source.id}: processed {subject}")
+        processed_document_ids.append(document_id)
         processed_documents.append((document_id, gmail_id))
-    return discovered, discovered, processed, failed, processed_documents
+    return discovered, discovered, processed, failed, processed_document_ids, processed_documents
+
+
+def _process_hackernews_source(
+    database: Database,
+    hackernews: HackerNewsClient,
+    ollama: OllamaClient,
+    source: HackerNewsSource,
+    remaining: int,
+    status: StatusReporter,
+    *,
+    force: bool,
+    now: datetime,
+) -> tuple[int, int, int, int, list[int]]:
+    limit = min(remaining, source.max_articles_per_run)
+    discovered = 0
+    processed = 0
+    failed = 0
+    attempted = 0
+    processed_document_ids: list[int] = []
+    fetcher = ArticleFetcher()
+    if force:
+        status(f"{source.id}: retrying failed stories")
+        candidates = []
+        for row in database.failed_hackernews_documents(source.id, limit):
+            document_id = int(row["id"])
+            try:
+                candidate = hackernews.retry_candidate(source, int(row["external_id"]), int(row["feed_rank"]), now)
+            except HackerNewsError as error:
+                database.record_hackernews_fetch_failure(document_id, str(error))
+                failed += 1
+                attempted += 1
+                status(f"{source.id}: failed {row['external_id']} ({error})")
+                continue
+            if candidate is None:
+                database.record_hackernews_fetch_failure(document_id, "HN_ITEM_INVALID")
+                failed += 1
+                attempted += 1
+                status(f"{source.id}: failed {row['external_id']} (HN_ITEM_INVALID)")
+                continue
+            candidates.append(candidate)
+    else:
+        status(f"{source.id}: scanning stories")
+        candidates = hackernews.discover(source, now, limit=source.max_story_candidates).candidates
+
+    for candidate in candidates:
+        if attempted >= limit:
+            break
+        existing = database.hackernews_document(candidate.document.source_id, candidate.document.external_id)
+        if existing is not None and str(existing["state"]) == "processed":
+            continue
+        if existing is not None and str(existing["state"]) == "failed" and not force:
+            continue
+        document_id, created = database.store_hackernews_metadata(
+            candidate.document,
+            candidate.feed,
+            candidate.feed_rank,
+            candidate.score,
+            candidate.comments,
+            force=force,
+        )
+        attempted += 1
+        discovered += int(created)
+        status(f"{source.id}: resolving {candidate.document.title}")
+        try:
+            resolved = resolve_hackernews_candidate(candidate, fetcher).content
+            database.store_hackernews_resolution(document_id, resolved)
+        except (ArticleFetchError, ArticleExtractionError) as error:
+            database.record_hackernews_fetch_failure(document_id, error.code)
+            if not source.allow_metadata_fallback:
+                failed += 1
+                status(f"{source.id}: failed {candidate.document.title} ({error.code})")
+                continue
+            resolved = ResolvedContent(document=candidate.document, text="", basis="metadata", truncated=False)
+            status(f"{source.id}: analyzing metadata only for {candidate.document.title}")
+
+        status(f"{source.id}: analyzing {candidate.document.title}")
+        try:
+            analysis = ollama.analyze_article(
+                source.id,
+                int(candidate.document.external_id),
+                candidate.document.title,
+                candidate.score,
+                candidate.comments,
+                candidate.document.published_at.isoformat(),
+                resolved.basis,
+                resolved.text,
+                resolved.truncated,
+            )
+        except OllamaSchemaError:
+            database.fail_document(document_id, "OLLAMA_SCHEMA_INVALID")
+            failed += 1
+            status(f"{source.id}: failed {candidate.document.title} (OLLAMA_SCHEMA_INVALID)")
+            continue
+        except httpx.HTTPError:
+            database.fail_document(document_id, "OLLAMA_REQUEST_FAILED")
+            failed += 1
+            status(f"{source.id}: failed {candidate.document.title} (OLLAMA_REQUEST_FAILED)")
+            continue
+        source_url = resolved.final_url or candidate.document.source_url or candidate.document.discussion_url
+        database.store_items(
+            document_id,
+            [
+                DigestItem(
+                    title=candidate.document.title,
+                    category=analysis.category,
+                    summary_zh_tw=analysis.summary_zh_tw,
+                    why_it_matters_zh_tw=analysis.why_it_matters_zh_tw,
+                    source_url=source_url,
+                    importance=analysis.importance,
+                    confidence=min(analysis.confidence, 0.6) if resolved.basis == "metadata" else analysis.confidence,
+                    tags=analysis.tags,
+                )
+            ],
+            replace=True,
+            finalize=False,
+        )
+        processed += 1
+        processed_document_ids.append(document_id)
+        status(f"{source.id}: processed {candidate.document.title}")
+    return attempted, discovered, processed, failed, processed_document_ids
 
 
 def run_pipeline(
@@ -190,9 +324,11 @@ def run_pipeline(
     error_summary: str | None = None
     processed = 0
     processed_documents: list[tuple[int, str]] = []
+    processed_document_ids: list[int] = []
     discovered = 0
     failed = 0
     delivered = 0
+    hackernews: HackerNewsClient | None = None
     try:
         with ProcessLock(settings.lock_path):
             database = Database(Path(":memory:") if dry_run else settings.database_path)
@@ -207,33 +343,57 @@ def run_pipeline(
                     )
                     run_status = result.status
                     return result
-            creds = credentials(
-                settings.gmail_credentials_path,
-                settings.gmail_token_path,
-                settings.gmail_oauth_callback_port,
-            )
-            gmail = GmailClient(creds)
-            if not dry_run:
-                gmail.ensure_labels()
+            gmail: GmailClient | None = None
+            if any(isinstance(source, GmailSource) for source in sources):
+                creds = credentials(
+                    settings.gmail_credentials_path,
+                    settings.gmail_token_path,
+                    settings.gmail_oauth_callback_port,
+                )
+                gmail = GmailClient(creds)
+                if not dry_run:
+                    gmail.ensure_labels()
+            if any(isinstance(source, HackerNewsSource) for source in sources):
+                hackernews = HackerNewsClient()
             ollama = create_ollama_client(settings)
-            remaining = max_messages or settings.gmail_max_messages_per_run
+            gmail_remaining = settings.gmail_max_messages_per_run
+            command_remaining = max_messages
             status(f"Starting {len(sources)} source(s)")
             for source in sources:
-                if remaining <= 0:
+                if command_remaining is not None and command_remaining <= 0:
                     break
-                used, source_discovered, source_processed, source_failed, source_documents = _process_source(
-                    database, gmail, ollama, settings, source, remaining, status, force=force, dry_run=dry_run
-                )
-                remaining -= used
+                if isinstance(source, GmailSource):
+                    source_remaining = (
+                        min(gmail_remaining, command_remaining) if command_remaining is not None else gmail_remaining
+                    )
+                    if source_remaining <= 0:
+                        continue
+                    assert gmail is not None
+                    used, source_discovered, source_processed, source_failed, source_ids, source_documents = _process_source(
+                        database, gmail, ollama, settings, source, source_remaining, status, force=force, dry_run=dry_run
+                    )
+                    gmail_remaining -= used
+                else:
+                    source_remaining = (
+                        min(source.max_articles_per_run, command_remaining)
+                        if command_remaining is not None
+                        else source.max_articles_per_run
+                    )
+                    assert hackernews is not None
+                    used, source_discovered, source_processed, source_failed, source_ids = _process_hackernews_source(
+                        database, hackernews, ollama, source, source_remaining, status, force=force, now=now
+                    )
+                    source_documents = []
+                if command_remaining is not None:
+                    command_remaining -= used
                 discovered += source_discovered
                 processed += source_processed
                 failed += source_failed
+                processed_document_ids.extend(source_ids)
                 processed_documents.extend(source_documents)
 
-            processed_document_ids = [document_id for document_id, _ in processed_documents]
-
             content = render_digest(
-                _items(database, processed_document_ids, settings.digest_max_items)[: settings.digest_max_items],
+                _items(database, processed_document_ids, settings.digest_max_items),
                 now,
                 ", ".join(dict.fromkeys(source.category for source in sources)),
                 ", ".join(source.name for source in sources),
@@ -258,6 +418,7 @@ def run_pipeline(
                     finalized = True
                 if finalized:
                     for document_id, gmail_id in processed_documents:
+                        assert gmail is not None
                         if not _sync_processing_label(database, gmail, gmail_id, document_id, "processed"):
                             failed += 1
                 if digest_id is not None and not no_deliver:
@@ -281,6 +442,8 @@ def run_pipeline(
             if run_id is not None:
                 database.finish_run(run_id, run_status, discovered, processed, failed, delivered, error_summary)
             database.close()
+        if hackernews is not None:
+            hackernews.close()
 
 
 def retry_delivery(settings: Settings, database: Database | None = None) -> NewsletterRetryResult:

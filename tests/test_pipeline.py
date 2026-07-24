@@ -10,11 +10,13 @@ import httpx
 import pytest
 
 from two_much_two_read import mail_operations, pipeline
+from two_much_two_read.article_fetcher import ArticleFetchError
 from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult
-from two_much_two_read.config import Settings
+from two_much_two_read.config import HackerNewsSource, Settings
+from two_much_two_read.hackernews import HackerNewsCandidate, HackerNewsDiscovery, ResolvedHackerNewsContent
 from two_much_two_read.ollama import OllamaSchemaError
 from two_much_two_read.pipeline import deliver_digest, run_pipeline
-from two_much_two_read.schemas import EmailExtraction
+from two_much_two_read.schemas import ArticleAnalysis, EmailExtraction, ResolvedContent, SourceDocument
 from two_much_two_read.storage import Database
 from two_read_runtime.discord import DiscordDeliveryError
 
@@ -135,15 +137,301 @@ def test_no_enabled_sources_has_distinct_error(tmp_path: Path) -> None:
         run_pipeline(Settings(sources_config_path=sources_path), dry_run=True)
 
 
-def test_hacker_news_source_is_explicitly_unavailable_until_its_ingestion_pr(tmp_path: Path) -> None:
+def test_hacker_news_source_runs_without_gmail_and_skips_processed_items(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sources_path = tmp_path / "sources.yaml"
     sources_path.write_text(
         "sources:\n  - type: hackernews\n    id: hn-best\n    name: Hacker News Best\n",
         encoding="utf-8",
     )
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    candidate = HackerNewsCandidate(
+        SourceDocument(
+            source_type="hackernews",
+            source_id="hn-best",
+            external_id="123",
+            title="HN article",
+            author="author",
+            published_at=datetime(2026, 7, 24, tzinfo=UTC),
+            source_url="https://example.com/requested",
+            discussion_url="https://news.ycombinator.com/item?id=123",
+            metadata={},
+        ),
+        "beststories",
+        1,
+        42,
+        7,
+        "external",
+        None,
+    )
 
-    with pytest.raises(ValueError, match="Hacker News sources are not available yet: hn-best"):
-        run_pipeline(Settings(sources_config_path=sources_path), dry_run=True)
+    class FakeHackerNewsClient:
+        def discover(self, *args: object, **kwargs: object) -> HackerNewsDiscovery:
+            return HackerNewsDiscovery([candidate], 0)
+
+        def close(self) -> None:
+            pass
+
+    class FakeOllamaClient:
+        calls = 0
+
+        def analyze_article(self, *args: object, **kwargs: object) -> ArticleAnalysis:
+            self.calls += 1
+            return ArticleAnalysis(
+                title="ignored model title",
+                category="AI_MODEL",
+                summary_zh_tw="摘要",
+                why_it_matters_zh_tw="原因",
+                importance=8,
+                confidence=0.9,
+                tags=["ai"],
+            )
+
+    ollama = FakeOllamaClient()
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: pytest.fail("HN-only run must not initialize Gmail"))
+    monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
+    monkeypatch.setattr(
+        pipeline,
+        "resolve_hackernews_candidate",
+        lambda candidate, fetcher: ResolvedHackerNewsContent(
+            ResolvedContent(
+                document=candidate.document,
+                text="usable article text",
+                basis="article",
+                final_url="https://example.com/final",
+                truncated=False,
+            ),
+            "article title",
+        ),
+    )
+
+    result = run_pipeline(settings, source_id="hn-best", no_deliver=True, now=datetime(2026, 7, 24, tzinfo=UTC))
+    repeated = run_pipeline(settings, source_id="hn-best", no_deliver=True, now=datetime(2026, 7, 25, tzinfo=UTC))
+
+    assert result.processed == 1
+    assert repeated.status == "no_content"
+    assert ollama.calls == 1
+    database = Database(settings.database_path)
+    row = database.connection.execute(
+        """SELECT d.state,i.title,h.final_url FROM documents d JOIN items i ON i.document_id=d.id
+        JOIN hackernews_document_state h ON h.document_id=d.id"""
+    ).fetchone()
+    database.close()
+    assert tuple(row) == ("processed", "HN article", "https://example.com/final")
+
+
+def test_hacker_news_force_retries_only_failed_documents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n  - type: hackernews\n    id: hn-best\n    name: Hacker News Best\n",
+        encoding="utf-8",
+    )
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    candidate = HackerNewsCandidate(
+        SourceDocument(
+            source_type="hackernews",
+            source_id="hn-best",
+            external_id="123",
+            title="HN article",
+            published_at=datetime(2026, 7, 24, tzinfo=UTC),
+            source_url="https://example.com/requested",
+            discussion_url="https://news.ycombinator.com/item?id=123",
+        ),
+        "beststories",
+        1,
+        42,
+        7,
+        "external",
+        None,
+    )
+    database = Database(settings.database_path)
+    document_id, _ = database.store_hackernews_metadata(candidate.document, candidate.feed, 1, 42, 7)
+    database.record_hackernews_fetch_failure(document_id, ArticleFetchError("ARTICLE_FETCH_FAILED").code)
+    database.close()
+
+    class FakeHackerNewsClient:
+        def retry_candidate(self, *args: object, **kwargs: object) -> HackerNewsCandidate:
+            return candidate
+
+        def close(self) -> None:
+            pass
+
+    class FakeOllamaClient:
+        calls = 0
+
+        def analyze_article(self, *args: object, **kwargs: object) -> ArticleAnalysis:
+            self.calls += 1
+            return ArticleAnalysis(
+                title="ignored",
+                category="AI_MODEL",
+                summary_zh_tw="摘要",
+                why_it_matters_zh_tw="原因",
+                importance=8,
+                confidence=0.9,
+            )
+
+    ollama = FakeOllamaClient()
+    monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
+    monkeypatch.setattr(
+        pipeline,
+        "resolve_hackernews_candidate",
+        lambda candidate, fetcher: ResolvedHackerNewsContent(
+            ResolvedContent(document=candidate.document, text="usable", basis="article", truncated=False), None
+        ),
+    )
+
+    retried = run_pipeline(
+        settings,
+        source_id="hn-best",
+        max_messages=1,
+        no_deliver=True,
+        force=True,
+        now=datetime(2026, 7, 24, tzinfo=UTC),
+    )
+    repeated = run_pipeline(
+        settings,
+        source_id="hn-best",
+        max_messages=1,
+        no_deliver=True,
+        force=True,
+        now=datetime(2026, 7, 25, tzinfo=UTC),
+    )
+
+    assert retried.processed == 1
+    assert repeated.processed == 0
+    assert ollama.calls == 1
+
+
+def test_mixed_gmail_and_hackernews_sources_run_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n  - id: alphasignal\n    name: AlphaSignal\n    gmail_query: from:alphasignal.ai\n"
+        "  - type: hackernews\n    id: hn-best\n    name: Hacker News Best\n",
+        encoding="utf-8",
+    )
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    seen: list[tuple[str, int]] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    class FakeHackerNewsClient:
+        def close(self) -> None:
+            pass
+
+    def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
+        budget = int(args[5])
+        seen.append(("gmail", budget))
+        return budget if budget == settings.gmail_max_messages_per_run else 1, 1, 1, 0, [], []
+
+    def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int]]:
+        seen.append(("hackernews", int(args[4])))
+        return 1, 1, 1, 0, []
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_process_source", process_gmail)
+    monkeypatch.setattr(pipeline, "_process_hackernews_source", process_hackernews)
+
+    default_result = run_pipeline(settings, no_deliver=True)
+    capped_result = run_pipeline(settings, max_messages=2, no_deliver=True)
+
+    assert seen == [("gmail", 50), ("hackernews", 10), ("gmail", 2), ("hackernews", 1)]
+    assert default_result.discovered == capped_result.discovered == 2
+    assert default_result.processed == capped_result.processed == 2
+
+
+def test_hacker_news_force_respects_explicit_command_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n  - type: hackernews\n    id: hn-best\n    name: Hacker News Best\n",
+        encoding="utf-8",
+    )
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+
+    class FakeHackerNewsClient:
+        def close(self) -> None:
+            pass
+
+    def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int]]:
+        assert args[4] == 1
+        return 0, 0, 0, 0, []
+
+    monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_process_hackernews_source", process_hackernews)
+
+    run_pipeline(settings, source_id="hn-best", max_messages=1, no_deliver=True, force=True)
+
+
+def test_hackernews_does_not_fallback_to_metadata_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    source = HackerNewsSource(id="hn-best", name="Hacker News Best")
+    candidate = HackerNewsCandidate(
+        SourceDocument(
+            source_type="hackernews",
+            source_id="hn-best",
+            external_id="123",
+            title="Unreadable article",
+            published_at=datetime(2026, 7, 24, tzinfo=UTC),
+            source_url="https://example.com/requested",
+            discussion_url="https://news.ycombinator.com/item?id=123",
+        ),
+        "beststories",
+        1,
+        42,
+        7,
+        "external",
+        None,
+    )
+
+    class FakeHackerNewsClient:
+        def discover(self, *args: object, **kwargs: object) -> HackerNewsDiscovery:
+            return HackerNewsDiscovery([candidate], 0)
+
+    class FakeOllamaClient:
+        def analyze_article(self, *args: object, **kwargs: object) -> ArticleAnalysis:
+            pytest.fail("metadata analysis must be opt-in")
+
+    def fail_resolution(*args: object) -> ResolvedHackerNewsContent:
+        raise ArticleFetchError("ARTICLE_NO_USABLE_TEXT")
+
+    database = Database(tmp_path / "digest.sqlite3")
+    monkeypatch.setattr(pipeline, "resolve_hackernews_candidate", fail_resolution)
+
+    result = pipeline._process_hackernews_source(
+        database,
+        FakeHackerNewsClient(),
+        FakeOllamaClient(),
+        source,
+        1,
+        lambda _: None,
+        force=False,
+        now=datetime(2026, 7, 24, tzinfo=UTC),
+    )
+
+    assert result[:4] == (1, 1, 0, 1)
+    assert database.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
+    database.close()
 
 
 def test_empty_news_day_records_no_content_run(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -188,7 +476,7 @@ def test_run_pipeline_uses_one_captured_time_for_digest_metadata(tmp_path: Path,
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
-    monkeypatch.setattr(pipeline, "_process_source", lambda *args, **kwargs: (0, 0, 0, 0, []))
+    monkeypatch.setattr(pipeline, "_process_source", lambda *args, **kwargs: (0, 0, 0, 0, [], []))
     monkeypatch.setattr(pipeline, "render_digest", lambda *args: "digest")
     now = datetime(2026, 1, 1, 9, 30, tzinfo=ZoneInfo("America/Montreal"))
 
@@ -729,7 +1017,7 @@ def test_forced_run_uses_a_separate_digest_key_after_daily_reservation(tmp_path:
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
-    monkeypatch.setattr(pipeline, "_process_source", lambda *args, **kwargs: (0, 0, 0, 0, []))
+    monkeypatch.setattr(pipeline, "_process_source", lambda *args, **kwargs: (0, 0, 0, 0, [], []))
     monkeypatch.setattr(pipeline, "render_digest", lambda *args: "forced digest")
 
     assert run_pipeline(settings, force=True, no_deliver=True, now=now).status == "ok"
