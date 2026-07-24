@@ -13,7 +13,7 @@ from typing import cast
 from .digest import canonical_url, normalized_title
 from .schemas import EmailExtraction, ResolvedContent, SourceDocument
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS documents(
@@ -31,6 +31,12 @@ CREATE TABLE IF NOT EXISTS gmail_document_state(
   document_id INTEGER PRIMARY KEY REFERENCES documents(id), gmail_message_id TEXT NOT NULL UNIQUE,
   gmail_thread_id TEXT NOT NULL, label_sync_state TEXT CHECK(label_sync_state IN ('synced','failed')),
   label_sync_error_code TEXT, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS hackernews_document_state(
+  document_id INTEGER PRIMARY KEY REFERENCES documents(id), hn_item_id INTEGER NOT NULL,
+  feed TEXT NOT NULL, feed_rank INTEGER NOT NULL, score INTEGER NOT NULL, descendants INTEGER NOT NULL,
+  requested_url TEXT, final_url TEXT,
+  fetch_status TEXT NOT NULL CHECK(fetch_status IN ('not_requested')), fetched_at TEXT, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS items(
   id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL REFERENCES documents(id), normalized_title TEXT NOT NULL,
@@ -52,6 +58,16 @@ CREATE TABLE IF NOT EXISTS runs(
 INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES({SCHEMA_VERSION}, datetime('now'));
 """
 
+MIGRATE_V2_TO_V3 = """
+CREATE TABLE IF NOT EXISTS hackernews_document_state(
+  document_id INTEGER PRIMARY KEY REFERENCES documents(id), hn_item_id INTEGER NOT NULL,
+  feed TEXT NOT NULL, feed_rank INTEGER NOT NULL, score INTEGER NOT NULL, descendants INTEGER NOT NULL,
+  requested_url TEXT, final_url TEXT,
+  fetch_status TEXT NOT NULL CHECK(fetch_status IN ('not_requested')), fetched_at TEXT, updated_at TEXT NOT NULL
+);
+INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(3, datetime('now'));
+"""
+
 
 class DatabaseSchemaResetRequiredError(ValueError):
     pass
@@ -63,7 +79,9 @@ class Database:
         self.connection = sqlite3.connect(path)
         self.connection.row_factory = sqlite3.Row
         version = self._schema_version()
-        if version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
+        if version == 2:
+            self.connection.executescript(MIGRATE_V2_TO_V3)
+        elif version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
             self.connection.close()
             raise DatabaseSchemaResetRequiredError(
                 f"DATABASE_SCHEMA_RESET_REQUIRED: back up {path} and remove it before rerunning 2much2read"
@@ -167,6 +185,67 @@ class Database:
             (gmail_id,),
         ).fetchone()
         return cast(sqlite3.Row | None, row)
+
+    def store_hackernews_metadata(
+        self,
+        document: SourceDocument,
+        feed: str,
+        feed_rank: int,
+        score: int,
+        descendants: int,
+        *,
+        force: bool = False,
+    ) -> tuple[int, bool]:
+        now = datetime.now(UTC).isoformat()
+        existing = self.connection.execute(
+            "SELECT id FROM documents WHERE source_type=? AND source_id=? AND external_id=?",
+            (document.source_type, document.source_id, document.external_id),
+        ).fetchone()
+        created = existing is None
+        if existing is None:
+            document_id = self.discover_document(
+                document,
+                ResolvedContent(document=document, text="", basis="metadata", truncated=False),
+            )
+            assert document_id is not None
+        else:
+            document_id = int(existing["id"])
+            self.connection.execute(
+                """UPDATE documents SET published_at=?,title=?,author=?,source_url=?,discussion_url=?,
+                state=CASE WHEN ? THEN 'discovered' ELSE state END,
+                last_error_code=CASE WHEN ? THEN NULL ELSE last_error_code END,updated_at=? WHERE id=?""",
+                (
+                    document.published_at.isoformat(),
+                    document.title,
+                    document.author,
+                    str(document.source_url) if document.source_url else None,
+                    str(document.discussion_url) if document.discussion_url else None,
+                    force,
+                    force,
+                    now,
+                    document_id,
+                ),
+            )
+        self.connection.execute(
+            """INSERT INTO hackernews_document_state
+            (document_id,hn_item_id,feed,feed_rank,score,descendants,requested_url,fetch_status,updated_at)
+            VALUES(?,?,?,?,?,?,?,'not_requested',?)
+            ON CONFLICT(document_id) DO UPDATE SET hn_item_id=excluded.hn_item_id,feed=excluded.feed,
+            feed_rank=excluded.feed_rank,score=excluded.score,descendants=excluded.descendants,
+            requested_url=excluded.requested_url,updated_at=excluded.updated_at""",
+            (
+                document_id,
+                int(document.external_id),
+                feed,
+                feed_rank,
+                score,
+                descendants,
+                str(document.source_url) if document.source_url else None,
+                now,
+            ),
+        )
+        self.connection.commit()
+        return document_id, created
 
     def store_extraction(
         self, document_id: int, extraction: EmailExtraction, replace: bool = False, finalize: bool = True
@@ -329,7 +408,7 @@ class Database:
     def counts(self) -> dict[str, int]:
         return {
             table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            for table in ("documents", "gmail_document_state", "items", "digests", "runs")
+            for table in ("documents", "gmail_document_state", "hackernews_document_state", "items", "digests", "runs")
         }
 
     def backup(self, path: Path) -> None:
@@ -343,7 +422,7 @@ class Database:
     def reset(self) -> dict[str, int]:
         counts = self.counts()
         with self.transaction() as connection:
-            for table in ("items", "gmail_document_state", "documents", "digests", "runs"):
+            for table in ("items", "gmail_document_state", "hackernews_document_state", "documents", "digests", "runs"):
                 connection.execute(f"DELETE FROM {table}")
         return counts
 

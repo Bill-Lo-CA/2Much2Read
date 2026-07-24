@@ -13,6 +13,7 @@ from two_read_runtime.progress import run_with_live_progress
 from .command_models import MailSelector, SubscriptionCandidate
 from .config import Settings
 from .diagnostics import doctor as run_doctor
+from .hackernews import inspect_hackernews, list_hackernews, sync_hackernews
 from .mail_operations import (
     authorize_gmail,
     ensure_labels,
@@ -37,12 +38,14 @@ filters_app = typer.Typer(no_args_is_help=True)
 mails_app = typer.Typer(no_args_is_help=True)
 subscriptions_app = typer.Typer(no_args_is_help=True)
 delivery_app = typer.Typer(no_args_is_help=True)
+hackernews_app = typer.Typer(no_args_is_help=True)
 app.add_typer(auth_app, name="auth")
 app.add_typer(labels_app, name="labels")
 app.add_typer(filters_app, name="filters")
 app.add_typer(mails_app, name="mails")
 app.add_typer(subscriptions_app, name="subscriptions")
 app.add_typer(delivery_app, name="delivery")
+app.add_typer(hackernews_app, name="hackernews")
 
 SourceOption = Annotated[str | None, typer.Option("--source")]
 QueryOption = Annotated[str | None, typer.Option("--query")]
@@ -170,6 +173,23 @@ def delivery_retry() -> None:
 @delivery_app.command("reset-checkpoint")
 def delivery_reset_checkpoint(digest_id: Annotated[int, typer.Option("--digest-id", min=1)]) -> None:
     invoke(lambda: reset_corrupt_delivery(Settings(), digest_id))
+
+
+@hackernews_app.command("list")
+def hackernews_list(source: Annotated[str, typer.Option()], limit: Annotated[int, typer.Option(min=1, max=200)] = 20) -> None:
+    invoke(lambda: list_hackernews(Settings(), source, limit))
+
+
+@hackernews_app.command("inspect")
+def hackernews_inspect(
+    source: Annotated[str, typer.Option()], story_id: Annotated[int, typer.Option("--story-id", min=1)]
+) -> None:
+    invoke(lambda: inspect_hackernews(Settings(), source, story_id))
+
+
+@hackernews_app.command("sync")
+def hackernews_sync(source: Annotated[str, typer.Option()], force: Annotated[bool, typer.Option()] = False) -> None:
+    invoke(lambda: sync_hackernews(Settings(), source, force))
 
 
 @app.command()

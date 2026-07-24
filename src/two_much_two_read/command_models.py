@@ -1,8 +1,9 @@
 from __future__ import annotations
 
+from datetime import datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, field_validator, model_validator
+from pydantic import BaseModel, Field, HttpUrl, field_validator, model_validator
 
 from .config import Source
 
@@ -143,3 +144,34 @@ class FiltersResult(CommandResult):
 
 class DoctorResult(CommandResult):
     checks: dict[str, str]
+
+
+class HackerNewsStoryView(BaseModel):
+    source_id: str
+    story_id: int
+    feed: str
+    feed_rank: int
+    title: str
+    author: str | None
+    published_at: datetime
+    score: int
+    comments: int
+    requested_url: HttpUrl | None
+    discussion_url: HttpUrl
+    content_kind: Literal["external", "self_post"]
+    fetch_status: Literal["not_requested"] = "not_requested"
+
+
+class HackerNewsListResult(CommandResult):
+    stories: list[HackerNewsStoryView]
+    skipped: int
+
+
+class HackerNewsInspectResult(CommandResult):
+    story: HackerNewsStoryView
+
+
+class HackerNewsSyncResult(CommandResult):
+    discovered: int
+    existing: int
+    skipped: int

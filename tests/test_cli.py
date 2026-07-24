@@ -10,6 +10,10 @@ from two_much_two_read import cli, mail_operations
 from two_much_two_read.command_models import (
     DeliveryCheckpointResetResult,
     FiltersResult,
+    HackerNewsInspectResult,
+    HackerNewsListResult,
+    HackerNewsStoryView,
+    HackerNewsSyncResult,
     LabelsReconcileResult,
     NewsletterRetryResult,
     NewsletterRunResult,
@@ -25,7 +29,7 @@ def test_cli_has_only_target_command_tree() -> None:
 
     root = runner.invoke(cli.app, ["--help"])
     assert root.exit_code == 0
-    for command in ("auth", "labels", "filters", "mails", "subscriptions", "delivery", "doctor", "run", "backfill"):
+    for command in ("auth", "labels", "filters", "mails", "subscriptions", "delivery", "hackernews", "doctor", "run", "backfill"):
         assert command in root.stdout
     assert "discover" not in root.stdout
     assert "resend" not in root.stdout
@@ -75,6 +79,44 @@ def test_delivery_reset_checkpoint_requires_an_explicit_digest_id(monkeypatch: p
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {"status": "ok", "digest_id": 7}
+
+
+def test_hackernews_commands_emit_typed_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    story = HackerNewsStoryView(
+        source_id="hn-best",
+        story_id=1,
+        feed="beststories",
+        feed_rank=1,
+        title="Story",
+        author="author",
+        published_at="2026-07-23T00:00:00Z",
+        score=10,
+        comments=2,
+        requested_url="https://example.com/story",
+        discussion_url="https://news.ycombinator.com/item?id=1",
+        content_kind="external",
+    )
+    monkeypatch.setattr(cli, "list_hackernews", lambda _, source, limit: HackerNewsListResult(stories=[story], skipped=0))
+    monkeypatch.setattr(cli, "inspect_hackernews", lambda _, source, story_id: HackerNewsInspectResult(story=story))
+    monkeypatch.setattr(
+        cli, "sync_hackernews", lambda _, source, force: HackerNewsSyncResult(discovered=1, existing=0, skipped=0)
+    )
+
+    runner = CliRunner()
+
+    assert json.loads(runner.invoke(cli.app, ["hackernews", "list", "--source", "hn-best"]).stdout)["stories"][0]["story_id"] == 1
+    assert (
+        json.loads(runner.invoke(cli.app, ["hackernews", "inspect", "--source", "hn-best", "--story-id", "1"]).stdout)["story"][
+            "fetch_status"
+        ]
+        == "not_requested"
+    )
+    assert json.loads(runner.invoke(cli.app, ["hackernews", "sync", "--source", "hn-best"]).stdout) == {
+        "status": "ok",
+        "discovered": 1,
+        "existing": 0,
+        "skipped": 0,
+    }
 
 
 def test_labels_reconcile_emits_a_typed_result(monkeypatch: pytest.MonkeyPatch) -> None:

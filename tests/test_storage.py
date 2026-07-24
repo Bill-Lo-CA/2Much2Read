@@ -136,6 +136,24 @@ def test_legacy_schema_requires_an_explicit_reset(tmp_path: Path) -> None:
         Database(path)
 
 
+def test_v2_schema_upgrades_without_losing_documents(tmp_path: Path) -> None:
+    path = tmp_path / "v2.sqlite3"
+    database = Database(path)
+    assert discover(database, "gmail-1") is not None
+    database.connection.execute("DROP TABLE hackernews_document_state")
+    database.connection.execute("DELETE FROM schema_version")
+    database.connection.execute("INSERT INTO schema_version VALUES(2, 'now')")
+    database.connection.commit()
+    database.close()
+
+    upgraded = Database(path)
+
+    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 3
+    assert upgraded.connection.execute("SELECT gmail_message_id FROM gmail_document_state").fetchone()[0] == "gmail-1"
+    assert upgraded.connection.execute("SELECT 1 FROM sqlite_master WHERE name='hackernews_document_state'").fetchone()[0] == 1
+    upgraded.close()
+
+
 def test_backup_and_reset(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     assert discover(database, "gmail-1") is not None
@@ -145,7 +163,14 @@ def test_backup_and_reset(tmp_path: Path) -> None:
     counts = database.reset()
 
     assert counts["documents"] == 1
-    assert database.counts() == {"documents": 0, "gmail_document_state": 0, "items": 0, "digests": 0, "runs": 0}
+    assert database.counts() == {
+        "documents": 0,
+        "gmail_document_state": 0,
+        "hackernews_document_state": 0,
+        "items": 0,
+        "digests": 0,
+        "runs": 0,
+    }
     assert backup_path.stat().st_mode & 0o777 == 0o600
     backup = Database(backup_path)
     assert backup.counts()["documents"] == 1

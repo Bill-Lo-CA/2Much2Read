@@ -34,7 +34,14 @@ def test_reset_database_replaces_a_legacy_database_with_v2(tmp_path: Path) -> No
     database = Database(path)
     assert database.connection.execute("SELECT version FROM schema_version").fetchone()[0] == SCHEMA_VERSION
     assert database.connection.execute("SELECT 1 FROM sqlite_master WHERE name='messages'").fetchone() is None
-    assert database.counts() == {"documents": 0, "gmail_document_state": 0, "items": 0, "digests": 0, "runs": 0}
+    assert database.counts() == {
+        "documents": 0,
+        "gmail_document_state": 0,
+        "hackernews_document_state": 0,
+        "items": 0,
+        "digests": 0,
+        "runs": 0,
+    }
     database.close()
 
 
