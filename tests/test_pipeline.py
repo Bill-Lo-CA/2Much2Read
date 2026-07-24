@@ -334,10 +334,12 @@ def test_mixed_gmail_and_hackernews_sources_run_together(tmp_path: Path, monkeyp
             pass
 
     def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
+        assert args[5] == 1
         seen.append("gmail")
         return 1, 1, 1, 0, [], []
 
     def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int]]:
+        assert args[4] == 10
         seen.append("hackernews")
         return 1, 1, 1, 0, []
 
@@ -348,7 +350,7 @@ def test_mixed_gmail_and_hackernews_sources_run_together(tmp_path: Path, monkeyp
     monkeypatch.setattr(pipeline, "_process_source", process_gmail)
     monkeypatch.setattr(pipeline, "_process_hackernews_source", process_hackernews)
 
-    result = run_pipeline(settings, no_deliver=True)
+    result = run_pipeline(settings, max_messages=1, no_deliver=True)
 
     assert seen == ["gmail", "hackernews"]
     assert result.discovered == 2

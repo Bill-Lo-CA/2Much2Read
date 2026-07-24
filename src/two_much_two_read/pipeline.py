@@ -356,23 +356,23 @@ def run_pipeline(
             if any(isinstance(source, HackerNewsSource) for source in sources):
                 hackernews = HackerNewsClient()
             ollama = create_ollama_client(settings)
-            remaining = max_messages or settings.gmail_max_messages_per_run
+            gmail_remaining = max_messages or settings.gmail_max_messages_per_run
             status(f"Starting {len(sources)} source(s)")
             for source in sources:
-                if remaining <= 0:
-                    break
                 if isinstance(source, GmailSource):
+                    if gmail_remaining <= 0:
+                        continue
                     assert gmail is not None
                     used, source_discovered, source_processed, source_failed, source_ids, source_documents = _process_source(
-                        database, gmail, ollama, settings, source, remaining, status, force=force, dry_run=dry_run
+                        database, gmail, ollama, settings, source, gmail_remaining, status, force=force, dry_run=dry_run
                     )
+                    gmail_remaining -= used
                 else:
                     assert hackernews is not None
                     used, source_discovered, source_processed, source_failed, source_ids = _process_hackernews_source(
-                        database, hackernews, ollama, source, remaining, status, force=force, now=now
+                        database, hackernews, ollama, source, source.max_articles_per_run, status, force=force, now=now
                     )
                     source_documents = []
-                remaining -= used
                 discovered += source_discovered
                 processed += source_processed
                 failed += source_failed
