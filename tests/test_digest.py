@@ -96,6 +96,7 @@ def test_cross_source_dedupe_preserves_hackernews_attribution() -> None:
                 hn_comments=2,
                 hn_item_id="456",
                 discussion_url="https://news.ycombinator.com/item?id=456",
+                content_basis="metadata",
             ),
         ],
         datetime(2026, 7, 24, tzinfo=UTC),
@@ -106,6 +107,7 @@ def test_cross_source_dedupe_preserves_hackernews_attribution() -> None:
     assert "Newsletter title" in result
     assert "HN title" not in result
     assert "討論：<https://news.ycombinator.com/item?id=456>" in result
+    assert "內容：僅 metadata" not in result
 
 
 def test_hackernews_metadata_fallback_is_visible() -> None:

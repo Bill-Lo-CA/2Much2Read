@@ -77,7 +77,6 @@ def _preserve_hn_attribution(primary: DigestEntry, other: DigestEntry) -> Digest
         hn_score=other.hn_score,
         hn_comments=other.hn_comments,
         hn_item_id=other.hn_item_id,
-        content_basis=other.content_basis,
     )
 
 
