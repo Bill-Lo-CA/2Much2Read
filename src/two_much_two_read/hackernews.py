@@ -339,14 +339,10 @@ def inspect_hackernews(
             return HackerNewsInspectResult(story=story_view(candidate, stored=stored_hackernews_state(settings, candidate)))
         active_fetcher = article_fetcher or ArticleFetcher()
         try:
-            try:
-                resolved = resolve_hackernews_candidate(candidate, active_fetcher)
-                return HackerNewsInspectResult(story=story_view(candidate, resolved, "fetched"))
-            except (ArticleFetchError, ArticleExtractionError) as error:
-                return HackerNewsInspectResult(story=story_view(candidate, fetch_status=cast(HackerNewsFetchStatus, error.code)))
-        finally:
-            if article_fetcher is None:
-                active_fetcher.close()
+            resolved = resolve_hackernews_candidate(candidate, active_fetcher)
+            return HackerNewsInspectResult(story=story_view(candidate, resolved, "fetched"))
+        except (ArticleFetchError, ArticleExtractionError) as error:
+            return HackerNewsInspectResult(story=story_view(candidate, fetch_status=cast(HackerNewsFetchStatus, error.code)))
     finally:
         if close_client:
             active_client.close()
@@ -365,46 +361,42 @@ def sync_hackernews(
     active_client, close_client = _client(client)
     try:
         active_fetcher = article_fetcher or ArticleFetcher() if fetch_articles else None
-        try:
-            with ProcessLock(settings.lock_path):
-                discovery = active_client.discover(source)
-                database = Database(settings.database_path)
-                try:
-                    discovered = 0
-                    existing = 0
-                    fetched = 0
-                    failed = 0
-                    for candidate in discovery.candidates:
-                        document_id, created = database.store_hackernews_metadata(
-                            candidate.document,
-                            candidate.feed,
-                            candidate.feed_rank,
-                            candidate.score,
-                            candidate.comments,
-                            force=force,
-                        )
-                        if created:
-                            discovered += 1
-                        else:
-                            existing += 1
-                        if active_fetcher is None or (not force and database.hackernews_fetch_status(document_id) == "fetched"):
-                            continue
-                        try:
-                            database.store_hackernews_resolution(
-                                document_id, resolve_hackernews_candidate(candidate, active_fetcher).content
-                            )
-                            fetched += 1
-                        except (ArticleFetchError, ArticleExtractionError) as error:
-                            database.record_hackernews_fetch_failure(document_id, error.code)
-                            failed += 1
-                    return HackerNewsSyncResult(
-                        discovered=discovered, existing=existing, skipped=discovery.skipped, fetched=fetched, failed=failed
+        with ProcessLock(settings.lock_path):
+            discovery = active_client.discover(source)
+            database = Database(settings.database_path)
+            try:
+                discovered = 0
+                existing = 0
+                fetched = 0
+                failed = 0
+                for candidate in discovery.candidates:
+                    document_id, created = database.store_hackernews_metadata(
+                        candidate.document,
+                        candidate.feed,
+                        candidate.feed_rank,
+                        candidate.score,
+                        candidate.comments,
+                        force=force,
                     )
-                finally:
-                    database.close()
-        finally:
-            if article_fetcher is None and active_fetcher is not None:
-                active_fetcher.close()
+                    if created:
+                        discovered += 1
+                    else:
+                        existing += 1
+                    if active_fetcher is None or (not force and database.hackernews_fetch_status(document_id) == "fetched"):
+                        continue
+                    try:
+                        database.store_hackernews_resolution(
+                            document_id, resolve_hackernews_candidate(candidate, active_fetcher).content
+                        )
+                        fetched += 1
+                    except (ArticleFetchError, ArticleExtractionError) as error:
+                        database.record_hackernews_fetch_failure(document_id, error.code)
+                        failed += 1
+                return HackerNewsSyncResult(
+                    discovered=discovered, existing=existing, skipped=discovery.skipped, fetched=fetched, failed=failed
+                )
+            finally:
+                database.close()
     finally:
         if close_client:
             active_client.close()

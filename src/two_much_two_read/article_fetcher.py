@@ -1,20 +1,22 @@
 from __future__ import annotations
 
+import http.client
 import ipaddress
 import logging
 import re
 import socket
-from collections.abc import Callable
+import ssl
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from urllib import robotparser
 from urllib.parse import urljoin, urlsplit, urlunsplit
-
-import httpx
 
 USER_AGENT = "2much2read/0.1"
 MAX_REDIRECTS = 5
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
 MAX_ROBOTS_BYTES = 256 * 1024
+CONNECT_TIMEOUT_SECONDS = 5
+READ_TIMEOUT_SECONDS = 15
 
 logger = logging.getLogger(__name__)
 
@@ -34,59 +36,88 @@ class FetchedArticle:
 
 
 @dataclass(frozen=True)
-class _Response:
+class ArticleResponse:
     status_code: int
-    headers: httpx.Headers
+    headers: Mapping[str, str]
     body: bytes
+
+
+@dataclass(frozen=True)
+class ValidatedURL:
+    url: str
+    hostname: str
+    host_header: str
+    port: int
+    address: str
+    target: str
+
+
+ResponseProvider = Callable[[ValidatedURL], ArticleResponse]
 
 
 def _resolve(hostname: str) -> list[str]:
     try:
-        return list({str(entry[4][0]) for entry in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)})
+        return [str(entry[4][0]) for entry in socket.getaddrinfo(hostname, None, type=socket.SOCK_STREAM)]
     except OSError as error:
         raise ArticleFetchError("ARTICLE_URL_BLOCKED") from error
 
 
-class ArticleFetcher:
-    def __init__(self, client: httpx.Client | None = None, resolver: Callable[[str], list[str]] = _resolve) -> None:
-        self._owned_client = client is None
-        self.client = client or httpx.Client(
-            follow_redirects=False,
-            headers={"User-Agent": USER_AGENT, "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9"},
-            timeout=httpx.Timeout(connect=5, read=15, write=15, pool=15),
-            trust_env=False,
-        )
-        self.resolver = resolver
+class _PinnedHTTPConnection(http.client.HTTPConnection):
+    def __init__(self, hostname: str, port: int, address: str) -> None:
+        super().__init__(hostname, port, timeout=CONNECT_TIMEOUT_SECONDS)
+        self.address = address
 
-    def close(self) -> None:
-        if self._owned_client:
-            self.client.close()
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self.address, self.port), self.timeout)
+        self.sock.settimeout(READ_TIMEOUT_SECONDS)
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, hostname: str, port: int, address: str) -> None:
+        self.context = ssl.create_default_context()
+        super().__init__(hostname, port, timeout=CONNECT_TIMEOUT_SECONDS, context=self.context)
+        self.address = address
+
+    def connect(self) -> None:
+        sock = socket.create_connection((self.address, self.port), self.timeout)
+        self.sock = self.context.wrap_socket(sock, server_hostname=self.host)
+        self.sock.settimeout(READ_TIMEOUT_SECONDS)
+
+
+class ArticleFetcher:
+    def __init__(
+        self,
+        resolver: Callable[[str], list[str]] = _resolve,
+        response_provider: ResponseProvider | None = None,
+    ) -> None:
+        self.resolver = resolver
+        self.response_provider = response_provider
 
     def fetch(self, requested_url: str) -> FetchedArticle:
-        current_url = self._validate_url(requested_url, redirect=False)
-        seen_urls = {current_url}
+        current = self._validate_url(requested_url, redirect=False)
+        seen_urls = {current.url}
         for redirects in range(MAX_REDIRECTS + 1):
-            self._check_robots(current_url)
-            response = self._read(current_url, MAX_RESPONSE_BYTES)
+            self._check_robots(current)
+            response = self._read(current, MAX_RESPONSE_BYTES)
             if 300 <= response.status_code < 400:
                 location = response.headers.get("location")
                 if not location or redirects == MAX_REDIRECTS:
                     raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
-                next_url = self._validate_url(urljoin(current_url, location), redirect=True)
-                if next_url in seen_urls:
+                next_url = self._validate_url(urljoin(current.url, location), redirect=True)
+                if next_url.url in seen_urls:
                     raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
-                seen_urls.add(next_url)
-                current_url = next_url
+                seen_urls.add(next_url.url)
+                current = next_url
                 continue
             if not 200 <= response.status_code < 300:
                 raise ArticleFetchError("ARTICLE_FETCH_FAILED")
             content_type = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
             if content_type not in {"text/html", "application/xhtml+xml", "text/plain"}:
                 raise ArticleFetchError("ARTICLE_CONTENT_TYPE_UNSUPPORTED")
-            return FetchedArticle(requested_url, current_url, content_type, response.body)
+            return FetchedArticle(requested_url, current.url, content_type, response.body)
         raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
 
-    def _validate_url(self, value: str, *, redirect: bool) -> str:
+    def _validate_url(self, value: str, *, redirect: bool) -> ValidatedURL:
         code = "ARTICLE_REDIRECT_BLOCKED" if redirect else "ARTICLE_URL_BLOCKED"
         try:
             parsed = urlsplit(value)
@@ -100,7 +131,7 @@ class ArticleFetcher:
         if port not in {None, 80, 443}:
             raise ArticleFetchError(code)
         hostname = parsed.hostname.rstrip(".").lower()
-        if hostname == "localhost":
+        if not hostname or hostname == "localhost":
             raise ArticleFetchError(code)
         try:
             addresses = [str(ipaddress.ip_address(hostname))]
@@ -118,33 +149,78 @@ class ArticleFetcher:
                 raise ArticleFetchError(code)
         except ValueError as error:
             raise ArticleFetchError(code) from error
-        netloc = f"[{hostname}]" if ":" in hostname else hostname
+        actual_port = port or (443 if parsed.scheme.lower() == "https" else 80)
+        host_header = f"[{hostname}]" if ":" in hostname else hostname
         if port is not None:
-            netloc = f"{netloc}:{port}"
-        return urlunsplit((parsed.scheme.lower(), netloc, parsed.path or "/", parsed.query, ""))
+            host_header = f"{host_header}:{port}"
+        target = parsed.path or "/"
+        if parsed.query:
+            target = f"{target}?{parsed.query}"
+        return ValidatedURL(
+            urlunsplit((parsed.scheme.lower(), host_header, parsed.path or "/", parsed.query, "")),
+            hostname,
+            host_header,
+            actual_port,
+            addresses[0],
+            target,
+        )
 
-    def _read(self, url: str, limit: int) -> _Response:
+    def _read(self, url: ValidatedURL, limit: int) -> ArticleResponse:
         try:
-            self.client.cookies.clear()
-            with self.client.stream("GET", url, headers={"Accept-Encoding": "identity"}) as response:
-                content_length = response.headers.get("content-length")
+            if self.response_provider is not None:
+                return self._bounded_response(self.response_provider(url), limit)
+            connection: http.client.HTTPConnection
+            if url.url.startswith("https://"):
+                connection = _PinnedHTTPSConnection(url.hostname, url.port, url.address)
+            else:
+                connection = _PinnedHTTPConnection(url.hostname, url.port, url.address)
+            try:
+                connection.request(
+                    "GET",
+                    url.target,
+                    headers={
+                        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9",
+                        "Accept-Encoding": "identity",
+                        "Host": url.host_header,
+                        "User-Agent": USER_AGENT,
+                    },
+                )
+                response = connection.getresponse()
+                headers = {name.lower(): value for name, value in response.getheaders()}
+                content_length = headers.get("content-length")
                 if content_length and int(content_length) > limit:
                     raise ArticleFetchError("ARTICLE_TOO_LARGE")
                 body = bytearray()
-                for chunk in response.iter_bytes():
+                while chunk := response.read(64 * 1024):
                     body.extend(chunk)
                     if len(body) > limit:
                         raise ArticleFetchError("ARTICLE_TOO_LARGE")
-                return _Response(response.status_code, response.headers, bytes(body))
+                return ArticleResponse(response.status, headers, bytes(body))
+            finally:
+                connection.close()
         except ArticleFetchError:
             raise
-        except httpx.TimeoutException as error:
+        except TimeoutError as error:
             raise ArticleFetchError("ARTICLE_FETCH_TIMEOUT") from error
-        except (httpx.HTTPError, ValueError) as error:
+        except (http.client.HTTPException, OSError, ValueError) as error:
             raise ArticleFetchError("ARTICLE_FETCH_FAILED") from error
 
-    def _check_robots(self, article_url: str) -> None:
-        parsed = urlsplit(article_url)
+    @staticmethod
+    def _bounded_response(response: ArticleResponse, limit: int) -> ArticleResponse:
+        headers = {name.lower(): value for name, value in response.headers.items()}
+        content_length = headers.get("content-length")
+        try:
+            declared_length = int(content_length) if content_length else None
+        except ValueError as error:
+            raise ArticleFetchError("ARTICLE_FETCH_FAILED") from error
+        if declared_length is not None and declared_length > limit:
+            raise ArticleFetchError("ARTICLE_TOO_LARGE")
+        if len(response.body) > limit:
+            raise ArticleFetchError("ARTICLE_TOO_LARGE")
+        return ArticleResponse(response.status_code, headers, response.body)
+
+    def _check_robots(self, article_url: ValidatedURL) -> None:
+        parsed = urlsplit(article_url.url)
         robots_url = urlunsplit((parsed.scheme, parsed.netloc, "/robots.txt", "", ""))
         try:
             response = self._fetch_robots(robots_url)
@@ -155,26 +231,26 @@ class ArticleFetcher:
                 return
             parser = robotparser.RobotFileParser()
             parser.parse(robots_text.splitlines())
-            if not parser.can_fetch(USER_AGENT, article_url):
+            if not parser.can_fetch(USER_AGENT, article_url.url):
                 raise ArticleFetchError("ARTICLE_ROBOTS_DENIED")
         except ArticleFetchError as error:
             if error.code == "ARTICLE_ROBOTS_DENIED":
                 raise
-            logger.debug("robots check unavailable for %s: %s", article_url, error.code)
+            logger.debug("robots check unavailable for %s: %s", article_url.url, error.code)
 
-    def _fetch_robots(self, robots_url: str) -> _Response | None:
-        current_url = self._validate_url(robots_url, redirect=False)
-        seen_urls = {current_url}
+    def _fetch_robots(self, robots_url: str) -> ArticleResponse | None:
+        current = self._validate_url(robots_url, redirect=False)
+        seen_urls = {current.url}
         for redirects in range(MAX_REDIRECTS + 1):
-            response = self._read(current_url, MAX_ROBOTS_BYTES)
+            response = self._read(current, MAX_ROBOTS_BYTES)
             if not 300 <= response.status_code < 400:
                 return response
             location = response.headers.get("location")
             if not location or redirects == MAX_REDIRECTS:
                 return None
-            next_url = self._validate_url(urljoin(current_url, location), redirect=True)
-            if next_url in seen_urls:
+            next_url = self._validate_url(urljoin(current.url, location), redirect=True)
+            if next_url.url in seen_urls:
                 return None
-            seen_urls.add(next_url)
-            current_url = next_url
+            seen_urls.add(next_url.url)
+            current = next_url
         return None

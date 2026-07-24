@@ -6,7 +6,7 @@ from pathlib import Path
 import httpx
 import pytest
 
-from two_much_two_read.article_fetcher import ArticleFetcher
+from two_much_two_read.article_fetcher import ArticleFetcher, ArticleResponse, ValidatedURL
 from two_much_two_read.config import HackerNewsSource, Settings
 from two_much_two_read.hackernews import (
     HackerNewsClient,
@@ -180,12 +180,11 @@ def test_inspect_fetches_a_safe_article_without_writing_local_state(tmp_path: Pa
     )
     active_client, http_client = client({"/v0/beststories.json": [1], "/v0/item/1.json": item(1)})
 
-    def article_handler(request: httpx.Request) -> httpx.Response:
-        if request.url.path == "/robots.txt":
-            return httpx.Response(200, text="User-agent: *\nAllow: /")
-        return httpx.Response(200, headers={"content-type": "text/html"}, content=("<article><p>Useful text. </p>" * 50).encode())
+    def article_handler(request: ValidatedURL) -> ArticleResponse:
+        if request.target == "/robots.txt":
+            return ArticleResponse(200, {}, b"User-agent: *\nAllow: /")
+        return ArticleResponse(200, {"content-type": "text/html"}, ("<article><p>Useful text. </p>" * 50).encode())
 
-    article_client = httpx.Client(transport=httpx.MockTransport(article_handler))
     try:
         result = inspect_hackernews(
             settings,
@@ -193,11 +192,10 @@ def test_inspect_fetches_a_safe_article_without_writing_local_state(tmp_path: Pa
             1,
             active_client,
             fetch_article=True,
-            article_fetcher=ArticleFetcher(article_client, lambda _: ["93.184.216.34"]),
+            article_fetcher=ArticleFetcher(lambda _: ["93.184.216.34"], article_handler),
         )
     finally:
         http_client.close()
-        article_client.close()
 
     assert result.story.fetch_status == "fetched"
     assert result.story.content_basis == "article"
@@ -218,21 +216,19 @@ def test_sync_fetch_articles_persists_metadata_but_not_article_text(tmp_path: Pa
     active_client, http_client = client({"/v0/beststories.json": [1], "/v0/item/1.json": item(1)})
     article_requests = 0
 
-    def article_handler(request: httpx.Request) -> httpx.Response:
+    def article_handler(request: ValidatedURL) -> ArticleResponse:
         nonlocal article_requests
-        if request.url.path == "/robots.txt":
-            return httpx.Response(200, text="User-agent: *\nAllow: /")
+        if request.target == "/robots.txt":
+            return ArticleResponse(200, {}, b"User-agent: *\nAllow: /")
         article_requests += 1
-        return httpx.Response(200, headers={"content-type": "text/html"}, content=("<article><p>Useful text. </p>" * 50).encode())
+        return ArticleResponse(200, {"content-type": "text/html"}, ("<article><p>Useful text. </p>" * 50).encode())
 
-    article_client = httpx.Client(transport=httpx.MockTransport(article_handler))
-    fetcher = ArticleFetcher(article_client, lambda _: ["93.184.216.34"])
+    fetcher = ArticleFetcher(lambda _: ["93.184.216.34"], article_handler)
     try:
         first = sync_hackernews(settings, "hn-best", client=active_client, fetch_articles=True, article_fetcher=fetcher)
         second = sync_hackernews(settings, "hn-best", client=active_client, fetch_articles=True, article_fetcher=fetcher)
     finally:
         http_client.close()
-        article_client.close()
 
     assert first.model_dump() == {"status": "ok", "discovered": 1, "existing": 0, "skipped": 0, "fetched": 1, "failed": 0}
     assert second.model_dump() == {"status": "ok", "discovered": 0, "existing": 1, "skipped": 0, "fetched": 0, "failed": 0}
