@@ -118,7 +118,9 @@ class HackerNewsClient:
         return item if item.id == story_id else None
 
     @staticmethod
-    def _candidate(source: HackerNewsSource, item: HackerNewsItem, feed_rank: int, now: datetime) -> HackerNewsCandidate | None:
+    def _candidate(
+        source: HackerNewsSource, item: HackerNewsItem, feed_rank: int, now: datetime, *, enforce_filters: bool = True
+    ) -> HackerNewsCandidate | None:
         if item.type != "story" or item.deleted or item.dead:
             return None
         title = (item.title or "").strip()
@@ -128,11 +130,13 @@ class HackerNewsClient:
             published_at = datetime.fromtimestamp(item.time, tz=UTC)
         except (OverflowError, OSError, ValueError):
             return None
-        if (now - published_at).total_seconds() > source.max_age_hours * 3600:
-            return None
         score = item.score or 0
         comments = item.descendants or 0
-        if score < source.min_score or comments < source.min_comments:
+        if enforce_filters and (
+            (now - published_at).total_seconds() > source.max_age_hours * 3600
+            or score < source.min_score
+            or comments < source.min_comments
+        ):
             return None
         discussion_url = HTTP_URL.validate_python(f"https://news.ycombinator.com/item?id={item.id}")
         content_kind: Literal["external", "self_post"]
@@ -170,7 +174,7 @@ class HackerNewsClient:
 
     def discover(self, source: HackerNewsSource, now: datetime | None = None, limit: int | None = None) -> HackerNewsDiscovery:
         active_now = now or datetime.now(UTC)
-        candidate_limit = min(source.max_articles_per_run, limit) if limit is not None else source.max_articles_per_run
+        candidate_limit = min(source.max_story_candidates, limit) if limit is not None else source.max_articles_per_run
         candidates: list[HackerNewsCandidate] = []
         skipped = 0
         for feed_rank, story_id in enumerate(self.feed_ids(source), start=1):
@@ -190,6 +194,14 @@ class HackerNewsClient:
             if len(candidates) >= candidate_limit:
                 break
         return HackerNewsDiscovery(candidates, skipped)
+
+    def retry_candidate(
+        self, source: HackerNewsSource, story_id: int, feed_rank: int, now: datetime | None = None
+    ) -> HackerNewsCandidate | None:
+        item = self.item(story_id)
+        if item is None:
+            return None
+        return self._candidate(source, item, feed_rank, now or datetime.now(UTC), enforce_filters=False)
 
     def inspect(self, source: HackerNewsSource, story_id: int, now: datetime | None = None) -> HackerNewsCandidate:
         try:

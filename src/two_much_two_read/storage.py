@@ -11,7 +11,7 @@ from pathlib import Path
 from typing import cast
 
 from .digest import canonical_url, normalized_title
-from .schemas import EmailExtraction, ResolvedContent, SourceDocument
+from .schemas import DigestItem, EmailExtraction, ResolvedContent, SourceDocument
 
 SCHEMA_VERSION = 4
 SCHEMA = f"""
@@ -280,6 +280,22 @@ class Database:
         assert row is not None
         return str(row["fetch_status"])
 
+    def hackernews_document(self, source_id: str, external_id: str) -> sqlite3.Row | None:
+        row = self.connection.execute(
+            """SELECT id,state FROM documents WHERE source_type='hackernews' AND source_id=? AND external_id=?""",
+            (source_id, external_id),
+        ).fetchone()
+        return cast(sqlite3.Row | None, row)
+
+    def failed_hackernews_documents(self, source_id: str, limit: int) -> list[sqlite3.Row]:
+        return self.connection.execute(
+            """SELECT d.id,d.external_id,h.feed_rank FROM documents d
+            JOIN hackernews_document_state h ON h.document_id=d.id
+            WHERE d.source_type='hackernews' AND d.source_id=? AND d.state='failed'
+            ORDER BY d.updated_at,d.id LIMIT ?""",
+            (source_id, limit),
+        ).fetchall()
+
     def store_hackernews_resolution(self, document_id: int, content: ResolvedContent) -> None:
         now = datetime.now(UTC).isoformat()
         with self.transaction() as connection:
@@ -313,14 +329,12 @@ class Database:
                 (error_code, now, now, document_id),
             )
 
-    def store_extraction(
-        self, document_id: int, extraction: EmailExtraction, replace: bool = False, finalize: bool = True
-    ) -> None:
+    def store_items(self, document_id: int, items: list[DigestItem], replace: bool = False, finalize: bool = True) -> None:
         now = datetime.now(UTC).isoformat()
         with self.transaction() as connection:
             if replace:
                 connection.execute("DELETE FROM items WHERE document_id=?", (document_id,))
-            for item in extraction.items:
+            for item in items:
                 url = str(item.source_url) if item.source_url else None
                 connection.execute(
                     """INSERT INTO items
@@ -344,6 +358,11 @@ class Database:
                 )
             if finalize:
                 self._finalize_documents(connection, [document_id], now)
+
+    def store_extraction(
+        self, document_id: int, extraction: EmailExtraction, replace: bool = False, finalize: bool = True
+    ) -> None:
+        self.store_items(document_id, extraction.items, replace, finalize)
 
     @staticmethod
     def _finalize_documents(connection: sqlite3.Connection, document_ids: list[int], now: str) -> None:
@@ -403,7 +422,10 @@ class Database:
             return []
         placeholders = ",".join("?" for _ in document_ids)
         rows = self.connection.execute(
-            f"""SELECT i.*, d.published_at FROM items i JOIN documents d ON d.id=i.document_id
+            f"""SELECT i.*,d.published_at,d.source_type,d.discussion_url,d.content_basis,d.external_id,
+            h.score AS hn_score,h.descendants AS hn_comments,h.final_url
+            FROM items i JOIN documents d ON d.id=i.document_id
+            LEFT JOIN hackernews_document_state h ON h.document_id=d.id
             WHERE i.document_id IN ({placeholders}) ORDER BY d.published_at DESC LIMIT ?""",
             (*document_ids, limit),
         ).fetchall()
