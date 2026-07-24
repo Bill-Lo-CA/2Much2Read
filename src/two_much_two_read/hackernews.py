@@ -1,17 +1,26 @@
 from __future__ import annotations
 
+import sqlite3
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Literal, cast
 
 import httpx
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, TypeAdapter, ValidationError
 
 from two_read_runtime.locking import ProcessLock
 
-from .command_models import HackerNewsInspectResult, HackerNewsListResult, HackerNewsStoryView, HackerNewsSyncResult
+from .article_extractor import ArticleExtractionError, extract_article, extract_self_post
+from .article_fetcher import ArticleFetcher, ArticleFetchError
+from .command_models import (
+    HackerNewsFetchStatus,
+    HackerNewsInspectResult,
+    HackerNewsListResult,
+    HackerNewsStoryView,
+    HackerNewsSyncResult,
+)
 from .config import HackerNewsSource, Settings, load_sources
-from .schemas import SourceDocument
+from .schemas import ResolvedContent, SourceDocument
 from .storage import Database
 
 API_BASE_URL = "https://hacker-news.firebaseio.com/v0/"
@@ -46,6 +55,21 @@ class HackerNewsCandidate:
     score: int
     comments: int
     content_kind: Literal["external", "self_post"]
+    self_post_html: str | None
+
+
+@dataclass(frozen=True)
+class ResolvedHackerNewsContent:
+    content: ResolvedContent
+    article_title: str | None
+
+
+@dataclass(frozen=True)
+class StoredHackerNewsState:
+    content_basis: Literal["metadata", "article", "hn_self_post"]
+    final_url: HttpUrl | None
+    content_characters: int
+    fetch_status: HackerNewsFetchStatus
 
 
 @dataclass(frozen=True)
@@ -142,7 +166,7 @@ class HackerNewsClient:
             content_kind = "self_post"
         else:
             return None
-        return HackerNewsCandidate(document, source.feed, feed_rank, score, comments, content_kind)
+        return HackerNewsCandidate(document, source.feed, feed_rank, score, comments, content_kind, item.text)
 
     def discover(self, source: HackerNewsSource, now: datetime | None = None, limit: int | None = None) -> HackerNewsDiscovery:
         active_now = now or datetime.now(UTC)
@@ -192,9 +216,69 @@ def hackernews_source(settings: Settings, source_id: str) -> HackerNewsSource:
     return source
 
 
-def story_view(candidate: HackerNewsCandidate) -> HackerNewsStoryView:
+def resolve_hackernews_candidate(candidate: HackerNewsCandidate, article_fetcher: ArticleFetcher) -> ResolvedHackerNewsContent:
+    document = candidate.document
+    if candidate.content_kind == "self_post":
+        extracted = extract_self_post(candidate.self_post_html or "")
+        return ResolvedHackerNewsContent(
+            ResolvedContent(document=document, text=extracted.text, basis="hn_self_post", truncated=extracted.truncated), None
+        )
+    assert document.source_url is not None
+    fetched = article_fetcher.fetch(str(document.source_url))
+    extracted = extract_article(fetched.content_type, fetched.body)
+    return ResolvedHackerNewsContent(
+        ResolvedContent(
+            document=document,
+            text=extracted.text,
+            basis="article",
+            final_url=HTTP_URL.validate_python(fetched.final_url),
+            truncated=extracted.truncated,
+        ),
+        extracted.title,
+    )
+
+
+def stored_hackernews_state(settings: Settings, candidate: HackerNewsCandidate) -> StoredHackerNewsState | None:
+    path = settings.database_path
+    if not path.is_file():
+        return None
+    try:
+        connection = sqlite3.connect(f"{path.resolve().as_uri()}?mode=ro", uri=True)
+        try:
+            row = connection.execute(
+                """SELECT d.content_basis,d.content_characters,h.final_url,h.fetch_status
+                FROM documents d JOIN hackernews_document_state h ON h.document_id=d.id
+                WHERE d.source_type='hackernews' AND d.source_id=? AND d.external_id=?""",
+                (candidate.document.source_id, candidate.document.external_id),
+            ).fetchone()
+        finally:
+            connection.close()
+    except sqlite3.Error:
+        return None
+    if row is None:
+        return None
+    try:
+        return StoredHackerNewsState(
+            cast(Literal["metadata", "article", "hn_self_post"], row[0]),
+            HTTP_URL.validate_python(row[2]) if row[2] else None,
+            int(row[1]),
+            cast(HackerNewsFetchStatus, row[3]),
+        )
+    except (TypeError, ValueError):
+        return None
+
+
+def story_view(
+    candidate: HackerNewsCandidate,
+    resolved: ResolvedHackerNewsContent | None = None,
+    fetch_status: HackerNewsFetchStatus = "not_requested",
+    stored: StoredHackerNewsState | None = None,
+) -> HackerNewsStoryView:
     document = candidate.document
     assert document.discussion_url is not None
+    content = resolved.content if resolved else None
+    if content:
+        assert content.basis in {"article", "hn_self_post"}
     return HackerNewsStoryView(
         source_id=document.source_id,
         story_id=int(document.external_id),
@@ -208,6 +292,16 @@ def story_view(candidate: HackerNewsCandidate) -> HackerNewsStoryView:
         requested_url=document.source_url,
         discussion_url=document.discussion_url,
         content_kind=candidate.content_kind,
+        content_basis=cast(Literal["metadata", "article", "hn_self_post"], content.basis)
+        if content
+        else stored.content_basis
+        if stored
+        else "metadata",
+        final_url=content.final_url if content else stored.final_url if stored else None,
+        article_title=resolved.article_title if resolved else None,
+        content_characters=len(content.text) if content else stored.content_characters if stored else 0,
+        content_preview=content.text[:500] if content else None,
+        fetch_status=fetch_status if content or not stored else stored.fetch_status,
     )
 
 
@@ -229,45 +323,88 @@ def list_hackernews(
 
 
 def inspect_hackernews(
-    settings: Settings, source_id: str, story_id: int, client: HackerNewsClient | None = None
+    settings: Settings,
+    source_id: str,
+    story_id: int,
+    client: HackerNewsClient | None = None,
+    *,
+    fetch_article: bool = False,
+    article_fetcher: ArticleFetcher | None = None,
 ) -> HackerNewsInspectResult:
     source = hackernews_source(settings, source_id)
     active_client, close_client = _client(client)
     try:
-        return HackerNewsInspectResult(story=story_view(active_client.inspect(source, story_id)))
+        candidate = active_client.inspect(source, story_id)
+        if not fetch_article:
+            return HackerNewsInspectResult(story=story_view(candidate, stored=stored_hackernews_state(settings, candidate)))
+        active_fetcher = article_fetcher or ArticleFetcher()
+        try:
+            try:
+                resolved = resolve_hackernews_candidate(candidate, active_fetcher)
+                return HackerNewsInspectResult(story=story_view(candidate, resolved, "fetched"))
+            except (ArticleFetchError, ArticleExtractionError) as error:
+                return HackerNewsInspectResult(story=story_view(candidate, fetch_status=cast(HackerNewsFetchStatus, error.code)))
+        finally:
+            if article_fetcher is None:
+                active_fetcher.close()
     finally:
         if close_client:
             active_client.close()
 
 
 def sync_hackernews(
-    settings: Settings, source_id: str, force: bool = False, client: HackerNewsClient | None = None
+    settings: Settings,
+    source_id: str,
+    force: bool = False,
+    client: HackerNewsClient | None = None,
+    *,
+    fetch_articles: bool = False,
+    article_fetcher: ArticleFetcher | None = None,
 ) -> HackerNewsSyncResult:
     source = hackernews_source(settings, source_id)
     active_client, close_client = _client(client)
     try:
-        with ProcessLock(settings.lock_path):
-            discovery = active_client.discover(source)
-            database = Database(settings.database_path)
-            try:
-                discovered = 0
-                existing = 0
-                for candidate in discovery.candidates:
-                    _, created = database.store_hackernews_metadata(
-                        candidate.document,
-                        candidate.feed,
-                        candidate.feed_rank,
-                        candidate.score,
-                        candidate.comments,
-                        force=force,
+        active_fetcher = article_fetcher or ArticleFetcher() if fetch_articles else None
+        try:
+            with ProcessLock(settings.lock_path):
+                discovery = active_client.discover(source)
+                database = Database(settings.database_path)
+                try:
+                    discovered = 0
+                    existing = 0
+                    fetched = 0
+                    failed = 0
+                    for candidate in discovery.candidates:
+                        document_id, created = database.store_hackernews_metadata(
+                            candidate.document,
+                            candidate.feed,
+                            candidate.feed_rank,
+                            candidate.score,
+                            candidate.comments,
+                            force=force,
+                        )
+                        if created:
+                            discovered += 1
+                        else:
+                            existing += 1
+                        if active_fetcher is None or (not force and database.hackernews_fetch_status(document_id) == "fetched"):
+                            continue
+                        try:
+                            database.store_hackernews_resolution(
+                                document_id, resolve_hackernews_candidate(candidate, active_fetcher).content
+                            )
+                            fetched += 1
+                        except (ArticleFetchError, ArticleExtractionError) as error:
+                            database.record_hackernews_fetch_failure(document_id, error.code)
+                            failed += 1
+                    return HackerNewsSyncResult(
+                        discovered=discovered, existing=existing, skipped=discovery.skipped, fetched=fetched, failed=failed
                     )
-                    if created:
-                        discovered += 1
-                    else:
-                        existing += 1
-                return HackerNewsSyncResult(discovered=discovered, existing=existing, skipped=discovery.skipped)
-            finally:
-                database.close()
+                finally:
+                    database.close()
+        finally:
+            if article_fetcher is None and active_fetcher is not None:
+                active_fetcher.close()
     finally:
         if close_client:
             active_client.close()

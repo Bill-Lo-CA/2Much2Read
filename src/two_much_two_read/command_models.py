@@ -146,6 +146,20 @@ class DoctorResult(CommandResult):
     checks: dict[str, str]
 
 
+HackerNewsFetchStatus = Literal[
+    "not_requested",
+    "fetched",
+    "ARTICLE_URL_BLOCKED",
+    "ARTICLE_REDIRECT_BLOCKED",
+    "ARTICLE_ROBOTS_DENIED",
+    "ARTICLE_FETCH_TIMEOUT",
+    "ARTICLE_FETCH_FAILED",
+    "ARTICLE_TOO_LARGE",
+    "ARTICLE_CONTENT_TYPE_UNSUPPORTED",
+    "ARTICLE_NO_USABLE_TEXT",
+]
+
+
 class HackerNewsStoryView(BaseModel):
     source_id: str
     story_id: int
@@ -159,7 +173,12 @@ class HackerNewsStoryView(BaseModel):
     requested_url: HttpUrl | None
     discussion_url: HttpUrl
     content_kind: Literal["external", "self_post"]
-    fetch_status: Literal["not_requested"] = "not_requested"
+    content_basis: Literal["metadata", "article", "hn_self_post"] = "metadata"
+    final_url: HttpUrl | None = None
+    article_title: str | None = None
+    content_characters: int = 0
+    content_preview: str | None = None
+    fetch_status: HackerNewsFetchStatus = "not_requested"
 
 
 class HackerNewsListResult(CommandResult):
@@ -175,3 +194,5 @@ class HackerNewsSyncResult(CommandResult):
     discovered: int
     existing: int
     skipped: int
+    fetched: int = 0
+    failed: int = 0
