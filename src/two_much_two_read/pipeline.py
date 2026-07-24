@@ -356,23 +356,36 @@ def run_pipeline(
             if any(isinstance(source, HackerNewsSource) for source in sources):
                 hackernews = HackerNewsClient()
             ollama = create_ollama_client(settings)
-            gmail_remaining = max_messages or settings.gmail_max_messages_per_run
+            gmail_remaining = settings.gmail_max_messages_per_run
+            command_remaining = max_messages
             status(f"Starting {len(sources)} source(s)")
             for source in sources:
+                if command_remaining is not None and command_remaining <= 0:
+                    break
                 if isinstance(source, GmailSource):
-                    if gmail_remaining <= 0:
+                    source_remaining = (
+                        min(gmail_remaining, command_remaining) if command_remaining is not None else gmail_remaining
+                    )
+                    if source_remaining <= 0:
                         continue
                     assert gmail is not None
                     used, source_discovered, source_processed, source_failed, source_ids, source_documents = _process_source(
-                        database, gmail, ollama, settings, source, gmail_remaining, status, force=force, dry_run=dry_run
+                        database, gmail, ollama, settings, source, source_remaining, status, force=force, dry_run=dry_run
                     )
                     gmail_remaining -= used
                 else:
+                    source_remaining = (
+                        min(source.max_articles_per_run, command_remaining)
+                        if command_remaining is not None
+                        else source.max_articles_per_run
+                    )
                     assert hackernews is not None
                     used, source_discovered, source_processed, source_failed, source_ids = _process_hackernews_source(
-                        database, hackernews, ollama, source, source.max_articles_per_run, status, force=force, now=now
+                        database, hackernews, ollama, source, source_remaining, status, force=force, now=now
                     )
                     source_documents = []
+                if command_remaining is not None:
+                    command_remaining -= used
                 discovered += source_discovered
                 processed += source_processed
                 failed += source_failed

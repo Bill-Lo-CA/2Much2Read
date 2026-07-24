@@ -323,7 +323,7 @@ def test_mixed_gmail_and_hackernews_sources_run_together(tmp_path: Path, monkeyp
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
     )
-    seen: list[str] = []
+    seen: list[tuple[str, int]] = []
 
     class FakeGmailClient:
         def ensure_labels(self) -> None:
@@ -334,13 +334,12 @@ def test_mixed_gmail_and_hackernews_sources_run_together(tmp_path: Path, monkeyp
             pass
 
     def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
-        assert args[5] == 1
-        seen.append("gmail")
-        return 1, 1, 1, 0, [], []
+        budget = int(args[5])
+        seen.append(("gmail", budget))
+        return budget if budget == settings.gmail_max_messages_per_run else 1, 1, 1, 0, [], []
 
     def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int]]:
-        assert args[4] == 10
-        seen.append("hackernews")
+        seen.append(("hackernews", int(args[4])))
         return 1, 1, 1, 0, []
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
@@ -350,11 +349,39 @@ def test_mixed_gmail_and_hackernews_sources_run_together(tmp_path: Path, monkeyp
     monkeypatch.setattr(pipeline, "_process_source", process_gmail)
     monkeypatch.setattr(pipeline, "_process_hackernews_source", process_hackernews)
 
-    result = run_pipeline(settings, max_messages=1, no_deliver=True)
+    default_result = run_pipeline(settings, no_deliver=True)
+    capped_result = run_pipeline(settings, max_messages=2, no_deliver=True)
 
-    assert seen == ["gmail", "hackernews"]
-    assert result.discovered == 2
-    assert result.processed == 2
+    assert seen == [("gmail", 50), ("hackernews", 10), ("gmail", 2), ("hackernews", 1)]
+    assert default_result.discovered == capped_result.discovered == 2
+    assert default_result.processed == capped_result.processed == 2
+
+
+def test_hacker_news_force_respects_explicit_command_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n  - type: hackernews\n    id: hn-best\n    name: Hacker News Best\n",
+        encoding="utf-8",
+    )
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+
+    class FakeHackerNewsClient:
+        def close(self) -> None:
+            pass
+
+    def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int]]:
+        assert args[4] == 1
+        return 0, 0, 0, 0, []
+
+    monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_process_hackernews_source", process_hackernews)
+
+    run_pipeline(settings, source_id="hn-best", max_messages=1, no_deliver=True, force=True)
 
 
 def test_hackernews_does_not_fallback_to_metadata_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
