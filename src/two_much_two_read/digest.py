@@ -8,6 +8,111 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from .schemas import DigestItem
 
+LABELS = {
+    "zh-tw": {
+        "summary": "摘要",
+        "why": "為什麼重要",
+        "top": "🔥 今日重點",
+        "rest": "🧰 其他值得注意",
+        "processed": "📊 本次處理",
+        "topic": "主題：",
+        "sources": "來源：",
+        "valid": "則有效項目",
+        "hn": "HN",
+        "points": "points",
+        "comments": "comments",
+        "metadata": "內容：僅 metadata",
+        "article": "文章",
+        "discussion": "討論",
+        "source": "來源",
+    },
+    "zh-cn": {
+        "summary": "摘要",
+        "why": "为什么重要",
+        "top": "🔥 今日重点",
+        "rest": "🧰 其他值得关注",
+        "processed": "📊 本次处理",
+        "topic": "主题：",
+        "sources": "来源：",
+        "valid": "条有效项目",
+        "hn": "HN",
+        "points": "分",
+        "comments": "条评论",
+        "metadata": "内容：仅元数据",
+        "article": "文章",
+        "discussion": "讨论",
+        "source": "来源",
+    },
+    "en": {
+        "summary": "Summary",
+        "why": "Why it matters",
+        "top": "🔥 Top stories",
+        "rest": "🧰 More worth noting",
+        "processed": "📊 Processed",
+        "topic": "Topic: ",
+        "sources": "Sources: ",
+        "valid": "valid items",
+        "hn": "HN",
+        "points": "points",
+        "comments": "comments",
+        "metadata": "Content: metadata only",
+        "article": "Article",
+        "discussion": "Discussion",
+        "source": "Source",
+    },
+    "fr": {
+        "summary": "Résumé",
+        "why": "Pourquoi c’est important",
+        "top": "🔥 À la une",
+        "rest": "🧰 Autres éléments à noter",
+        "processed": "📊 Traitement",
+        "topic": "Sujet : ",
+        "sources": "Sources : ",
+        "valid": "éléments valides",
+        "hn": "HN",
+        "points": "points",
+        "comments": "commentaires",
+        "metadata": "Contenu : métadonnées uniquement",
+        "article": "Article",
+        "discussion": "Discussion",
+        "source": "Source",
+    },
+    "ja": {
+        "summary": "要約",
+        "why": "重要な理由",
+        "top": "🔥 今日の注目",
+        "rest": "🧰 その他の注目",
+        "processed": "📊 処理結果",
+        "topic": "トピック：",
+        "sources": "情報源：",
+        "valid": "件の有効項目",
+        "hn": "HN",
+        "points": "ポイント",
+        "comments": "件のコメント",
+        "metadata": "内容：メタデータのみ",
+        "article": "記事",
+        "discussion": "議論",
+        "source": "出典",
+    },
+}
+NEUTRAL_LABELS = {
+    "summary": "•",
+    "why": "→",
+    "top": "🔥",
+    "rest": "🧰",
+    "processed": "📊",
+    "topic": "",
+    "sources": "",
+    "valid": "",
+    "hn": "HN",
+    "points": "↑",
+    "comments": "💬",
+    "metadata": "ℹ️",
+    "article": "🔗",
+    "discussion": "💬",
+    "source": "🔗",
+}
+
 
 @dataclass(frozen=True)
 class DigestEntry:
@@ -95,13 +200,28 @@ def dedupe_entries(items: list[DigestEntry]) -> list[DigestEntry]:
     return list(winners.values())
 
 
+def _labels(language: str) -> dict[str, str]:
+    normalized = language.casefold().replace("_", "-")
+    aliases = {
+        "zh-tw": "zh-tw",
+        "zh-hant": "zh-tw",
+        "zh-hk": "zh-tw",
+        "zh-mo": "zh-tw",
+        "zh-cn": "zh-cn",
+        "zh-hans": "zh-cn",
+    }
+    return LABELS.get(aliases.get(normalized, normalized.split("-", maxsplit=1)[0]), NEUTRAL_LABELS)
+
+
 def render_digest(
     items: Sequence[DigestItem | DigestEntry],
     when: datetime,
     topic: str,
     source_names: str,
     top_items: int = 5,
+    language: str = "zh-TW",
 ) -> str:
+    labels = _labels(language)
     entries = [
         item
         if isinstance(item, DigestEntry)
@@ -115,27 +235,33 @@ def render_digest(
 
     def entry(value: DigestEntry, prefix: str) -> str:
         item = value.item
-        lines = [f"{prefix} {item.title}", f"   摘要：{item.summary_zh_tw}", f"   為什麼重要：{item.why_it_matters_zh_tw}"]
+        lines = [
+            f"{prefix} {item.title}",
+            f"   {labels['summary']}：{item.summary_zh_tw}",
+            f"   {labels['why']}：{item.why_it_matters_zh_tw}",
+        ]
         if value.hn_item_id:
             if value.hn_score is not None and value.hn_comments is not None:
-                lines.append(f"   HN：{value.hn_score} points · {value.hn_comments} comments")
+                lines.append(f"   {labels['hn']}：{value.hn_score} {labels['points']} · {value.hn_comments} {labels['comments']}")
             if value.content_basis == "metadata":
-                lines.append("   內容：僅 metadata")
+                lines.append(f"   {labels['metadata']}")
             if value.article_url and value.article_url != value.discussion_url:
-                lines.append(f"   文章：<{value.article_url}>")
+                lines.append(f"   {labels['article']}：<{value.article_url}>")
             if value.discussion_url:
-                lines.append(f"   討論：<{value.discussion_url}>")
+                lines.append(f"   {labels['discussion']}：<{value.discussion_url}>")
         elif item.source_url:
-            lines.append(f"   來源：<{item.source_url}>")
+            lines.append(f"   {labels['source']}：<{item.source_url}>")
         return "\n".join(lines)
 
     top = eligible[:top_items]
     rest = eligible[top_items:]
     sections = [
         f"📰 {topic} 2much2read — {when:%Y-%m-%d}",
-        "🔥 今日重點\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)),
+        labels["top"] + "\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)),
     ]
     if rest:
-        sections.append("🧰 其他值得注意\n" + "\n\n".join(entry(item, "•") for item in rest))
-    sections.append(f"📊 本次處理\n主題：{topic}\n來源：{source_names} · {len(eligible)} 則有效項目")
+        sections.append(labels["rest"] + "\n" + "\n\n".join(entry(item, "•") for item in rest))
+    sections.append(
+        f"{labels['processed']}\n{labels['topic']}{topic}\n{labels['sources']}{source_names} · {len(eligible)} {labels['valid']}"
+    )
     return "\n\n".join(sections).replace("@", "@\u200b")

@@ -52,6 +52,29 @@ def test_renderer_uses_actual_topic_and_sources(topic: str) -> None:
     assert "來源：Source One, Source Two · 1 則有效項目" in text
 
 
+@pytest.mark.parametrize(
+    ("language", "labels"),
+    [
+        ("en", ("🔥 Top stories", "Summary：", "Why it matters：", "📊 Processed")),
+        ("fr", ("🔥 À la une", "Résumé：", "Pourquoi c’est important：", "📊 Traitement")),
+        ("ja", ("🔥 今日の注目", "要約：", "重要な理由：", "📊 処理結果")),
+        ("zh-CN", ("🔥 今日重点", "摘要：", "为什么重要：", "📊 本次处理")),
+    ],
+)
+def test_renderer_localizes_labels(language: str, labels: tuple[str, str, str, str]) -> None:
+    text = render_digest([item("Update", None)], datetime(2026, 6, 22, tzinfo=UTC), "AI", "Source", language=language)
+
+    assert all(label in text for label in labels)
+
+
+def test_renderer_uses_neutral_labels_for_unmapped_language() -> None:
+    text = render_digest([item("Update", None)], datetime(2026, 6, 22, tzinfo=UTC), "AI", "Source", language="de")
+
+    assert "摘要：" not in text
+    assert "   •：摘要" in text
+    assert "📊\nAI\nSource · 1 " in text
+
+
 def test_hackernews_renderer_shows_article_and_discussion_without_self_post_duplicate() -> None:
     discussion = "https://news.ycombinator.com/item?id=123"
     self_post_discussion = "https://news.ycombinator.com/item?id=124"
