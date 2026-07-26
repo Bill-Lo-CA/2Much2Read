@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from two_much_two_read.schemas import DigestItem, EmailExtraction, ResolvedContent, SourceDocument
+from two_much_two_read.schemas import EmailExtraction, NewsletterItemAnalysis, ResolvedContent, SourceDocument
 from two_much_two_read.storage import Database, DatabaseSchemaResetRequiredError
 
 
@@ -29,12 +29,11 @@ def extraction(title: str = "Title") -> EmailExtraction:
         newsletter_date=None,
         overview_zh_tw="摘要",
         items=[
-            DigestItem(
+            NewsletterItemAnalysis(
                 title=title,
                 category="OTHER",
                 summary_zh_tw="摘要",
                 why_it_matters_zh_tw="原因",
-                source_url=None,
                 importance=5,
                 confidence=0.8,
                 tags=[],
@@ -123,6 +122,25 @@ def test_save_digest_finalizes_staged_documents_atomically(tmp_path: Path) -> No
     database.close()
 
 
+def test_url_resolution_cache_stores_hash_and_expires(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    raw_url = "https://tracking.example/e3t/token?mc_eid=private"
+
+    database.cache_url_resolution(
+        raw_url,
+        "resolved",
+        resolved_url="https://publisher.example/article",
+        canonical_url="https://publisher.example/canonical",
+    )
+
+    cached = database.cached_url_resolution(raw_url)
+    columns = {row["name"] for row in database.connection.execute("PRAGMA table_info(url_resolution_cache)")}
+    database.close()
+    assert cached is not None
+    assert cached["resolved_url"] == "https://publisher.example/article"
+    assert "raw_url" not in columns
+
+
 def test_legacy_schema_requires_an_explicit_reset(tmp_path: Path) -> None:
     path = tmp_path / "legacy.sqlite3"
     connection = sqlite3.connect(path)
@@ -148,7 +166,7 @@ def test_v2_schema_upgrades_without_losing_documents(tmp_path: Path) -> None:
 
     upgraded = Database(path)
 
-    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 4
+    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 5
     assert upgraded.connection.execute("SELECT gmail_message_id FROM gmail_document_state").fetchone()[0] == "gmail-1"
     assert upgraded.connection.execute("SELECT 1 FROM sqlite_master WHERE name='hackernews_document_state'").fetchone()[0] == 1
     upgraded.close()
@@ -196,7 +214,7 @@ def test_v3_hackernews_state_upgrades_without_losing_metadata(tmp_path: Path) ->
 
     row = upgraded.connection.execute("SELECT hn_item_id,requested_url,fetch_status FROM hackernews_document_state").fetchone()
     assert tuple(row) == (123, "https://example.com", "not_requested")
-    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 4
+    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 5
     upgraded.close()
 
 
@@ -216,6 +234,7 @@ def test_backup_and_reset(tmp_path: Path) -> None:
         "items": 0,
         "digests": 0,
         "runs": 0,
+        "url_resolution_cache": 0,
     }
     assert backup_path.stat().st_mode & 0o777 == 0o600
     backup = Database(backup_path)

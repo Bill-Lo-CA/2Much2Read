@@ -21,7 +21,7 @@ def item(title: str, url: str | None, confidence: float = 0.8, importance: int =
 
 
 def test_canonical_url_and_dedupe() -> None:
-    assert canonical_url("HTTPS://Example.COM/a?utm_source=x&id=1#top") == "https://example.com/a?id=1"
+    assert canonical_url("HTTPS://Example.COM/a?utm_source=x&mc_eid=y&id=1#top") == "https://example.com/a?id=1"
     assert dedupe([item("A", "https://example.com/a", 0.5), item("B", "https://example.com/a", 0.9)])[0].title == "B"
 
 

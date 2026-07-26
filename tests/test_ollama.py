@@ -20,7 +20,6 @@ def valid_result() -> dict[str, object]:
                 "category": "AI_MODEL",
                 "summary_zh_tw": "發布新模型。",
                 "why_it_matters_zh_tw": "可改善工作流程。",
-                "source_url": "https://example.com/a",
                 "importance": 8,
                 "confidence": 0.9,
                 "tags": ["AI Model"],
@@ -167,17 +166,23 @@ def test_normalizes_trusted_fields_and_limits_items() -> None:
 
 
 @respx.mock
-def test_accepts_source_url_from_markdown_link() -> None:
+def test_repairs_model_owned_url_field() -> None:
     model_result = valid_result()
     model_result["items"][0]["source_url"] = "https://example.com"  # type: ignore[index]
     route = respx.post("http://127.0.0.1:11434/api/chat").mock(
-        return_value=httpx.Response(200, json={"message": {"content": json.dumps(model_result)}})
+        side_effect=[
+            httpx.Response(200, json={"message": {"content": json.dumps(model_result)}}),
+            httpx.Response(200, json={"message": {"content": json.dumps(valid_result())}}),
+        ]
     )
 
     result = OllamaClient().extract("alphasignal", "Read [article](https://example.com).")
 
-    assert str(result.items[0].source_url) == "https://example.com/"
-    assert route.call_count == 1
+    assert result.items[0].title == "Model release"
+    assert route.call_count == 2
+    payload = json.loads(route.calls[0].request.content)
+    assert "source_url" not in json.dumps(payload["format"])
+    assert "Do not invent facts or return URLs" in payload["messages"][0]["content"]
 
 
 @respx.mock

@@ -71,3 +71,47 @@ def test_returns_typed_errors_for_redirects_robots_and_response_limits() -> None
     ):
         with pytest.raises(ArticleFetchError, match=code):
             fetcher.fetch(url)
+
+
+def test_resolves_redirects_and_same_host_canonical_metadata() -> None:
+    def response_provider(request: ValidatedURL) -> ArticleResponse:
+        if request.target == "/start":
+            return ArticleResponse(302, {"location": "https://example.com/article"}, b"")
+        return ArticleResponse(
+            200,
+            {"content-type": "text/html"},
+            b'<html><link rel="canonical" href="/canonical?utm_source=newsletter"></html>',
+        )
+
+    resolved = ArticleFetcher(public_dns, response_provider).resolve_url("https://example.com/start")
+
+    assert resolved.final_url == "https://example.com/article"
+    assert resolved.canonical_url == "https://example.com/canonical?utm_source=newsletter"
+
+
+def test_rejects_unsafe_or_cross_host_canonical_metadata() -> None:
+    def response_provider(_: ValidatedURL) -> ArticleResponse:
+        return ArticleResponse(
+            200,
+            {"content-type": "text/html"},
+            b'<html><meta property="og:url" content="http://127.0.0.1/private"></html>',
+        )
+
+    resolved = ArticleFetcher(public_dns, response_provider).resolve_url("https://example.com/article")
+
+    assert resolved.final_url == "https://example.com/article"
+    assert resolved.canonical_url is None
+
+
+def test_rejects_canonical_metadata_that_downgrades_https() -> None:
+    def response_provider(_: ValidatedURL) -> ArticleResponse:
+        return ArticleResponse(
+            200,
+            {"content-type": "text/html"},
+            b'<html><link rel="canonical" href="http://example.com/canonical"></html>',
+        )
+
+    resolved = ArticleFetcher(public_dns, response_provider).resolve_url("https://example.com/article")
+
+    assert resolved.final_url == "https://example.com/article"
+    assert resolved.canonical_url is None

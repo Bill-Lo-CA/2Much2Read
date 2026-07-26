@@ -3,7 +3,9 @@ from __future__ import annotations
 from datetime import date, datetime
 from typing import Literal
 
-from pydantic import BaseModel, Field, HttpUrl, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, TypeAdapter, field_validator
+
+HTTP_URL = TypeAdapter(HttpUrl)
 
 DigestCategory = Literal[
     "AI_MODEL",
@@ -36,12 +38,27 @@ class ResolvedContent(BaseModel):
     truncated: bool
 
 
-class DigestItem(BaseModel):
+class LinkCandidate(BaseModel):
+    candidate_id: str = Field(pattern=r"link-\d{4}")
+    raw_url: HttpUrl
+    anchor_text: str = ""
+    nearby_text: str = ""
+    position: int = Field(ge=0)
+    kind: Literal["article", "non_article", "unknown"] = "unknown"
+
+
+class ExtractedEmailContent(BaseModel):
+    analysis_text: str = Field(min_length=1)
+    link_candidates: list[LinkCandidate] = Field(default_factory=list)
+
+
+class ItemAnalysis(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     title: str = Field(min_length=1, max_length=200)
     category: DigestCategory
     summary_zh_tw: str = Field(min_length=1)
     why_it_matters_zh_tw: str = Field(min_length=1)
-    source_url: HttpUrl | None = None
     importance: int = Field(ge=1, le=10)
     confidence: float = Field(ge=0, le=1)
     tags: list[str] = Field(default_factory=list)
@@ -52,14 +69,25 @@ class DigestItem(BaseModel):
         return ["-".join(value.lower().strip().split()) for value in values if value.strip()]
 
 
-class ArticleAnalysis(BaseModel):
-    title: str = Field(min_length=1, max_length=200)
-    category: DigestCategory
-    summary_zh_tw: str = Field(min_length=1)
-    why_it_matters_zh_tw: str = Field(min_length=1)
-    importance: int = Field(ge=1, le=10)
-    confidence: float = Field(ge=0, le=1)
-    tags: list[str] = Field(default_factory=list)
+class NewsletterItemAnalysis(ItemAnalysis):
+    pass
+
+
+class DigestItem(ItemAnalysis):
+    source_url: HttpUrl | None = None
+    raw_url: HttpUrl | None = None
+    resolved_url: HttpUrl | None = None
+    canonical_url: HttpUrl | None = None
+    url_match_status: Literal["not_applicable", "pending", "matched", "unmatched", "ambiguous"] = "not_applicable"
+    url_match_method: Literal["exact_anchor", "heading_context", "fuzzy_anchor", "url_slug"] | None = None
+    url_match_confidence: float | None = Field(default=None, ge=0, le=1)
+    url_resolution_status: Literal["not_applicable", "not_requested", "resolved", "failed", "blocked"] = "not_applicable"
+    url_error_code: str | None = None
+    url_checked_at: datetime | None = None
+
+
+class ArticleAnalysis(ItemAnalysis):
+    pass
 
 
 class EmailExtraction(BaseModel):
@@ -67,5 +95,5 @@ class EmailExtraction(BaseModel):
     newsletter_title: str
     newsletter_date: date | None
     overview_zh_tw: str
-    items: list[DigestItem]
+    items: list[NewsletterItemAnalysis]
     truncated_input: bool = False

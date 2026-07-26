@@ -10,13 +10,13 @@ import httpx
 import pytest
 
 from two_much_two_read import mail_operations, pipeline
-from two_much_two_read.article_fetcher import ArticleFetchError
+from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl
 from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult
 from two_much_two_read.config import HackerNewsSource, Settings
 from two_much_two_read.hackernews import HackerNewsCandidate, HackerNewsDiscovery, ResolvedHackerNewsContent
 from two_much_two_read.ollama import OllamaSchemaError
 from two_much_two_read.pipeline import deliver_digest, run_pipeline
-from two_much_two_read.schemas import ArticleAnalysis, EmailExtraction, ResolvedContent, SourceDocument
+from two_much_two_read.schemas import ArticleAnalysis, EmailExtraction, NewsletterItemAnalysis, ResolvedContent, SourceDocument
 from two_much_two_read.storage import Database
 from two_read_runtime.discord import DiscordDeliveryError
 
@@ -77,6 +77,86 @@ class StubOllamaClient:
             raise self.error
         assert self.extraction is not None
         return self.extraction
+
+
+def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+
+    def encoded(value: str) -> str:
+        return urlsafe_b64encode(value.encode()).decode().rstrip("=")
+
+    gmail = StubGmailClient(
+        ["gmail-1"],
+        {
+            "gmail-1": {
+                "threadId": "thread-1",
+                "internalDate": "1784786400000",
+                "payload": {
+                    "headers": [{"name": "Subject", "value": "Newsletter"}, {"name": "From", "value": "news@example.com"}],
+                    "parts": [
+                        {"mimeType": "text/plain", "body": {"data": encoded("A useful article")}},
+                        {
+                            "mimeType": "text/html",
+                            "body": {
+                                "data": encoded('<h2>Useful article</h2><a href="https://short.example/go">Useful article</a>')
+                            },
+                        },
+                    ],
+                },
+            }
+        },
+    )
+    ollama = StubOllamaClient(
+        EmailExtraction(
+            source_id="alphasignal",
+            newsletter_title="Newsletter",
+            newsletter_date=None,
+            overview_zh_tw="摘要",
+            items=[
+                NewsletterItemAnalysis(
+                    title="Useful article",
+                    category="OTHER",
+                    summary_zh_tw="摘要",
+                    why_it_matters_zh_tw="原因",
+                    importance=7,
+                    confidence=0.9,
+                )
+            ],
+        )
+    )
+
+    class FakeFetcher:
+        def resolve_url(self, raw_url: str) -> ResolvedUrl:
+            assert raw_url == "https://short.example/go"
+            return ResolvedUrl(raw_url, "https://publisher.example/article", "https://publisher.example/canonical")
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
+    monkeypatch.setattr(pipeline, "ArticleFetcher", FakeFetcher)
+
+    result = run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, tzinfo=UTC))
+
+    database = Database(settings.database_path)
+    row = database.connection.execute(
+        "SELECT source_url,raw_url,resolved_url,canonical_url,url_match_status,url_resolution_status FROM items"
+    ).fetchone()
+    database.close()
+    assert result.status == "ok"
+    assert tuple(row) == (
+        "https://publisher.example/canonical",
+        "https://short.example/go",
+        "https://publisher.example/article",
+        "https://publisher.example/canonical",
+        "matched",
+        "resolved",
+    )
 
 
 class FakeDigestDatabase:

@@ -11,9 +11,12 @@ from dataclasses import dataclass
 from urllib import robotparser
 from urllib.parse import urljoin, urlsplit, urlunsplit
 
+from bs4 import BeautifulSoup
+
 USER_AGENT = "2much2read/0.1"
 MAX_REDIRECTS = 5
 MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MAX_METADATA_BYTES = 512 * 1024
 MAX_ROBOTS_BYTES = 256 * 1024
 CONNECT_TIMEOUT_SECONDS = 5
 READ_TIMEOUT_SECONDS = 15
@@ -27,12 +30,25 @@ class ArticleFetchError(ValueError):
         self.code = code
 
 
+class UrlResolutionError(ValueError):
+    def __init__(self, code: str) -> None:
+        super().__init__(code)
+        self.code = code
+
+
 @dataclass(frozen=True)
 class FetchedArticle:
     requested_url: str
     final_url: str
     content_type: str
     body: bytes
+
+
+@dataclass(frozen=True)
+class ResolvedUrl:
+    requested_url: str
+    final_url: str
+    canonical_url: str | None
 
 
 @dataclass(frozen=True)
@@ -116,6 +132,51 @@ class ArticleFetcher:
                 raise ArticleFetchError("ARTICLE_CONTENT_TYPE_UNSUPPORTED")
             return FetchedArticle(requested_url, current.url, content_type, response.body)
         raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
+
+    def resolve_url(self, requested_url: str) -> ResolvedUrl:
+        try:
+            current = self._validate_url(requested_url, redirect=False)
+            seen_urls = {current.url}
+            for redirects in range(MAX_REDIRECTS + 1):
+                response = self._read(current, MAX_METADATA_BYTES)
+                if 300 <= response.status_code < 400:
+                    location = response.headers.get("location")
+                    if not location or redirects == MAX_REDIRECTS:
+                        raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
+                    next_url = self._validate_url(urljoin(current.url, location), redirect=True)
+                    if next_url.url in seen_urls:
+                        raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
+                    seen_urls.add(next_url.url)
+                    current = next_url
+                    continue
+                if not 200 <= response.status_code < 300:
+                    raise ArticleFetchError("ARTICLE_FETCH_FAILED")
+                content_type = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
+                if content_type not in {"text/html", "application/xhtml+xml"}:
+                    raise ArticleFetchError("ARTICLE_CONTENT_TYPE_UNSUPPORTED")
+                return ResolvedUrl(requested_url, current.url, self._canonical_url(current, response.body))
+        except ArticleFetchError as error:
+            raise UrlResolutionError(_url_error_code(error.code)) from None
+        raise AssertionError("unreachable")
+
+    def _canonical_url(self, page: ValidatedURL, body: bytes) -> str | None:
+        soup = BeautifulSoup(body, "lxml")
+        canonical = soup.find("link", rel=lambda value: value and "canonical" in value)
+        value = str(canonical.get("href", "")) if canonical else ""
+        if not value:
+            metadata = soup.find("meta", attrs={"property": "og:url"})
+            value = str(metadata.get("content", "")) if metadata else ""
+        if not value:
+            return None
+        try:
+            candidate = self._validate_url(urljoin(page.url, value), redirect=False)
+        except ArticleFetchError:
+            return None
+        if page.url.startswith("https://") and candidate.url.startswith("http://"):
+            return None
+        if page.hostname.removeprefix("www.") != candidate.hostname.removeprefix("www."):
+            return None
+        return candidate.url
 
     def _validate_url(self, value: str, *, redirect: bool) -> ValidatedURL:
         code = "ARTICLE_REDIRECT_BLOCKED" if redirect else "ARTICLE_URL_BLOCKED"
@@ -254,3 +315,13 @@ class ArticleFetcher:
             seen_urls.add(next_url.url)
             current = next_url
         return None
+
+
+def _url_error_code(article_code: str) -> str:
+    return {
+        "ARTICLE_URL_BLOCKED": "URL_POLICY_BLOCKED",
+        "ARTICLE_REDIRECT_BLOCKED": "URL_REDIRECT_BLOCKED",
+        "ARTICLE_FETCH_TIMEOUT": "URL_RESOLUTION_TIMEOUT",
+        "ARTICLE_CONTENT_TYPE_UNSUPPORTED": "URL_CONTENT_TYPE_UNSUPPORTED",
+        "ARTICLE_TOO_LARGE": "URL_METADATA_TOO_LARGE",
+    }.get(article_code, "URL_RESOLUTION_FAILED")

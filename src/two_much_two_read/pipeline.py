@@ -12,7 +12,7 @@ from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resu
 from two_read_runtime.locking import ProcessLock
 
 from .article_extractor import ArticleExtractionError
-from .article_fetcher import ArticleFetcher, ArticleFetchError
+from .article_fetcher import ArticleFetcher, ArticleFetchError, ResolvedUrl, UrlResolutionError
 from .command_models import DeliveryCheckpointResetResult, NewsletterRetryResult, NewsletterRunResult
 from .config import GmailSource, HackerNewsSource, Settings, load_sources
 from .digest import DigestEntry, render_digest
@@ -20,14 +20,19 @@ from .gmail import GmailClient, credentials, message_headers
 from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
 from .mime import EmptyEmailError, extract_gmail_payload
 from .ollama import OllamaClient, OllamaSchemaError, create_ollama_client
-from .schemas import DigestItem, ResolvedContent
+from .schemas import DigestItem, ExtractedEmailContent, ResolvedContent
 from .storage import Database
+from .url_enrichment import UrlEnricher, resolve_match
 
 StatusReporter = Callable[[str], None]
 
 
 def _ignore_status(_: str) -> None:
     pass
+
+
+def _email_content(value: ExtractedEmailContent | str) -> ExtractedEmailContent:
+    return value if isinstance(value, ExtractedEmailContent) else ExtractedEmailContent(analysis_text=value)
 
 
 def _items(database: Database, document_ids: list[int], maximum: int) -> list[DigestEntry]:
@@ -110,6 +115,8 @@ def _process_source(
     failed = 0
     processed_document_ids: list[int] = []
     processed_documents: list[tuple[int, str]] = []
+    url_enricher = UrlEnricher()
+    url_fetcher = ArticleFetcher()
     status(f"{source.id}: scanning messages")
     for gmail_id in gmail.iter_messages(query):
         if discovered >= remaining:
@@ -127,7 +134,8 @@ def _process_source(
         received = datetime.fromtimestamp(int(str(message.get("internalDate", "0"))) / 1000, tz=UTC)
         subject = headers.get("subject") or gmail_id
         try:
-            body = extract_gmail_payload(payload)
+            content = _email_content(extract_gmail_payload(payload))
+            body = content.analysis_text
         except EmptyEmailError:
             document_id = database.discover_gmail_document(
                 gmail_id,
@@ -176,7 +184,43 @@ def _process_source(
             if not dry_run:
                 _sync_processing_label(database, gmail, gmail_id, document_id, "failed")
             continue
-        database.store_extraction(document_id, extraction, replace=True, finalize=False)
+        items: list[DigestItem] = []
+        for match in url_enricher.match(extraction.items, content.link_candidates):
+            if match.candidate is None:
+                items.append(url_enricher.failed_item(match, "URL_MATCH_UNRESOLVED"))
+                continue
+            raw_url = str(match.candidate.raw_url)
+            cached = database.cached_url_resolution(raw_url)
+            if cached is not None:
+                if cached["status"] == "resolved" and cached["resolved_url"]:
+                    items.append(
+                        url_enricher.resolved_item(
+                            match,
+                            ResolvedUrl(
+                                raw_url,
+                                str(cached["resolved_url"]),
+                                str(cached["canonical_url"]) if cached["canonical_url"] else None,
+                            ),
+                        )
+                    )
+                else:
+                    items.append(url_enricher.failed_item(match, str(cached["error_code"] or "URL_RESOLUTION_FAILED")))
+                continue
+            try:
+                resolved = resolve_match(match, url_fetcher)
+            except UrlResolutionError as error:
+                cache_status = "blocked" if error.code in {"URL_POLICY_BLOCKED", "URL_REDIRECT_BLOCKED"} else "failed"
+                database.cache_url_resolution(raw_url, cache_status, error_code=error.code)
+                items.append(url_enricher.failed_item(match, error.code))
+                continue
+            database.cache_url_resolution(
+                raw_url,
+                "resolved",
+                resolved_url=resolved.final_url,
+                canonical_url=resolved.canonical_url,
+            )
+            items.append(url_enricher.resolved_item(match, resolved))
+        database.store_items(document_id, items, replace=True, finalize=False)
         processed += 1
         status(f"{source.id}: processed {subject}")
         processed_document_ids.append(document_id)

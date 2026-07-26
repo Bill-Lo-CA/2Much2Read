@@ -130,7 +130,7 @@ def canonical_url(value: str | None) -> str | None:
     if not value:
         return None
     parts = urlsplit(value)
-    blocked = {"ref", "source", "campaign"}
+    blocked = {"ref", "source", "campaign", "mc_cid", "mc_eid", "mkt_tok"}
     query = [
         (key, val)
         for key, val in parse_qsl(parts.query, keep_blank_values=True)
