@@ -79,11 +79,15 @@ def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
             return
         if CONTROL_LABEL_PATTERN.fullmatch(anchor_text.strip()):
             return
+        try:
+            validated_url = HTTP_URL.validate_python(safe_url)
+        except ValueError:
+            return
         seen.add(safe_url)
         candidates.append(
             LinkCandidate(
                 candidate_id=f"link-{len(candidates) + 1:04d}",
-                raw_url=HTTP_URL.validate_python(safe_url),
+                raw_url=validated_url,
                 anchor_text=anchor_text,
                 nearby_text=nearby_text,
                 position=len(candidates),

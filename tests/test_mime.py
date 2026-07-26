@@ -69,6 +69,19 @@ def test_html_candidates_exclude_footer_and_unsafe_links() -> None:
     ]
 
 
+def test_extract_mime_skips_malformed_url_candidates() -> None:
+    message = EmailMessage()
+    message.set_content("plain summary")
+    message.add_alternative(
+        '<a href="https://example.com:bad/article">Broken link</a><a href="https://example.com/article">Useful article</a>',
+        subtype="html",
+    )
+
+    assert [str(candidate.raw_url) for candidate in extract_mime(message.as_bytes()).link_candidates] == [
+        "https://example.com/article"
+    ]
+
+
 def test_html_candidates_keep_articles_about_navigation_topics() -> None:
     message = EmailMessage()
     message.set_content("plain summary")
