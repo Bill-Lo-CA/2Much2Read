@@ -50,6 +50,23 @@ def test_keeps_ambiguous_or_failed_items_without_display_url() -> None:
     assert failed.url_resolution_status == "failed"
 
 
+def test_exact_anchor_wins_at_the_ambiguity_threshold() -> None:
+    exact = candidate("link-0001", "Useful article", "https://example.com/exact")
+    heading = LinkCandidate(
+        candidate_id="link-0002",
+        anchor_text="Read more",
+        nearby_text="Useful article",
+        raw_url="https://example.com/heading",
+        position=1,
+        kind="article",
+    )
+
+    match = UrlEnricher().match([analysis()], [exact, heading])[0]
+
+    assert match.method == "exact_anchor"
+    assert match.candidate == exact
+
+
 def test_accepts_analysis_from_another_source_type() -> None:
     item = ArticleAnalysis(
         title="Article from another source",

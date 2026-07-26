@@ -77,7 +77,7 @@ class UrlEnricher:
                 continue
             scored.sort(key=lambda value: (-value[0][1], value[1].position, value[1].candidate_id))
             (method, confidence), candidate = scored[0]
-            if len(scored) > 1 and confidence - scored[1][0][1] < 0.1:
+            if len(scored) > 1 and round(confidence - scored[1][0][1], 6) < 0.1:
                 matches.append(UrlMatch(item, None, "ambiguous", confidence))
                 continue
             used.add(candidate.candidate_id)
