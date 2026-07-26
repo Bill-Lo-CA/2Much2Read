@@ -53,6 +53,17 @@ def test_extract_mime_strips_plain_text_url_sentence_punctuation() -> None:
     ]
 
 
+def test_extract_mime_keeps_balanced_parentheses_in_plain_text_urls() -> None:
+    message = EmailMessage()
+    message.set_content("Read https://en.wikipedia.org/wiki/Function_(mathematics).")
+
+    content = extract_mime(message.as_bytes())
+
+    assert [(str(candidate.raw_url), candidate.nearby_text) for candidate in content.link_candidates] == [
+        ("https://en.wikipedia.org/wiki/Function_(mathematics)", "Read")
+    ]
+
+
 def test_extract_mime_prefers_html_context_when_plain_and_html_share_a_link() -> None:
     message = EmailMessage()
     message.set_content("Read [plain label](https://example.com/article)")

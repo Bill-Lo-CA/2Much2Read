@@ -26,7 +26,7 @@ CONTROL_LABEL_PATTERN = re.compile(
     re.I,
 )
 MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
-URL_PATTERN = re.compile(r"https?://[^\s<>\"')\]]+")
+URL_PATTERN = re.compile(r"https?://[^\s<>\"'\]]+")
 
 
 class EmptyEmailError(ValueError):
@@ -108,6 +108,8 @@ def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
     for match in URL_PATTERN.finditer(plain):
         matched_url = match.group()
         raw_url = matched_url.rstrip(".,;:!?]}")
+        while raw_url.endswith(")") and raw_url.count("(") < raw_url.count(")"):
+            raw_url = raw_url[:-1]
         context = _plain_context(plain, match.start(), matched_url)
         add(raw_url, context, context, "unknown")
     return candidates
