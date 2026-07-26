@@ -31,6 +31,29 @@ def test_extract_mime_keeps_html_link_candidates_when_plain_text_wins() -> None:
     ]
 
 
+def test_extract_mime_keeps_plain_text_link_candidates_without_html() -> None:
+    message = EmailMessage()
+    message.set_content("Useful article: https://example.com/article")
+
+    content = extract_mime(message.as_bytes())
+
+    assert [(str(candidate.raw_url), candidate.nearby_text) for candidate in content.link_candidates] == [
+        ("https://example.com/article", "Useful article")
+    ]
+
+
+def test_extract_mime_prefers_html_context_when_plain_and_html_share_a_link() -> None:
+    message = EmailMessage()
+    message.set_content("Read [plain label](https://example.com/article)")
+    message.add_alternative('<h2>Useful article</h2><a href="https://example.com/article">Useful article</a>', subtype="html")
+
+    content = extract_mime(message.as_bytes())
+
+    assert [(str(candidate.raw_url), candidate.anchor_text) for candidate in content.link_candidates] == [
+        ("https://example.com/article", "Useful article")
+    ]
+
+
 def test_html_candidates_exclude_footer_and_unsafe_links() -> None:
     message = EmailMessage()
     message.set_content("plain summary")

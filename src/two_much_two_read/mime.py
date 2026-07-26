@@ -6,6 +6,7 @@ import re
 from email import policy
 from email.message import Message
 from email.parser import BytesParser
+from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
@@ -19,6 +20,8 @@ NON_ARTICLE_PATTERN = re.compile(
     r"follow us|linkedin|twitter|facebook|instagram)\b",
     re.I,
 )
+MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+URL_PATTERN = re.compile(r"https?://[^\s<>\"')\]]+")
 
 
 class EmptyEmailError(ValueError):
@@ -54,28 +57,49 @@ def _nearby_text(anchor: Tag) -> str:
     return " ".join(value for value in values if value)[:400]
 
 
-def _link_candidates(html: str) -> list[LinkCandidate]:
+def _plain_context(text: str, position: int, raw_url: str) -> str:
+    line_start = text.rfind("\n", 0, position) + 1
+    line_end = text.find("\n", position)
+    line = text[line_start:] if line_end < 0 else text[line_start:line_end]
+    return line.replace(raw_url, "").strip(" -:()")[:400]
+
+
+def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
     candidates: list[LinkCandidate] = []
     seen: set[str] = set()
-    for position, anchor in enumerate(_visible_soup(html).find_all("a")):
-        raw_url = _safe_url(str(anchor.get("href", "")))
-        if raw_url is None or raw_url in seen:
-            continue
-        anchor_text = anchor.get_text(" ", strip=True)
-        nearby_text = _nearby_text(anchor)
-        if NON_ARTICLE_PATTERN.search(" ".join((anchor_text, nearby_text, raw_url))):
-            continue
-        seen.add(raw_url)
+
+    def add(raw_url: str, anchor_text: str, nearby_text: str, kind: Literal["article", "unknown"] = "article") -> None:
+        safe_url = _safe_url(raw_url)
+        if safe_url is None or safe_url in seen:
+            return
+        if NON_ARTICLE_PATTERN.search(" ".join((anchor_text, nearby_text, safe_url))):
+            return
+        seen.add(safe_url)
         candidates.append(
             LinkCandidate(
                 candidate_id=f"link-{len(candidates) + 1:04d}",
-                raw_url=HTTP_URL.validate_python(raw_url),
+                raw_url=HTTP_URL.validate_python(safe_url),
                 anchor_text=anchor_text,
                 nearby_text=nearby_text,
-                position=position,
-                kind="article" if anchor_text else "unknown",
+                position=len(candidates),
+                kind=kind,
             )
         )
+
+    for anchor in _visible_soup(html).find_all("a"):
+        raw_url = _safe_url(str(anchor.get("href", "")))
+        if raw_url is None:
+            continue
+        anchor_text = anchor.get_text(" ", strip=True)
+        nearby_text = _nearby_text(anchor)
+        add(raw_url, anchor_text, nearby_text, "article" if anchor_text else "unknown")
+    for match in MARKDOWN_LINK_PATTERN.finditer(plain):
+        raw_url = match.group(2)
+        add(raw_url, match.group(1), _plain_context(plain, match.start(), raw_url))
+    for match in URL_PATTERN.finditer(plain):
+        raw_url = match.group()
+        context = _plain_context(plain, match.start(), raw_url)
+        add(raw_url, context, context, "unknown")
     return candidates
 
 
@@ -97,14 +121,15 @@ def html_to_text(html: str) -> str:
 
 
 def _content(plain: list[str], html: list[str]) -> ExtractedEmailContent:
-    analysis_text = "\n".join(value.strip() for value in plain if value.strip())
+    plain_content = "\n".join(value.strip() for value in plain if value.strip())
+    analysis_text = plain_content
     html_content = "\n".join(value for value in html if value.strip())
     if not analysis_text:
         analysis_text = html_to_text(html_content)
     analysis_text = re.sub(r"\n{3,}", "\n\n", analysis_text).strip()
     if not analysis_text:
         raise EmptyEmailError("email contains no usable text")
-    return ExtractedEmailContent(analysis_text=analysis_text, link_candidates=_link_candidates(html_content))
+    return ExtractedEmailContent(analysis_text=analysis_text, link_candidates=_link_candidates(plain_content, html_content))
 
 
 def _decode(part: Message) -> str:
