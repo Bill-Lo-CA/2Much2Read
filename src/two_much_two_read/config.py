@@ -144,6 +144,7 @@ class Settings(BaseSettings):
     ollama_keep_alive: str = "10m"
     discord_webhook_url: str = ""
     discord_username: str = "2much2read"
+    digest_language: str = "zh-TW"
     digest_timezone: str = "America/Montreal"
     digest_max_items: int = Field(default=10, ge=1)
     digest_top_items: int = Field(default=5, ge=0)

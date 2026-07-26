@@ -4,7 +4,8 @@ import httpx
 import pytest
 import respx
 
-from two_much_two_read.ollama import OllamaClient, OllamaSchemaError
+from two_much_two_read.config import Settings
+from two_much_two_read.ollama import OllamaClient, OllamaSchemaError, create_ollama_client
 
 
 def valid_result() -> dict[str, object]:
@@ -33,12 +34,43 @@ def valid_article_result() -> dict[str, object]:
     return {
         "title": "Model release",
         "category": "AI_MODEL",
-        "summary_zh_tw": "文章宣布新模型。",
-        "why_it_matters_zh_tw": "可改善工作流程。",
+        "summary_zh_tw": "文章發布新模型。",
+        "why_it_matters_zh_tw": "可改善團隊工作流程。",
         "importance": 8,
         "confidence": 0.9,
         "tags": ["AI Model"],
     }
+
+
+def result_with_prose(overview: str, summary: str, significance: str) -> dict[str, object]:
+    result = valid_result()
+    result["overview_zh_tw"] = overview
+    items = result["items"]
+    assert isinstance(items, list)
+    item = items[0]
+    assert isinstance(item, dict)
+    item["summary_zh_tw"] = summary
+    item["why_it_matters_zh_tw"] = significance
+    return result
+
+
+ENGLISH = ("Daily briefing about the new model.", "The model improves the team workflow.", "It reduces operating costs.")
+FRENCH = (
+    "Résumé quotidien sur le nouveau modèle.",
+    "Le modèle améliore le flux de travail de l’équipe.",
+    "Il réduit les coûts d’exploitation.",
+)
+JAPANESE = (
+    "新しいモデルに関する日次要約です。",
+    "このモデルはチームの作業手順を改善します。",
+    "運用コストを削減できます。",
+)
+SIMPLIFIED_CHINESE = ("这是一份关于新模型的每日摘要。", "该模型可以改善团队的工作流程。", "它能够降低运营成本。")
+TRADITIONAL_CHINESE = ("這是一份關於新模型的每日摘要。", "該模型可以改善團隊的工作流程。", "它能夠降低營運成本。")
+
+
+def test_create_ollama_client_uses_digest_language() -> None:
+    assert create_ollama_client(Settings(digest_language="zh-TW")).digest_language == "zh-TW"
 
 
 @respx.mock
@@ -60,6 +92,36 @@ def test_repairs_invalid_schema_once() -> None:
     repair_payload = json.loads(route.calls[1].request.content)
     assert repair_payload["messages"][-2] == {"role": "assistant", "content": json.dumps(invalid_result)}
     assert "use 0.9, never 9" in repair_payload["messages"][-1]["content"]
+
+
+@pytest.mark.parametrize(
+    ("digest_language", "wrong_prose", "corrected_prose"),
+    [
+        ("en", FRENCH, ENGLISH),
+        ("fr", ENGLISH, FRENCH),
+        ("ja", ENGLISH, JAPANESE),
+        ("zh-TW", SIMPLIFIED_CHINESE, TRADITIONAL_CHINESE),
+    ],
+)
+@respx.mock
+def test_repairs_digest_in_the_wrong_configured_language(
+    digest_language: str, wrong_prose: tuple[str, str, str], corrected_prose: tuple[str, str, str]
+) -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[
+            httpx.Response(200, json={"message": {"content": json.dumps(result_with_prose(*wrong_prose))}}),
+            httpx.Response(200, json={"message": {"content": json.dumps(result_with_prose(*corrected_prose))}}),
+        ]
+    )
+
+    result = OllamaClient(digest_language=digest_language).extract("alphasignal", "News https://example.com/a")
+
+    assert result.items[0].summary_zh_tw == corrected_prose[1]
+    assert route.call_count == 2
+    first = json.loads(route.calls[0].request.content)
+    repair = json.loads(route.calls[1].request.content)
+    assert digest_language in first["messages"][0]["content"]
+    assert digest_language in repair["messages"][-1]["content"]
 
 
 @respx.mock

@@ -398,6 +398,7 @@ def run_pipeline(
                 ", ".join(dict.fromkeys(source.category for source in sources)),
                 ", ".join(source.name for source in sources),
                 settings.digest_top_items,
+                settings.digest_language,
             )
             digest_id: int | None = None
             finalized = False
