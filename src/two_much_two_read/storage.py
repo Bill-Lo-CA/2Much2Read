@@ -6,14 +6,15 @@ import os
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import cast
+from urllib.parse import urlsplit
 
 from .digest import canonical_url, normalized_title
-from .schemas import DigestItem, EmailExtraction, ResolvedContent, SourceDocument
+from .schemas import DigestItem, EmailExtraction, ItemAnalysis, ResolvedContent, SourceDocument
 
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS documents(
@@ -42,7 +43,14 @@ CREATE TABLE IF NOT EXISTS items(
   id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL REFERENCES documents(id), normalized_title TEXT NOT NULL,
   title TEXT NOT NULL, category TEXT NOT NULL, summary_zh_tw TEXT NOT NULL,
   why_it_matters_zh_tw TEXT NOT NULL, source_url TEXT, canonical_url TEXT,
+  raw_url TEXT, resolved_url TEXT,
+  url_match_status TEXT NOT NULL DEFAULT 'not_applicable', url_match_method TEXT, url_match_confidence REAL,
+  url_resolution_status TEXT NOT NULL DEFAULT 'not_applicable', url_error_code TEXT, url_checked_at TEXT,
   importance INTEGER NOT NULL, confidence REAL NOT NULL, tags_json TEXT NOT NULL, created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS url_resolution_cache(
+  raw_url_hash TEXT PRIMARY KEY, raw_url_host TEXT NOT NULL, resolved_url TEXT, canonical_url TEXT,
+  status TEXT NOT NULL, error_code TEXT, checked_at TEXT NOT NULL, expires_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS digests(
   id INTEGER PRIMARY KEY, digest_key TEXT NOT NULL UNIQUE, period_start TEXT NOT NULL, period_end TEXT NOT NULL,
@@ -101,6 +109,9 @@ class Database:
             version = 3
         if version == 3:
             self.connection.executescript(MIGRATE_V3_TO_V4)
+            version = 4
+        if version == 4:
+            self._migrate_v4_to_v5()
         elif version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
             self.connection.close()
             raise DatabaseSchemaResetRequiredError(
@@ -124,6 +135,30 @@ class Database:
                 "SELECT 1 FROM sqlite_master WHERE type='table' AND name NOT LIKE 'sqlite_%' LIMIT 1"
             ).fetchone()
         )
+
+    def _migrate_v4_to_v5(self) -> None:
+        columns = {str(row["name"]) for row in self.connection.execute("PRAGMA table_info(items)")}
+        additions = {
+            "raw_url": "TEXT",
+            "resolved_url": "TEXT",
+            "url_match_status": "TEXT NOT NULL DEFAULT 'not_applicable'",
+            "url_match_method": "TEXT",
+            "url_match_confidence": "REAL",
+            "url_resolution_status": "TEXT NOT NULL DEFAULT 'not_applicable'",
+            "url_error_code": "TEXT",
+            "url_checked_at": "TEXT",
+        }
+        with self.transaction() as connection:
+            for name, definition in additions.items():
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE items ADD COLUMN {name} {definition}")
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS url_resolution_cache(
+                raw_url_hash TEXT PRIMARY KEY, raw_url_host TEXT NOT NULL, resolved_url TEXT, canonical_url TEXT,
+                status TEXT NOT NULL, error_code TEXT, checked_at TEXT NOT NULL, expires_at TEXT NOT NULL
+                )"""
+            )
+            connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(5, datetime('now'))")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -339,8 +374,9 @@ class Database:
                 connection.execute(
                     """INSERT INTO items
                     (document_id,normalized_title,title,category,summary_zh_tw,why_it_matters_zh_tw,
-                     source_url,canonical_url,importance,confidence,tags_json,created_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     source_url,canonical_url,raw_url,resolved_url,url_match_status,url_match_method,url_match_confidence,
+                     url_resolution_status,url_error_code,url_checked_at,importance,confidence,tags_json,created_at)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         document_id,
                         normalized_title(item.title),
@@ -349,7 +385,15 @@ class Database:
                         item.summary_zh_tw,
                         item.why_it_matters_zh_tw,
                         url,
-                        canonical_url(url),
+                        str(item.canonical_url) if item.canonical_url else canonical_url(url),
+                        str(item.raw_url) if item.raw_url else None,
+                        str(item.resolved_url) if item.resolved_url else None,
+                        item.url_match_status,
+                        item.url_match_method,
+                        item.url_match_confidence,
+                        item.url_resolution_status,
+                        item.url_error_code,
+                        item.url_checked_at.isoformat() if item.url_checked_at else None,
                         item.importance,
                         item.confidence,
                         json.dumps(item.tags),
@@ -362,7 +406,57 @@ class Database:
     def store_extraction(
         self, document_id: int, extraction: EmailExtraction, replace: bool = False, finalize: bool = True
     ) -> None:
-        self.store_items(document_id, extraction.items, replace, finalize)
+        self.store_items(
+            document_id,
+            [
+                DigestItem(
+                    **{name: getattr(item, name) for name in ItemAnalysis.model_fields},
+                    url_match_status="unmatched",
+                    url_resolution_status="not_requested",
+                )
+                for item in extraction.items
+            ],
+            replace,
+            finalize,
+        )
+
+    def cached_url_resolution(self, raw_url: str) -> dict[str, object] | None:
+        raw_url_hash = hashlib.sha256(raw_url.encode()).hexdigest()
+        row = self.connection.execute(
+            "SELECT * FROM url_resolution_cache WHERE raw_url_hash=? AND expires_at>?",
+            (raw_url_hash, datetime.now(UTC).isoformat()),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def cache_url_resolution(
+        self,
+        raw_url: str,
+        status: str,
+        *,
+        resolved_url: str | None = None,
+        canonical_url: str | None = None,
+        error_code: str | None = None,
+    ) -> None:
+        now = datetime.now(UTC)
+        ttl = timedelta(days=30) if status in {"resolved", "blocked"} else timedelta(hours=1)
+        self.connection.execute(
+            """INSERT INTO url_resolution_cache
+            (raw_url_hash,raw_url_host,resolved_url,canonical_url,status,error_code,checked_at,expires_at)
+            VALUES(?,?,?,?,?,?,?,?) ON CONFLICT(raw_url_hash) DO UPDATE SET
+            raw_url_host=excluded.raw_url_host,resolved_url=excluded.resolved_url,canonical_url=excluded.canonical_url,
+            status=excluded.status,error_code=excluded.error_code,checked_at=excluded.checked_at,expires_at=excluded.expires_at""",
+            (
+                hashlib.sha256(raw_url.encode()).hexdigest(),
+                (urlsplit(raw_url).hostname or "").casefold(),
+                resolved_url,
+                canonical_url,
+                status,
+                error_code,
+                now.isoformat(),
+                (now + ttl).isoformat(),
+            ),
+        )
+        self.connection.commit()
 
     @staticmethod
     def _finalize_documents(connection: sqlite3.Connection, document_ids: list[int], now: str) -> None:
@@ -496,7 +590,15 @@ class Database:
     def counts(self) -> dict[str, int]:
         return {
             table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
-            for table in ("documents", "gmail_document_state", "hackernews_document_state", "items", "digests", "runs")
+            for table in (
+                "documents",
+                "gmail_document_state",
+                "hackernews_document_state",
+                "items",
+                "digests",
+                "runs",
+                "url_resolution_cache",
+            )
         }
 
     def backup(self, path: Path) -> None:
@@ -510,7 +612,15 @@ class Database:
     def reset(self) -> dict[str, int]:
         counts = self.counts()
         with self.transaction() as connection:
-            for table in ("items", "gmail_document_state", "hackernews_document_state", "documents", "digests", "runs"):
+            for table in (
+                "url_resolution_cache",
+                "items",
+                "gmail_document_state",
+                "hackernews_document_state",
+                "documents",
+                "digests",
+                "runs",
+            ):
                 connection.execute(f"DELETE FROM {table}")
         return counts
 

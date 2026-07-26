@@ -84,7 +84,8 @@ def inspect_mail(settings: Settings, selector: MailSelector, message_id: str, li
         payload = message.get("payload")
         if not isinstance(payload, dict):
             raise ValueError("email has no Gmail payload")
-        text = extract_gmail_payload(payload)
+        content = extract_gmail_payload(payload)
+        text = content.analysis_text
         llm_input = text[:45_000]
         extraction: dict[str, object] | None = None
         if extract:
