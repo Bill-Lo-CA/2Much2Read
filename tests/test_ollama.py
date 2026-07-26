@@ -4,7 +4,8 @@ import httpx
 import pytest
 import respx
 
-from two_much_two_read.ollama import OllamaClient, OllamaSchemaError
+from two_much_two_read.config import Settings
+from two_much_two_read.ollama import OllamaClient, OllamaSchemaError, create_ollama_client
 
 
 def valid_result() -> dict[str, object]:
@@ -41,6 +42,22 @@ def valid_article_result() -> dict[str, object]:
     }
 
 
+def english_result() -> dict[str, object]:
+    result = valid_result()
+    result["overview_zh_tw"] = "Daily summary"
+    items = result["items"]
+    assert isinstance(items, list)
+    item = items[0]
+    assert isinstance(item, dict)
+    item["summary_zh_tw"] = "A model was released."
+    item["why_it_matters_zh_tw"] = "It improves workflows."
+    return result
+
+
+def test_create_ollama_client_uses_digest_language() -> None:
+    assert create_ollama_client(Settings(digest_language="zh-TW")).digest_language == "zh-TW"
+
+
 @respx.mock
 def test_repairs_invalid_schema_once() -> None:
     invalid_result = valid_result()
@@ -60,6 +77,25 @@ def test_repairs_invalid_schema_once() -> None:
     repair_payload = json.loads(route.calls[1].request.content)
     assert repair_payload["messages"][-2] == {"role": "assistant", "content": json.dumps(invalid_result)}
     assert "use 0.9, never 9" in repair_payload["messages"][-1]["content"]
+
+
+@respx.mock
+def test_repairs_english_digest_when_traditional_chinese_is_requested() -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[
+            httpx.Response(200, json={"message": {"content": json.dumps(english_result())}}),
+            httpx.Response(200, json={"message": {"content": json.dumps(valid_result())}}),
+        ]
+    )
+
+    result = OllamaClient(digest_language="zh-TW").extract("alphasignal", "News https://example.com/a")
+
+    assert result.items[0].summary_zh_tw == "發布新模型。"
+    assert route.call_count == 2
+    first = json.loads(route.calls[0].request.content)
+    repair = json.loads(route.calls[1].request.content)
+    assert "Traditional Chinese (zh-TW)" in first["messages"][0]["content"]
+    assert "Traditional Chinese (zh-TW)" in repair["messages"][-1]["content"]
 
 
 @respx.mock
