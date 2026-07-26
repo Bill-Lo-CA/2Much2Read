@@ -31,6 +31,10 @@ def _tokens(value: str) -> set[str]:
     return set(_text(value).split())
 
 
+def _similarity(left: set[str], right: set[str]) -> float:
+    return len(left & right) / len(left | right)
+
+
 def _score(title: str, candidate: LinkCandidate) -> tuple[MatchMethod, float]:
     normalized_title = _text(title)
     anchor = _text(candidate.anchor_text)
@@ -42,11 +46,11 @@ def _score(title: str, candidate: LinkCandidate) -> tuple[MatchMethod, float]:
     title_tokens = _tokens(title)
     if not title_tokens:
         return "unmatched", 0.0
-    anchor_score = len(title_tokens & _tokens(candidate.anchor_text)) / len(title_tokens)
+    anchor_score = _similarity(title_tokens, _tokens(candidate.anchor_text))
     if anchor_score >= 0.7:
         return "fuzzy_anchor", anchor_score
     slug_tokens = _tokens(urlsplit(str(candidate.raw_url)).path.replace("-", " "))
-    slug_score = len(title_tokens & slug_tokens) / len(title_tokens)
+    slug_score = _similarity(title_tokens, slug_tokens)
     return ("url_slug", slug_score) if slug_score >= 0.7 else ("unmatched", 0.0)
 
 

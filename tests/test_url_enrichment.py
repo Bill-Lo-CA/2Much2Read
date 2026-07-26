@@ -67,6 +67,15 @@ def test_exact_anchor_wins_at_the_ambiguity_threshold() -> None:
     assert match.candidate == exact
 
 
+def test_does_not_assign_a_longer_anchor_to_a_shorter_title() -> None:
+    link = candidate("link-0001", "Python release", "https://example.com/story")
+
+    matches = UrlEnricher().match([analysis("Python"), analysis("Python release")], [link])
+
+    assert [match.candidate for match in matches] == [None, link]
+    assert [match.method for match in matches] == ["unmatched", "exact_anchor"]
+
+
 def test_accepts_analysis_from_another_source_type() -> None:
     item = ArticleAnalysis(
         title="Article from another source",
