@@ -14,7 +14,11 @@ from bs4.element import Tag
 
 from .schemas import HTTP_URL, ExtractedEmailContent, LinkCandidate
 
-FOOTER_PATTERN = re.compile(r"\b(unsubscribe|manage preferences|privacy policy|取消訂閱)\b", re.I)
+FOOTER_LINE_PATTERN = re.compile(
+    r"^(?:unsubscribe|manage preferences|privacy policy|取消訂閱)(?:\s*[|·/]\s*"
+    r"(?:unsubscribe|manage preferences|privacy policy|取消訂閱))*$",
+    re.I,
+)
 NON_ARTICLE_PATTERN = re.compile(
     r"\b(unsubscribe|preferences?|privacy|terms|view (this )?email|view in browser|login|account|share|"
     r"follow us|linkedin|twitter|facebook|instagram)\b",
@@ -113,7 +117,7 @@ def html_to_text(html: str) -> str:
     lines = [line.strip() for line in text.splitlines()]
     kept: list[str] = []
     for line in lines:
-        if FOOTER_PATTERN.search(line):
+        if FOOTER_LINE_PATTERN.fullmatch(line):
             break
         if line or (kept and kept[-1]):
             kept.append(line)

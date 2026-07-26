@@ -78,6 +78,19 @@ def test_html_preserves_safe_links_and_drops_unsafe_ones() -> None:
     assert "secret" not in text
 
 
+def test_html_only_article_with_footer_words_is_not_truncated() -> None:
+    text = html_to_text("<p>Google updated its privacy policy.</p><p>The change affects account controls.</p>")
+
+    assert "Google updated its privacy policy." in text
+    assert "The change affects account controls." in text
+
+
+def test_html_footer_label_still_terminates_text() -> None:
+    text = html_to_text("<p>Story</p><p>Unsubscribe | Privacy policy</p><p>Footer detail</p>")
+
+    assert text == "Story"
+
+
 def test_empty_email_fails() -> None:
     message = EmailMessage()
     message.set_content("")
