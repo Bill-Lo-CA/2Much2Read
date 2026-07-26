@@ -19,9 +19,10 @@ FOOTER_LINE_PATTERN = re.compile(
     r"(?:unsubscribe|manage preferences|privacy policy|取消訂閱))*$",
     re.I,
 )
-NON_ARTICLE_PATTERN = re.compile(
-    r"\b(unsubscribe|preferences?|privacy|terms|view (this )?email|view in browser|login|account|share|"
-    r"follow us|linkedin|twitter|facebook|instagram)\b",
+CONTROL_LABEL_PATTERN = re.compile(
+    r"(?:unsubscribe(?: from (?:this|all) emails?)?|manage preferences|privacy policy|terms(?: of (?:service|use))?|"
+    r"view (?:this )?email|view in browser|sign in|manage (?:your )?account|share(?: on \w+)?|"
+    r"follow us(?: on \w+)?|linkedin|twitter|facebook|instagram)",
     re.I,
 )
 MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
@@ -76,7 +77,7 @@ def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
         safe_url = _safe_url(raw_url)
         if safe_url is None or safe_url in seen:
             return
-        if NON_ARTICLE_PATTERN.search(" ".join((anchor_text, nearby_text, safe_url))):
+        if CONTROL_LABEL_PATTERN.fullmatch(anchor_text.strip()):
             return
         seen.add(safe_url)
         candidates.append(

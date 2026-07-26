@@ -69,6 +69,19 @@ def test_html_candidates_exclude_footer_and_unsafe_links() -> None:
     ]
 
 
+def test_html_candidates_keep_articles_about_navigation_topics() -> None:
+    message = EmailMessage()
+    message.set_content("plain summary")
+    message.add_alternative(
+        '<h2>Account security and privacy policy update</h2><a href="https://example.com/privacy-policy-update">Read article</a>',
+        subtype="html",
+    )
+
+    assert [str(candidate.raw_url) for candidate in extract_mime(message.as_bytes()).link_candidates] == [
+        "https://example.com/privacy-policy-update"
+    ]
+
+
 def test_html_preserves_safe_links_and_drops_unsafe_ones() -> None:
     text = html_to_text(
         '<p>Read <a href="https://example.com/a">article</a></p><a href="javascript:alert(1)">bad</a><script>secret</script>'
