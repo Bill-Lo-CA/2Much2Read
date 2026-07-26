@@ -101,3 +101,17 @@ def test_rejects_unsafe_or_cross_host_canonical_metadata() -> None:
 
     assert resolved.final_url == "https://example.com/article"
     assert resolved.canonical_url is None
+
+
+def test_rejects_canonical_metadata_that_downgrades_https() -> None:
+    def response_provider(_: ValidatedURL) -> ArticleResponse:
+        return ArticleResponse(
+            200,
+            {"content-type": "text/html"},
+            b'<html><link rel="canonical" href="http://example.com/canonical"></html>',
+        )
+
+    resolved = ArticleFetcher(public_dns, response_provider).resolve_url("https://example.com/article")
+
+    assert resolved.final_url == "https://example.com/article"
+    assert resolved.canonical_url is None

@@ -172,6 +172,8 @@ class ArticleFetcher:
             candidate = self._validate_url(urljoin(page.url, value), redirect=False)
         except ArticleFetchError:
             return None
+        if page.url.startswith("https://") and candidate.url.startswith("http://"):
+            return None
         if page.hostname.removeprefix("www.") != candidate.hostname.removeprefix("www."):
             return None
         return candidate.url
