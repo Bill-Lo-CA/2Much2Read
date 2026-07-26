@@ -42,6 +42,17 @@ def test_extract_mime_keeps_plain_text_link_candidates_without_html() -> None:
     ]
 
 
+def test_extract_mime_strips_plain_text_url_sentence_punctuation() -> None:
+    message = EmailMessage()
+    message.set_content("Read https://example.com/article?tags=research,security.")
+
+    content = extract_mime(message.as_bytes())
+
+    assert [(str(candidate.raw_url), candidate.nearby_text) for candidate in content.link_candidates] == [
+        ("https://example.com/article?tags=research,security", "Read")
+    ]
+
+
 def test_extract_mime_prefers_html_context_when_plain_and_html_share_a_link() -> None:
     message = EmailMessage()
     message.set_content("Read [plain label](https://example.com/article)")

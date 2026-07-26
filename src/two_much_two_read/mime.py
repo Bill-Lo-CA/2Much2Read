@@ -106,8 +106,9 @@ def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
         raw_url = match.group(2)
         add(raw_url, match.group(1), _plain_context(plain, match.start(), raw_url))
     for match in URL_PATTERN.finditer(plain):
-        raw_url = match.group()
-        context = _plain_context(plain, match.start(), raw_url)
+        matched_url = match.group()
+        raw_url = matched_url.rstrip(".,;:!?]}")
+        context = _plain_context(plain, match.start(), matched_url)
         add(raw_url, context, context, "unknown")
     return candidates
 
