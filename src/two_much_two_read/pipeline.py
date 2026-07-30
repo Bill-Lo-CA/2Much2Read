@@ -372,6 +372,9 @@ def run_pipeline(
     discovered = 0
     failed = 0
     delivered = 0
+    delivery_succeeded = 0
+    delivery_failed = 0
+    delivery_pending = 0
     hackernews: HackerNewsClient | None = None
     try:
         with ProcessLock(settings.lock_path):
@@ -456,6 +459,7 @@ def run_pipeline(
                         settings.digest_timezone,
                         content,
                         processed_document_ids,
+                        settings.discord_destinations(),
                     )
                     finalized = digest_id is not None
                 elif processed_document_ids:
@@ -468,14 +472,17 @@ def run_pipeline(
                             failed += 1
                 if digest_id is not None and not no_deliver:
                     status("Delivering digest")
-                    deliver_digest(settings, database, digest_id)
-                    delivered = 1
+                    delivery_succeeded, delivery_failed, delivery_pending = deliver_digest(settings, database, digest_id)
+                    delivered = int(delivery_succeeded and not delivery_failed and not delivery_pending)
             result = NewsletterRunResult(
-                status="partial" if failed else "ok" if content else "no_content",
+                status="partial" if failed or delivery_failed else "ok" if content else "no_content",
                 discovered=discovered,
                 processed=processed,
                 failed=failed,
                 delivered=delivered,
+                delivery_succeeded=delivery_succeeded if digest_id is not None and not no_deliver else 0,
+                delivery_failed=delivery_failed if digest_id is not None and not no_deliver else 0,
+                delivery_pending=delivery_pending if digest_id is not None and not no_deliver else 0,
             )
             run_status = result.status
             return result
@@ -497,27 +504,57 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
     delivered = 0
     failed = 0
     failed_by_error_code: dict[str, int] = {}
+    destinations = settings.discord_destinations()
     try:
         with ProcessLock(settings.lock_path):
             active_database = active_database or Database(settings.database_path)
             assert active_database is not None
             for digest in active_database.pending_digests():
+                digest_id = int(digest["id"])
+                if not hasattr(active_database, "has_digest_deliveries") or not active_database.has_digest_deliveries(digest_id):
+                    try:
+                        deliver_resumable(
+                            settings.discord_destination(),
+                            str(digest["rendered_content"]),
+                            settings.discord_username,
+                            digest["discord_message_ids_json"],
+                            lambda message_ids, target_id=digest_id: active_database.record_delivery_progress(
+                                target_id, message_ids
+                            ),
+                            lambda message_ids, target_id=digest_id: active_database.finish_delivery(target_id, message_ids),
+                            sender=deliver,
+                        )
+                        delivered += 1
+                    except DiscordDeliveryError as error:
+                        error_code = delivery_error_code(error)
+                        active_database.fail_delivery(digest_id, error_code)
+                        failed += 1
+                        failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
+                    continue
+                active_database.ensure_digest_deliveries(digest_id, destinations)
+            deliveries = (
+                active_database.pending_digest_deliveries(destinations)
+                if hasattr(active_database, "pending_digest_deliveries")
+                else []
+            )
+            for delivery in deliveries:
                 try:
-                    digest_id = int(digest["id"])
-                    destination = settings.discord_destination()
-                    destination_key = destination.key
+                    delivery_id = int(delivery["id"])
+                    destination = next(
+                        destination for destination in destinations if destination.key == delivery["destination_key"]
+                    )
 
-                    def save_progress(message_ids: list[str], target_id: int = digest_id, key: str = destination_key) -> None:
-                        active_database.record_delivery_progress(target_id, message_ids, key)
+                    def save_progress(message_ids: list[str], target_id: int = delivery_id) -> None:
+                        active_database.record_digest_delivery_progress(target_id, message_ids)
 
-                    def finish_delivery(message_ids: list[str], target_id: int = digest_id, key: str = destination_key) -> None:
-                        active_database.finish_delivery(target_id, message_ids, key)
+                    def finish_delivery(message_ids: list[str], target_id: int = delivery_id) -> None:
+                        active_database.finish_digest_delivery(target_id, message_ids, destinations)
 
                     deliver_resumable(
                         destination,
-                        str(digest["rendered_content"]),
+                        str(delivery["rendered_content"]),
                         settings.discord_username,
-                        active_database.delivery_checkpoint(digest_id, destination.key),
+                        delivery["discord_message_ids_json"],
                         save_progress,
                         finish_delivery,
                         sender=deliver,
@@ -525,7 +562,7 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
                     delivered += 1
                 except DiscordDeliveryError as error:
                     error_code = delivery_error_code(error)
-                    active_database.fail_delivery(int(digest["id"]), error_code)
+                    active_database.fail_digest_delivery(int(delivery["id"]), error_code, destinations)
                     failed += 1
                     failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
     finally:
@@ -534,36 +571,40 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
     return NewsletterRetryResult(delivered=delivered, failed=failed, failed_by_error_code=failed_by_error_code)
 
 
-def reset_corrupt_delivery(settings: Settings, digest_id: int) -> DeliveryCheckpointResetResult:
+def reset_corrupt_delivery(settings: Settings, delivery_id: int) -> DeliveryCheckpointResetResult:
     with ProcessLock(settings.lock_path):
         database = Database(settings.database_path)
         try:
-            if not database.reset_corrupt_delivery(digest_id):
-                raise ValueError(f"digest {digest_id} is not a failed corrupt checkpoint")
+            if not database.reset_corrupt_digest_delivery(delivery_id, settings.discord_destinations()):
+                raise ValueError(f"digest delivery {delivery_id} is not a failed corrupt checkpoint")
         finally:
             database.close()
-    return DeliveryCheckpointResetResult(digest_id=digest_id)
+    return DeliveryCheckpointResetResult(delivery_id=delivery_id)
 
 
-def deliver_digest(settings: Settings, database: Database, digest_id: int) -> None:
+def deliver_digest(settings: Settings, database: Database, digest_id: int) -> tuple[int, int, int]:
     digest = database.pending_digest(digest_id)
     if digest is None:
         raise ValueError(f"digest {digest_id} is not pending")
-    destination = settings.discord_destination()
-
-    def save_progress(message_ids: list[str]) -> None:
-        database.record_delivery_progress(digest_id, message_ids, destination.key)
-
-    try:
-        deliver_resumable(
-            destination,
-            str(digest["rendered_content"]),
-            settings.discord_username,
-            database.delivery_checkpoint(digest_id, destination.key),
-            save_progress,
-            lambda message_ids: database.finish_delivery(digest_id, message_ids, destination.key),
-            sender=deliver,
-        )
-    except DiscordDeliveryError as error:
-        database.fail_delivery(digest_id, delivery_error_code(error))
-        raise
+    destinations = settings.discord_destinations()
+    database.ensure_digest_deliveries(digest_id, destinations)
+    delivered = failed = 0
+    for delivery in database.digest_deliveries(digest_id, destinations):
+        delivery_id = int(delivery["id"])
+        destination = next(destination for destination in destinations if destination.key == delivery["destination_key"])
+        try:
+            deliver_resumable(
+                destination,
+                str(delivery["rendered_content"]),
+                settings.discord_username,
+                delivery["discord_message_ids_json"],
+                lambda message_ids, target_id=delivery_id: database.record_digest_delivery_progress(target_id, message_ids),
+                lambda message_ids, target_id=delivery_id: database.finish_digest_delivery(target_id, message_ids, destinations),
+                sender=deliver,
+            )
+            delivered += 1
+        except DiscordDeliveryError as error:
+            failed += 1
+            error_code = delivery_error_code(error)
+            database.fail_digest_delivery(delivery_id, error_code, destinations)
+    return delivered, failed, 0

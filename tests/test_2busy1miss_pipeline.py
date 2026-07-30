@@ -217,15 +217,59 @@ def test_manual_agenda_is_idempotent_and_forceable(tmp_path: Path, monkeypatch) 
         "sent": 1,
         "discord_message_ids": ["discord-id"],
         "events": 0,
+        "delivery_succeeded": 1,
+        "delivery_failed": 0,
     }
     assert pipeline.agenda(settings, date(2026, 7, 9), dry_run=False).model_dump(exclude_none=True) == {
         "status": "ok",
         "sent": 0,
         "skipped": 1,
         "events": 0,
+        "delivery_succeeded": 0,
+        "delivery_failed": 0,
     }
     assert pipeline.agenda(settings, date(2026, 7, 9), dry_run=False, force=True).sent == 1
     assert len(delivered) == 2
+
+
+def test_agenda_retries_only_the_failed_destination(tmp_path: Path, monkeypatch) -> None:
+    timezone = ZoneInfo("America/Montreal")
+    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    settings = Settings(
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        discord_delivery_mode="both",
+        discord_webhook_url="https://busy.example/webhook",
+        discord_bot_token="token",
+        discord_bot_channel_id="123",
+    )
+    calls: list[str] = []
+
+    def fail_bot(destination, *args, **kwargs):
+        calls.append(destination.transport)
+        if destination.transport == "bot":
+            raise DiscordDeliveryError("DISCORD_BOT_FORBIDDEN")
+        return ["webhook-message"]
+
+    monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
+    monkeypatch.setattr(pipeline, "list_events_between", lambda *args: [])
+    monkeypatch.setattr(pipeline, "deliver", fail_bot)
+
+    result = pipeline.agenda(settings, date(2026, 7, 9), dry_run=False)
+    assert (result.status, result.sent, result.delivery_failed) == ("partial", 1, 1)
+    assert calls == ["webhook", "bot"]
+
+    monkeypatch.setattr(
+        pipeline, "deliver", lambda destination, *args, **kwargs: calls.append(destination.transport) or ["bot-message"]
+    )
+    assert pipeline.retry_agenda(settings, date(2026, 7, 9)).model_dump() == {
+        "status": "ok",
+        "day": date(2026, 7, 9),
+        "delivered": 1,
+        "failed": 0,
+        "failed_by_error_code": {},
+    }
+    assert calls == ["webhook", "bot", "bot"]
 
 
 def test_scheduled_next_day_agenda_before_2100_is_noop(calendar_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -246,6 +290,8 @@ def test_scheduled_next_day_agenda_before_2100_is_noop(calendar_settings: Settin
         "sent": 0,
         "skipped": 1,
         "reason": "before_schedule",
+        "delivery_succeeded": 0,
+        "delivery_failed": 0,
     }
 
 

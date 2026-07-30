@@ -171,8 +171,8 @@ def delivery_retry() -> None:
 
 
 @delivery_app.command("reset-checkpoint")
-def delivery_reset_checkpoint(digest_id: Annotated[int, typer.Option("--digest-id", min=1)]) -> None:
-    invoke(lambda: reset_corrupt_delivery(Settings(), digest_id))
+def delivery_reset_checkpoint(delivery_id: Annotated[int, typer.Option("--delivery-id", min=1)]) -> None:
+    invoke(lambda: reset_corrupt_delivery(Settings(), delivery_id))
 
 
 @hackernews_app.command("list")

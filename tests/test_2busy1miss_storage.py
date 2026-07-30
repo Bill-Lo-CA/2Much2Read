@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from two_busy_one_miss.google_calendar import CalendarEvent
 from two_busy_one_miss.rules import ReminderCandidate
 from two_busy_one_miss.storage import Database
+from two_read_runtime.discord import configured_destinations
 
 
 def candidate(event_id: str = "event-1") -> ReminderCandidate:
@@ -31,7 +32,7 @@ def test_attempt_idempotency_and_delivery_state(tmp_path: Path) -> None:
     attempt_id = database.create_attempt(item, "message")
     assert attempt_id is not None
     assert database.create_attempt(item, "message") is None
-    assert database.counts() == {"events": 1, "reminder_attempts": 1}
+    assert database.counts() == {"events": 1, "reminder_attempts": 1, "reminder_deliveries": 0}
 
     database.finish_delivery(attempt_id, ["123"])
     assert database.attempt_state(attempt_id) == "delivered"
@@ -42,7 +43,27 @@ def test_create_attempts_batches_distinct_candidates(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
 
     assert database.create_attempts([(candidate("one"), "one"), (candidate("two"), "two")]) == 2
-    assert database.counts() == {"events": 2, "reminder_attempts": 2}
+    assert database.counts() == {"events": 2, "reminder_attempts": 2, "reminder_deliveries": 0}
+    database.close()
+
+
+def test_reminder_destinations_retry_independently(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    item = candidate()
+    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+    attempt_id = database.create_attempt(item, "message", destinations)
+    assert attempt_id is not None
+
+    deliveries = database.due_reminder_deliveries(item.reminder_time + timedelta(minutes=1), destinations)
+    assert len(deliveries) == 2
+    database.finish_reminder_delivery(int(deliveries[0]["id"]), ["webhook-message"], destinations)
+    database.fail_reminder_delivery(int(deliveries[1]["id"]), "DISCORD_BOT_FORBIDDEN", destinations)
+    assert database.attempt_state(attempt_id) == "failed"
+
+    pending = database.due_reminder_deliveries(item.reminder_time + timedelta(minutes=1), destinations)
+    assert [row["id"] for row in pending] == [deliveries[1]["id"]]
+    database.finish_reminder_delivery(int(deliveries[1]["id"]), ["bot-message"], destinations)
+    assert database.attempt_state(attempt_id) == "delivered"
     database.close()
 
 

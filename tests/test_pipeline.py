@@ -533,6 +533,9 @@ def test_empty_news_day_records_no_content_run(newsletter_settings: Settings, mo
         "processed": 0,
         "failed": 0,
         "delivered": 0,
+        "delivery_succeeded": 0,
+        "delivery_failed": 0,
+        "delivery_pending": 0,
         "reason": None,
     }
 
@@ -720,24 +723,54 @@ def test_retry_delivery_preserves_corrupt_checkpoint_error(tmp_path: Path, monke
 def test_reset_corrupt_delivery_checkpoint(tmp_path: Path) -> None:
     settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
     database = Database(settings.database_path)
-    digest_id = database.save_digest("daily:corrupt", "start", "end", "UTC", "corrupt")
+    destinations = settings.discord_destinations()
+    digest_id = database.save_digest("daily:corrupt", "start", "end", "UTC", "corrupt", destinations=destinations)
     assert digest_id is not None
-    database.connection.execute(
-        """UPDATE digests SET state='failed', discord_message_ids_json='not json',
-        last_error_code='DISCORD_MESSAGE_IDS_CORRUPT' WHERE id=?""",
-        (digest_id,),
-    )
-    database.connection.commit()
+    delivery_id = int(database.digest_deliveries(digest_id, destinations)[0]["id"])
+    database.record_digest_delivery_progress(delivery_id, ["partial"])
+    database.fail_digest_delivery(delivery_id, "DISCORD_MESSAGE_IDS_CORRUPT", destinations)
     database.close()
 
-    assert pipeline.reset_corrupt_delivery(settings, digest_id).model_dump() == {"status": "ok", "digest_id": digest_id}
+    assert pipeline.reset_corrupt_delivery(settings, delivery_id).model_dump() == {"status": "ok", "delivery_id": delivery_id}
 
     database = Database(settings.database_path)
     row = database.connection.execute(
-        "SELECT state,discord_message_ids_json,last_error_code FROM digests WHERE id=?", (digest_id,)
+        "SELECT state,discord_message_ids_json,last_error_code FROM digest_deliveries WHERE id=?", (delivery_id,)
     ).fetchone()
     assert tuple(row) == ("pending", None, None)
-    assert not database.reset_corrupt_delivery(digest_id)
+    assert not database.reset_corrupt_digest_delivery(delivery_id, destinations)
+    database.close()
+
+
+def test_retry_sends_only_the_failed_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_delivery_mode="both",
+        discord_webhook_url="https://discord.example/webhook",
+        discord_bot_token="token",
+        discord_bot_channel_id="123",
+    )
+    destinations = settings.discord_destinations()
+    database = Database(settings.database_path)
+    digest_id = database.save_digest("daily:both", "start", "end", "UTC", "digest", destinations=destinations)
+    assert digest_id is not None
+    webhook, bot = database.digest_deliveries(digest_id, destinations)
+    database.finish_digest_delivery(int(webhook["id"]), ["webhook-message"], destinations)
+    database.fail_digest_delivery(int(bot["id"]), "DISCORD_BOT_FORBIDDEN", destinations)
+
+    calls: list[str] = []
+    monkeypatch.setattr(
+        pipeline, "deliver", lambda destination, *args, **kwargs: calls.append(destination.transport) or ["bot-message"]
+    )
+
+    assert pipeline.retry_delivery(settings, database).model_dump() == {
+        "status": "ok",
+        "delivered": 1,
+        "failed": 0,
+        "failed_by_error_code": {},
+    }
+    assert calls == ["bot"]
     database.close()
 
 
@@ -854,6 +887,9 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
         "processed": 1,
         "failed": 1,
         "delivered": 0,
+        "delivery_succeeded": 0,
+        "delivery_failed": 0,
+        "delivery_pending": 0,
         "reason": None,
     }
     assert gmail.applied_labels == [
@@ -934,6 +970,9 @@ def test_mime_failure_marks_one_message_failed_and_continues(tmp_path: Path, mon
         "processed": 1,
         "failed": 1,
         "delivered": 0,
+        "delivery_succeeded": 0,
+        "delivery_failed": 0,
+        "delivery_pending": 0,
         "reason": None,
     }
     assert gmail.applied_labels == [("bad", "failed"), ("good", "processed")]
@@ -1049,6 +1088,9 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
         "processed": 1,
         "failed": 0,
         "delivered": 0,
+        "delivery_succeeded": 0,
+        "delivery_failed": 0,
+        "delivery_pending": 0,
         "reason": None,
     }
     assert gmail.applied_labels == [("transient", "processed")]
@@ -1081,6 +1123,9 @@ def test_existing_daily_digest_skips_before_gmail_access(tmp_path: Path, monkeyp
         "processed": 0,
         "failed": 0,
         "delivered": 0,
+        "delivery_succeeded": 0,
+        "delivery_failed": 0,
+        "delivery_pending": 0,
         "reason": "daily_digest_exists",
     }
     database = Database(settings.database_path)

@@ -161,9 +161,9 @@ def retry_delivery_command() -> None:
 
 
 @app.command("reset-delivery-checkpoint")
-def reset_delivery_checkpoint(attempt_id: Annotated[int, typer.Option("--attempt-id", min=1)]) -> None:
+def reset_delivery_checkpoint(delivery_id: Annotated[int, typer.Option("--delivery-id", min=1)]) -> None:
     try:
-        emit(reset_reminder_checkpoint(Settings(), attempt_id))
+        emit(reset_reminder_checkpoint(Settings(), delivery_id))
     except ValueError as error:
         raise typer.BadParameter(str(error)) from error
 

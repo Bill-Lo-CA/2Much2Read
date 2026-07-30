@@ -11,10 +11,12 @@ from pathlib import Path
 from typing import cast
 from urllib.parse import urlsplit
 
+from two_read_runtime.discord import DiscordDestination
+
 from .digest import canonical_url, normalized_title
 from .schemas import DigestItem, EmailExtraction, ItemAnalysis, ResolvedContent, SourceDocument
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS documents(
@@ -58,6 +60,14 @@ CREATE TABLE IF NOT EXISTS digests(
   state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed')), delivery_attempt_count INTEGER NOT NULL DEFAULT 0,
   discord_message_ids_json TEXT, discord_destination_key TEXT, delivered_at TEXT, last_error_code TEXT,
   created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS digest_deliveries(
+  id INTEGER PRIMARY KEY, digest_id INTEGER NOT NULL REFERENCES digests(id) ON DELETE CASCADE,
+  destination_key TEXT NOT NULL, transport TEXT NOT NULL CHECK(transport IN ('webhook','bot')),
+  state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed')),
+  delivery_attempt_count INTEGER NOT NULL DEFAULT 0, discord_message_ids_json TEXT, delivered_at TEXT,
+  last_error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+  UNIQUE(digest_id, destination_key)
 );
 CREATE TABLE IF NOT EXISTS runs(
   id INTEGER PRIMARY KEY, run_type TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
@@ -116,6 +126,9 @@ class Database:
             version = 5
         if version == 5:
             self._migrate_v5_to_v6()
+            version = 6
+        if version == 6:
+            self._migrate_v6_to_v7()
         elif version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
             self.connection.close()
             raise DatabaseSchemaResetRequiredError(
@@ -173,6 +186,20 @@ class Database:
                     "UPDATE digests SET discord_destination_key='webhook' WHERE discord_message_ids_json IS NOT NULL"
                 )
             connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(6, datetime('now'))")
+
+    def _migrate_v6_to_v7(self) -> None:
+        with self.transaction() as connection:
+            connection.execute(
+                """CREATE TABLE IF NOT EXISTS digest_deliveries(
+                id INTEGER PRIMARY KEY, digest_id INTEGER NOT NULL REFERENCES digests(id) ON DELETE CASCADE,
+                destination_key TEXT NOT NULL, transport TEXT NOT NULL CHECK(transport IN ('webhook','bot')),
+                state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed')),
+                delivery_attempt_count INTEGER NOT NULL DEFAULT 0, discord_message_ids_json TEXT, delivered_at TEXT,
+                last_error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL,
+                UNIQUE(digest_id, destination_key)
+                )"""
+            )
+            connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(7, datetime('now'))")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -547,6 +574,7 @@ class Database:
         timezone: str,
         content: str,
         document_ids: list[int] | None = None,
+        destinations: list[DiscordDestination] | None = None,
     ) -> int | None:
         now = datetime.now(UTC).isoformat()
         with self.transaction() as connection:
@@ -565,6 +593,8 @@ class Database:
                     now,
                 ),
             )
+            if cursor.rowcount and cursor.lastrowid is not None and destinations:
+                self._create_digest_deliveries(connection, int(cursor.lastrowid), destinations, now)
             if cursor.rowcount and document_ids:
                 self._finalize_documents(connection, document_ids, now)
             return int(cursor.lastrowid) if cursor.rowcount and cursor.lastrowid is not None else None
@@ -581,6 +611,114 @@ class Database:
             (digest_id,),
         ).fetchone()
         return cast(sqlite3.Row | None, row)
+
+    def _create_digest_deliveries(
+        self, connection: sqlite3.Connection, digest_id: int, destinations: list[DiscordDestination], now: str
+    ) -> None:
+        connection.executemany(
+            """INSERT OR IGNORE INTO digest_deliveries(digest_id,destination_key,transport,state,created_at,updated_at)
+            VALUES(?,?,?,'pending',?,?)""",
+            [(digest_id, destination.key, destination.transport, now, now) for destination in destinations],
+        )
+
+    def ensure_digest_deliveries(self, digest_id: int, destinations: list[DiscordDestination]) -> None:
+        with self.transaction() as connection:
+            self._create_digest_deliveries(connection, digest_id, destinations, datetime.now(UTC).isoformat())
+
+    def has_digest_deliveries(self, digest_id: int) -> bool:
+        return self.connection.execute("SELECT 1 FROM digest_deliveries WHERE digest_id=?", (digest_id,)).fetchone() is not None
+
+    def digest_deliveries(self, digest_id: int, destinations: list[DiscordDestination]) -> list[sqlite3.Row]:
+        if not destinations:
+            return []
+        keys = [destination.key for destination in destinations]
+        placeholders = ",".join("?" for _ in keys)
+        return self.connection.execute(
+            f"""SELECT dd.*,d.rendered_content FROM digest_deliveries dd JOIN digests d ON d.id=dd.digest_id
+            WHERE dd.digest_id=? AND dd.destination_key IN ({placeholders}) AND dd.state IN ('pending','failed')
+            ORDER BY dd.id""",
+            (digest_id, *keys),
+        ).fetchall()
+
+    def pending_digest_deliveries(self, destinations: list[DiscordDestination]) -> list[sqlite3.Row]:
+        if not destinations:
+            return []
+        keys = [destination.key for destination in destinations]
+        placeholders = ",".join("?" for _ in keys)
+        return self.connection.execute(
+            f"""SELECT dd.*,d.rendered_content FROM digest_deliveries dd JOIN digests d ON d.id=dd.digest_id
+            WHERE dd.destination_key IN ({placeholders}) AND dd.state IN ('pending','failed') ORDER BY dd.id""",
+            keys,
+        ).fetchall()
+
+    def _refresh_digest_state(
+        self, connection: sqlite3.Connection, digest_id: int, destinations: list[DiscordDestination]
+    ) -> None:
+        if not destinations:
+            return
+        keys = [destination.key for destination in destinations]
+        placeholders = ",".join("?" for _ in keys)
+        states = [
+            str(row["state"])
+            for row in connection.execute(
+                f"SELECT state FROM digest_deliveries WHERE digest_id=? AND destination_key IN ({placeholders})",
+                (digest_id, *keys),
+            )
+        ]
+        if not states:
+            return
+        now = datetime.now(UTC).isoformat()
+        state = "delivered" if all(value == "delivered" for value in states) else "failed" if "failed" in states else "pending"
+        connection.execute(
+            "UPDATE digests SET state=?,delivered_at=?,updated_at=? WHERE id=?",
+            (state, now if state == "delivered" else None, now, digest_id),
+        )
+
+    def finish_digest_delivery(self, delivery_id: int, message_ids: list[str], destinations: list[DiscordDestination]) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self.transaction() as connection:
+            row = connection.execute("SELECT digest_id FROM digest_deliveries WHERE id=?", (delivery_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"digest delivery {delivery_id} not found")
+            connection.execute(
+                """UPDATE digest_deliveries SET state='delivered',delivered_at=?,discord_message_ids_json=?,
+                delivery_attempt_count=delivery_attempt_count+1,last_error_code=NULL,updated_at=? WHERE id=?""",
+                (now, json.dumps(message_ids), now, delivery_id),
+            )
+            self._refresh_digest_state(connection, int(row["digest_id"]), destinations)
+
+    def record_digest_delivery_progress(self, delivery_id: int, message_ids: list[str]) -> None:
+        self.connection.execute(
+            "UPDATE digest_deliveries SET discord_message_ids_json=?,updated_at=? WHERE id=?",
+            (json.dumps(message_ids), datetime.now(UTC).isoformat(), delivery_id),
+        )
+        self.connection.commit()
+
+    def fail_digest_delivery(self, delivery_id: int, error_code: str, destinations: list[DiscordDestination]) -> None:
+        now = datetime.now(UTC).isoformat()
+        with self.transaction() as connection:
+            row = connection.execute("SELECT digest_id FROM digest_deliveries WHERE id=?", (delivery_id,)).fetchone()
+            if row is None:
+                raise ValueError(f"digest delivery {delivery_id} not found")
+            connection.execute(
+                """UPDATE digest_deliveries SET state='failed',delivery_attempt_count=delivery_attempt_count+1,
+                last_error_code=?,updated_at=? WHERE id=?""",
+                (error_code, now, delivery_id),
+            )
+            self._refresh_digest_state(connection, int(row["digest_id"]), destinations)
+
+    def reset_corrupt_digest_delivery(self, delivery_id: int, destinations: list[DiscordDestination]) -> bool:
+        with self.transaction() as connection:
+            row = connection.execute("SELECT digest_id FROM digest_deliveries WHERE id=?", (delivery_id,)).fetchone()
+            if row is None:
+                return False
+            cursor = connection.execute(
+                """UPDATE digest_deliveries SET state='pending',discord_message_ids_json=NULL,last_error_code=NULL,updated_at=?
+                WHERE id=? AND state='failed' AND last_error_code='DISCORD_MESSAGE_IDS_CORRUPT'""",
+                (datetime.now(UTC).isoformat(), delivery_id),
+            )
+            self._refresh_digest_state(connection, int(row["digest_id"]), destinations)
+            return bool(cursor.rowcount)
 
     def start_run(self, run_type: str) -> int:
         cursor = self.connection.execute(
@@ -609,6 +747,7 @@ class Database:
                 "gmail_document_state",
                 "hackernews_document_state",
                 "items",
+                "digest_deliveries",
                 "digests",
                 "runs",
                 "url_resolution_cache",
@@ -632,6 +771,7 @@ class Database:
                 "gmail_document_state",
                 "hackernews_document_state",
                 "documents",
+                "digest_deliveries",
                 "digests",
                 "runs",
             ):
