@@ -459,7 +459,7 @@ def run_pipeline(
                         settings.digest_timezone,
                         content,
                         processed_document_ids,
-                        settings.discord_destinations(),
+                        settings.discord_destinations() if not no_deliver else [],
                     )
                     finalized = digest_id is not None
                 elif processed_document_ids:

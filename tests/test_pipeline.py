@@ -721,7 +721,11 @@ def test_retry_delivery_preserves_corrupt_checkpoint_error(tmp_path: Path, monke
 
 
 def test_reset_corrupt_delivery_checkpoint(tmp_path: Path) -> None:
-    settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
+    settings = Settings(
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="https://discord.example/webhook",
+    )
     database = Database(settings.database_path)
     destinations = settings.discord_destinations()
     digest_id = database.save_digest("daily:corrupt", "start", "end", "UTC", "corrupt", destinations=destinations)
