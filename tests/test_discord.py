@@ -44,6 +44,18 @@ def test_chunk_text_balances_long_fenced_blocks() -> None:
     )
 
 
+def test_chunk_text_neutralizes_an_oversized_fence_opener() -> None:
+    chunks = chunk_text(f"```{'x' * 2_000}\nbody\n```")
+
+    assert all(len(chunk) <= 2_000 for chunk in chunks)
+    assert "``\u200b`" in chunks[0]
+
+
+def test_split_text_rejects_a_nonpositive_limit() -> None:
+    with pytest.raises(ValueError, match="chunk limit must be positive"):
+        discord._split_text("text", 0)
+
+
 def test_chunk_text_keeps_fences_when_links_follow() -> None:
     body = "\n".join(f"09:{index:02d} | Event {index}" for index in range(20))
     content = f"```text\n{body}\n```\n<https://calendar.example/event>"
@@ -69,7 +81,8 @@ def test_chunk_text_keeps_long_link_footers_outside_fences() -> None:
 
 
 @respx.mock
-def test_disables_mentions() -> None:
+def test_disables_mentions(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("HTTPS_PROXY", "socks5://127.0.0.1:1080")
     route = respx.post("https://discord.example/webhook").mock(return_value=httpx.Response(200, json={"id": "123"}))
     assert deliver("https://discord.example/webhook", "hello", "2much2read") == ["123"]
     assert route.calls[0].request.read()
@@ -178,7 +191,7 @@ def test_bot_delivery_classifies_configuration_errors(status_code: int, code: st
     assert "secret-token" not in str(error.value)
 
 
-def test_uses_environment_proxy_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_discord_client_ignores_environment_proxy_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     client_options: list[dict[str, object]] = []
 
     class Client:
@@ -199,7 +212,7 @@ def test_uses_environment_proxy_configuration(monkeypatch: pytest.MonkeyPatch) -
     response = discord._request(configured_destinations("bot", "", "token", "123")[0], "hello", "ignored", {"parse": []})
 
     assert response.status_code == 200
-    assert client_options == [{"timeout": 30}]
+    assert client_options == [{"timeout": 30, "trust_env": False}]
 
 
 def test_does_not_retry_ambiguous_post_errors(monkeypatch: pytest.MonkeyPatch) -> None:

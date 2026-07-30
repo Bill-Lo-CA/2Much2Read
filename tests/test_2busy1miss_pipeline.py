@@ -156,7 +156,7 @@ def test_retry_delivery_holds_process_lock(calendar_settings: Settings, monkeypa
     monkeypatch.setattr(pipeline, "deliver", fake_deliver)
 
     assert pipeline.retry_delivery(settings).model_dump() == {
-        "status": "ok",
+        "status": "partial",
         "delivered": 1,
         "failed": 1,
         "failed_by_error_code": {"DISCORD_DELIVERY_FAILED": 1},
@@ -214,6 +214,53 @@ def test_retry_delivery_preserves_legacy_bot_checkpoint_in_both_mode(tmp_path: P
     database = Database(settings.database_path)
     assert database.attempt_state(attempt_id) == "delivered"
     assert database.counts()["reminder_deliveries"] == 2
+    database.close()
+
+
+def test_retry_retires_a_removed_failed_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    timezone = ZoneInfo("America/Montreal")
+    now = datetime(2026, 7, 9, 9, 55, tzinfo=timezone)
+    item = ReminderCandidate(
+        CalendarEvent(
+            "primary", "Main", "event", "event", "Event", "", now + timedelta(hours=1), now + timedelta(hours=2), False
+        ),
+        "default-5m",
+        "5m",
+        now,
+    )
+    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    both_settings = Settings(
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        discord_delivery_mode="both",
+        discord_webhook_url="https://discord.example/webhook",
+        discord_bot_token="token",
+        discord_bot_channel_id="123",
+    )
+    settings = both_settings.model_copy(update={"discord_delivery_mode": "webhook"})
+    both_destinations = both_settings.discord_destinations()
+    database = Database(settings.database_path)
+    attempt_id = database.create_attempt(item, "reminder", both_destinations)
+    assert attempt_id is not None
+    webhook, bot = database.due_reminder_deliveries(now, both_destinations)
+    database.finish_reminder_delivery(int(webhook["id"]), ["webhook-message"], both_destinations)
+    database.fail_reminder_delivery(int(bot["id"]), "DISCORD_BOT_FORBIDDEN", both_destinations)
+    database.close()
+    monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
+
+    assert pipeline.retry_delivery(settings, now=now).model_dump() == {
+        "status": "ok",
+        "delivered": 0,
+        "failed": 0,
+        "failed_by_error_code": {},
+        "expired": 0,
+    }
+    database = Database(settings.database_path)
+    assert database.attempt_state(attempt_id) == "delivered"
+    retired_at = database.connection.execute(
+        "SELECT retired_at FROM reminder_deliveries WHERE id=?", (int(bot["id"]),)
+    ).fetchone()[0]
+    assert retired_at is not None
     database.close()
 
 

@@ -663,7 +663,7 @@ def test_retry_delivery_continues_after_a_failed_digest(newsletter_settings: Set
     monkeypatch.setattr(pipeline, "deliver", fake_deliver)
 
     assert pipeline.retry_delivery(settings, database).model_dump() == {
-        "status": "ok",
+        "status": "partial",
         "delivered": 1,
         "failed": 1,
         "failed_by_error_code": {"DISCORD_DELIVERY_FAILED": 1},
@@ -709,7 +709,7 @@ def test_retry_delivery_preserves_corrupt_checkpoint_error(tmp_path: Path, monke
     monkeypatch.setattr(pipeline, "deliver", lambda *args: ["discord-id"])
 
     assert pipeline.retry_delivery(settings, database).model_dump() == {
-        "status": "ok",
+        "status": "partial",
         "delivered": 1,
         "failed": 1,
         "failed_by_error_code": {"DISCORD_MESSAGE_IDS_CORRUPT": 1},
@@ -777,6 +777,38 @@ def test_retry_sends_only_the_failed_destination(tmp_path: Path, monkeypatch: py
         "failed_by_error_code": {},
     }
     assert calls == ["bot"]
+    database.close()
+
+
+def test_retry_retires_a_removed_failed_destination(tmp_path: Path) -> None:
+    both_settings = Settings(
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_delivery_mode="both",
+        discord_webhook_url="https://discord.example/webhook",
+        discord_bot_token="token",
+        discord_bot_channel_id="123",
+    )
+    settings = both_settings.model_copy(update={"discord_delivery_mode": "webhook"})
+    both_destinations = both_settings.discord_destinations()
+    database = Database(settings.database_path)
+    digest_id = database.save_digest("daily:retired", "start", "end", "UTC", "digest", destinations=both_destinations)
+    assert digest_id is not None
+    webhook, bot = database.digest_deliveries(digest_id, both_destinations)
+    database.finish_digest_delivery(int(webhook["id"]), ["webhook-message"], both_destinations)
+    database.fail_digest_delivery(int(bot["id"]), "DISCORD_BOT_FORBIDDEN", both_destinations)
+
+    assert pipeline.retry_delivery(settings, database).model_dump() == {
+        "status": "ok",
+        "delivered": 0,
+        "failed": 0,
+        "failed_by_error_code": {},
+    }
+    assert database.pending_digests() == []
+    retired_at = database.connection.execute("SELECT retired_at FROM digest_deliveries WHERE id=?", (int(bot["id"]),)).fetchone()[
+        0
+    ]
+    assert retired_at is not None
     database.close()
 
 

@@ -76,7 +76,7 @@ class AgendaDeliveryResult(BaseModel):
 
 
 class AgendaRetryResult(BaseModel):
-    status: Literal["ok"] = "ok"
+    status: Literal["ok", "partial", "failed"] = "ok"
     day: date
     delivered: int
     failed: int
@@ -89,7 +89,7 @@ class AgendaCheckpointResetResult(BaseModel):
 
 
 class ReminderRunResult(BaseModel):
-    status: Literal["ok"] = "ok"
+    status: Literal["ok", "partial", "failed"] = "ok"
     sent: int
     failed: int
     failed_by_error_code: dict[str, int]
@@ -102,7 +102,7 @@ class ReminderDryRunResult(BaseModel):
 
 
 class ReminderRetryResult(BaseModel):
-    status: Literal["ok"] = "ok"
+    status: Literal["ok", "partial", "failed"] = "ok"
     delivered: int
     failed: int
     failed_by_error_code: dict[str, int]
@@ -471,7 +471,13 @@ def retry_agenda(settings: Settings, day: date) -> AgendaRetryResult:
                         failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
         finally:
             database.close()
-    return AgendaRetryResult(day=day, delivered=delivered, failed=failed, failed_by_error_code=failed_by_error_code)
+    return AgendaRetryResult(
+        status="failed" if failed and not delivered else "partial" if failed else "ok",
+        day=day,
+        delivered=delivered,
+        failed=failed,
+        failed_by_error_code=failed_by_error_code,
+    )
 
 
 def reset_agenda_checkpoint(settings: Settings, delivery_id: int) -> AgendaCheckpointResetResult:
@@ -499,7 +505,13 @@ def run(settings: Settings, dry_run: bool, *, now: datetime | None = None) -> Re
             sent, failed, expired, failed_by_error_code = _dispatch_due_reminders(database, settings, now)
     finally:
         database.close()
-    return ReminderRunResult(sent=sent, failed=failed, failed_by_error_code=failed_by_error_code, expired=expired)
+    return ReminderRunResult(
+        status="failed" if failed and not sent else "partial" if failed else "ok",
+        sent=sent,
+        failed=failed,
+        failed_by_error_code=failed_by_error_code,
+        expired=expired,
+    )
 
 
 def retry_delivery(settings: Settings, *, now: datetime | None = None) -> ReminderRetryResult:
@@ -512,7 +524,13 @@ def retry_delivery(settings: Settings, *, now: datetime | None = None) -> Remind
             delivered, failed, expired, failed_by_error_code = _dispatch_due_reminders(database, settings, now)
     finally:
         database.close()
-    return ReminderRetryResult(delivered=delivered, failed=failed, failed_by_error_code=failed_by_error_code, expired=expired)
+    return ReminderRetryResult(
+        status="failed" if failed and not delivered else "partial" if failed else "ok",
+        delivered=delivered,
+        failed=failed,
+        failed_by_error_code=failed_by_error_code,
+        expired=expired,
+    )
 
 
 def reset_reminder_checkpoint(settings: Settings, delivery_id: int) -> ReminderCheckpointResetResult:

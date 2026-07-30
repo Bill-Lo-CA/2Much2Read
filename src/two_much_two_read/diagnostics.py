@@ -54,11 +54,11 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
         if not destinations:
             checks["discord_test"] = "missing"
         else:
-            try:
-                for destination in destinations:
+            for destination in destinations:
+                try:
                     deliver(destination, "2much2read connectivity test", settings.discord_username)
-                checks["discord_test"] = "ok"
-            except DiscordDeliveryError:
-                checks["discord_test"] = "failed"
+                    checks[f"discord_test_{destination.transport}"] = "ok"
+                except DiscordDeliveryError:
+                    checks[f"discord_test_{destination.transport}"] = "failed"
     status = "ok" if all(value in {"ok", "webhook", "bot", "both"} for value in checks.values()) else "warning"
     return DoctorResult(status=status, checks=checks)

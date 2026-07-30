@@ -62,7 +62,7 @@ def test_doctor_reports_an_unreachable_discord_test(newsletter_settings: Setting
     result = diagnostics.doctor(newsletter_settings.model_copy(update={"discord_webhook_url": "https://discord.example"}), True)
 
     assert result.status == "warning"
-    assert result.checks["discord_test"] == "failed"
+    assert result.checks["discord_test_webhook"] == "failed"
 
 
 def test_doctor_tests_each_both_destination(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -75,9 +75,15 @@ def test_doctor_tests_each_both_destination(newsletter_settings: Settings, monke
 
     sent: list[str] = []
     monkeypatch.setattr(diagnostics.httpx, "get", lambda *args, **kwargs: Response())
-    monkeypatch.setattr(
-        diagnostics, "deliver", lambda destination, *args: sent.append(destination.transport) or [destination.transport]
-    )
+
+    def send(destination: object, *args: object) -> list[str]:
+        transport = destination.transport  # type: ignore[attr-defined]
+        sent.append(transport)
+        if transport == "bot":
+            raise DiscordDeliveryError("bot unavailable")
+        return [transport]
+
+    monkeypatch.setattr(diagnostics, "deliver", send)
 
     result = diagnostics.doctor(
         newsletter_settings.model_copy(
@@ -87,5 +93,6 @@ def test_doctor_tests_each_both_destination(newsletter_settings: Settings, monke
     )
 
     assert result.checks["discord"] == "both"
-    assert result.checks["discord_test"] == "ok"
+    assert result.checks["discord_test_webhook"] == "ok"
+    assert result.checks["discord_test_bot"] == "failed"
     assert sent == ["webhook", "bot"]

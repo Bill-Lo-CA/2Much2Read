@@ -558,8 +558,7 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
                     continue
                 if not active_database.has_digest_deliveries(digest_id) and digest["discord_message_ids_json"] is not None:
                     active_database.migrate_legacy_digest_deliveries(digest_id, destinations)
-                else:
-                    active_database.ensure_digest_deliveries(digest_id, destinations)
+                active_database.reconcile_digest_deliveries(digest_id, destinations)
             deliveries = (
                 active_database.pending_digest_deliveries(destinations)
                 if hasattr(active_database, "pending_digest_deliveries")
@@ -596,7 +595,12 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
     finally:
         if owned and active_database is not None:
             active_database.close()
-    return NewsletterRetryResult(delivered=delivered, failed=failed, failed_by_error_code=failed_by_error_code)
+    return NewsletterRetryResult(
+        status="failed" if failed and not delivered else "partial" if failed else "ok",
+        delivered=delivered,
+        failed=failed,
+        failed_by_error_code=failed_by_error_code,
+    )
 
 
 def reset_corrupt_delivery(settings: Settings, delivery_id: int) -> DeliveryCheckpointResetResult:
@@ -620,8 +624,7 @@ def deliver_digest(settings: Settings, database: Database, digest_id: int) -> tu
     destinations = settings.discord_destinations()
     if not database.has_digest_deliveries(digest_id) and digest["discord_message_ids_json"] is not None:
         database.migrate_legacy_digest_deliveries(digest_id, destinations)
-    else:
-        database.ensure_digest_deliveries(digest_id, destinations)
+    database.reconcile_digest_deliveries(digest_id, destinations)
     delivered = failed = 0
     for delivery in database.digest_deliveries(digest_id, destinations):
         delivery_id = int(delivery["id"])
