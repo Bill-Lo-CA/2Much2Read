@@ -178,7 +178,13 @@ def test_bot_delivery_classifies_configuration_errors(status_code: int, code: st
 
 @pytest.mark.parametrize(
     ("mode", "webhook_url", "bot_token", "channel_id"),
-    [("webhook", "", "", ""), ("bot", "", "", "123"), ("bot", "", "token", "bad"), ("invalid", "url", "token", "123")],
+    [
+        ("webhook", "", "", ""),
+        ("bot", "", "", "123"),
+        ("bot", "", "token", "bad"),
+        ("both", "url", "token", "123"),
+        ("invalid", "url", "token", "123"),
+    ],
 )
 def test_rejects_incomplete_delivery_destinations(mode: str, webhook_url: str, bot_token: str, channel_id: str) -> None:
     with pytest.raises(DiscordDeliveryError, match="DISCORD_CONFIG_INVALID"):

@@ -38,16 +38,16 @@ DiscordSender = Callable[[DiscordDestination | str, str, str, list[str] | None, 
 
 
 def configured_destinations(mode: str, webhook_url: str, bot_token: str, bot_channel_id: str) -> list[DiscordDestination]:
-    if mode not in {"webhook", "bot", "both"}:
+    if mode not in {"webhook", "bot"}:
         raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
     destinations: list[DiscordDestination] = []
-    if mode in {"webhook", "both"}:
+    if mode == "webhook":
         if not webhook_url:
             raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
         destinations.append(
             DiscordDestination("webhook", f"webhook:{hashlib.sha256(webhook_url.encode()).hexdigest()}", webhook_url=webhook_url)
         )
-    if mode in {"bot", "both"}:
+    if mode == "bot":
         if not bot_token or not (bot_channel_id.isascii() and bot_channel_id.isdecimal()):
             raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
         destinations.append(

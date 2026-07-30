@@ -143,7 +143,7 @@ class Settings(BaseSettings):
     ollama_num_ctx: int = 16384
     ollama_timeout_seconds: float = 300
     ollama_keep_alive: str = "10m"
-    discord_delivery_mode: Literal["webhook", "bot", "both"] = "webhook"
+    discord_delivery_mode: Literal["webhook", "bot"] = "webhook"
     discord_webhook_url: str = ""
     discord_username: str = "2much2read"
     discord_bot_token: str = ""

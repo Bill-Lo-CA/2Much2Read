@@ -107,7 +107,7 @@ class Settings(BaseSettings):
     reminders_config_path: Path = Field(default_factory=lambda: config_dir() / "reminders.yaml")
     database_path: Path = Field(default_factory=lambda: data_dir() / "2busy1miss.sqlite3")
     lock_path: Path = Field(default_factory=lambda: data_dir() / "2busy1miss.lock")
-    discord_delivery_mode: Literal["webhook", "bot", "both"] = "webhook"
+    discord_delivery_mode: Literal["webhook", "bot"] = "webhook"
     discord_webhook_url: str = ""
     discord_username: str = "2busy1miss"
     discord_bot_token: str = ""
