@@ -645,14 +645,7 @@ class Database:
         if row is None:
             raise ValueError(f"digest {digest_id} not found")
         previous_key = row["discord_destination_key"]
-        if previous_key in {None, "webhook"}:
-            self.connection.execute(
-                "UPDATE digests SET discord_message_ids_json=NULL,discord_destination_key=?,updated_at=? WHERE id=?",
-                (destination_key, datetime.now(UTC).isoformat(), digest_id),
-            )
-            self.connection.commit()
-            return None
-        elif previous_key is not None and previous_key != destination_key:
+        if previous_key != destination_key:
             self.connection.execute(
                 "UPDATE digests SET discord_message_ids_json=NULL,discord_destination_key=?,updated_at=? WHERE id=?",
                 (destination_key, datetime.now(UTC).isoformat(), digest_id),
