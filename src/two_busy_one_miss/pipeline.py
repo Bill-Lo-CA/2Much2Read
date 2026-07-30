@@ -236,40 +236,16 @@ def _dispatch_due_reminders(database: Database, settings: Settings, now: datetim
     failed_by_error_code: dict[str, int] = {}
     destinations = {destination.key: destination for destination in settings.discord_destinations()}
     expired_attempts: set[int] = set()
-    legacy_attempt_ids: set[int] = set()
     for attempt in database.due_attempts(now):
         attempt_id = int(attempt["id"])
         if attempt["discord_message_ids_json"] is None or database.has_reminder_deliveries(attempt_id):
             continue
-        legacy_attempt_ids.add(attempt_id)
         if datetime.fromisoformat(str(attempt["event_start_at"])) <= now:
             database.expire_attempt(attempt_id)
             expired += 1
             continue
-        try:
-
-            def save_legacy_progress(message_ids: list[str], target_id: int = attempt_id) -> None:
-                database.record_delivery_progress(target_id, message_ids)
-
-            def finish_legacy_delivery(message_ids: list[str], target_id: int = attempt_id) -> None:
-                database.finish_delivery(target_id, message_ids)
-
-            deliver_resumable(
-                legacy_destination(list(destinations.values())),
-                str(attempt["content"]),
-                settings.discord_username,
-                attempt["discord_message_ids_json"],
-                save_legacy_progress,
-                finish_legacy_delivery,
-                sender=deliver,
-            )
-            sent += 1
-        except DiscordDeliveryError as error:
-            error_code = delivery_error_code(error)
-            database.fail_delivery(attempt_id, error_code)
-            failed += 1
-            failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
-    for delivery in database.due_reminder_deliveries(now, list(destinations.values()), legacy_attempt_ids):
+        database.migrate_legacy_reminder_deliveries(attempt_id, list(destinations.values()))
+    for delivery in database.due_reminder_deliveries(now, list(destinations.values())):
         attempt_id = int(delivery["reminder_attempt_id"])
         if datetime.fromisoformat(str(delivery["event_start_at"])) <= now:
             if attempt_id not in expired_attempts:
@@ -315,6 +291,11 @@ def _dispatch_legacy_due_reminders(database: Database, settings: Settings, now: 
             expired += 1
             continue
         try:
+            try:
+                destination_key = attempt["discord_destination_key"]
+            except (IndexError, KeyError):
+                destination_key = None
+
             def save_progress(message_ids: list[str], target_id: int = attempt_id) -> None:
                 database.record_delivery_progress(target_id, message_ids)
 
@@ -322,7 +303,9 @@ def _dispatch_legacy_due_reminders(database: Database, settings: Settings, now: 
                 database.finish_delivery(target_id, message_ids)
 
             deliver_resumable(
-                legacy_destination(settings.discord_destinations()),
+                legacy_destination(
+                    settings.discord_destinations(), str(destination_key) if destination_key is not None else None
+                ),
                 str(attempt["content"]),
                 settings.discord_username,
                 attempt["discord_message_ids_json"],

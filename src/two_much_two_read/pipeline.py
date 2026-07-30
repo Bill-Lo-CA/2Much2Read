@@ -519,10 +519,12 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
             assert active_database is not None
             for digest in active_database.pending_digests():
                 digest_id = int(digest["id"])
-                if not hasattr(active_database, "has_digest_deliveries") or (
-                    not active_database.has_digest_deliveries(digest_id) and digest["discord_message_ids_json"] is not None
-                ):
+                if not hasattr(active_database, "has_digest_deliveries"):
                     try:
+                        try:
+                            destination_key = digest["discord_destination_key"]
+                        except (IndexError, KeyError):
+                            destination_key = None
 
                         def save_legacy_progress(message_ids: list[str], target_id: int = digest_id) -> None:
                             active_database.record_delivery_progress(target_id, message_ids)
@@ -531,7 +533,7 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
                             active_database.finish_delivery(target_id, message_ids)
 
                         deliver_resumable(
-                            legacy_destination(destinations),
+                            legacy_destination(destinations, str(destination_key) if destination_key is not None else None),
                             str(digest["rendered_content"]),
                             settings.discord_username,
                             digest["discord_message_ids_json"],
@@ -546,7 +548,11 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
                         failed += 1
                         failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
                     continue
-                active_database.ensure_digest_deliveries(digest_id, destinations)
+                if not active_database.has_digest_deliveries(digest_id):
+                    if digest["discord_message_ids_json"] is None:
+                        active_database.ensure_digest_deliveries(digest_id, destinations)
+                    else:
+                        active_database.migrate_legacy_digest_deliveries(digest_id, destinations)
             deliveries = (
                 active_database.pending_digest_deliveries(destinations)
                 if hasattr(active_database, "pending_digest_deliveries")
@@ -604,7 +610,10 @@ def deliver_digest(settings: Settings, database: Database, digest_id: int) -> tu
     if digest is None:
         raise ValueError(f"digest {digest_id} is not pending")
     destinations = settings.discord_destinations()
-    database.ensure_digest_deliveries(digest_id, destinations)
+    if not database.has_digest_deliveries(digest_id) and digest["discord_message_ids_json"] is not None:
+        database.migrate_legacy_digest_deliveries(digest_id, destinations)
+    else:
+        database.ensure_digest_deliveries(digest_id, destinations)
     delivered = failed = 0
     for delivery in database.digest_deliveries(digest_id, destinations):
         delivery_id = int(delivery["id"])

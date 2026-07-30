@@ -236,3 +236,6 @@ def test_both_mode_prefers_the_webhook_for_legacy_checkpoints() -> None:
     destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
 
     assert legacy_destination(destinations) is destinations[0]
+    assert legacy_destination(destinations, destinations[1].key) is destinations[1]
+    with pytest.raises(DiscordDeliveryError, match="DISCORD_CONFIG_INVALID"):
+        legacy_destination(destinations, "bot:456")

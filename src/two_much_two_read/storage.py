@@ -189,6 +189,12 @@ class Database:
 
     def _migrate_v6_to_v7(self) -> None:
         with self.transaction() as connection:
+            columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(digests)")}
+            if "discord_destination_key" not in columns:
+                connection.execute("ALTER TABLE digests ADD COLUMN discord_destination_key TEXT")
+                connection.execute(
+                    "UPDATE digests SET discord_destination_key='webhook' WHERE discord_message_ids_json IS NOT NULL"
+                )
             connection.execute(
                 """CREATE TABLE IF NOT EXISTS digest_deliveries(
                 id INTEGER PRIMARY KEY, digest_id INTEGER NOT NULL REFERENCES digests(id) ON DELETE CASCADE,
@@ -624,6 +630,39 @@ class Database:
     def ensure_digest_deliveries(self, digest_id: int, destinations: list[DiscordDestination]) -> None:
         with self.transaction() as connection:
             self._create_digest_deliveries(connection, digest_id, destinations, datetime.now(UTC).isoformat())
+
+    def migrate_legacy_digest_deliveries(self, digest_id: int, destinations: list[DiscordDestination]) -> None:
+        with self.transaction() as connection:
+            digest = connection.execute(
+                "SELECT state,discord_message_ids_json,discord_destination_key,last_error_code FROM digests WHERE id=?",
+                (digest_id,),
+            ).fetchone()
+            if digest is None:
+                raise ValueError(f"digest {digest_id} not found")
+            now = datetime.now(UTC).isoformat()
+            self._create_digest_deliveries(connection, digest_id, destinations, now)
+            source_key = str(digest["discord_destination_key"] or "webhook")
+            destination = next(
+                (
+                    item
+                    for item in destinations
+                    if item.key == source_key or (source_key == "webhook" and item.transport == "webhook")
+                ),
+                None,
+            )
+            if destination is not None:
+                connection.execute(
+                    """UPDATE digest_deliveries SET state=?,discord_message_ids_json=?,last_error_code=?,updated_at=?
+                    WHERE digest_id=? AND destination_key=?""",
+                    (
+                        digest["state"],
+                        digest["discord_message_ids_json"],
+                        digest["last_error_code"],
+                        now,
+                        digest_id,
+                        destination.key,
+                    ),
+                )
 
     def has_digest_deliveries(self, digest_id: int) -> bool:
         return self.connection.execute("SELECT 1 FROM digest_deliveries WHERE digest_id=?", (digest_id,)).fetchone() is not None

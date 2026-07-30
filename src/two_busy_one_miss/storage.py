@@ -256,6 +256,40 @@ class Database:
         with self.transaction() as connection:
             self._create_reminder_deliveries(connection, reminder_attempt_id, destinations, datetime.now(UTC).isoformat())
 
+    def migrate_legacy_reminder_deliveries(self, reminder_attempt_id: int, destinations: list[DiscordDestination]) -> None:
+        with self.transaction() as connection:
+            attempt = connection.execute(
+                """SELECT state,discord_message_ids_json,discord_destination_key,last_error_code
+                FROM reminder_attempts WHERE id=?""",
+                (reminder_attempt_id,),
+            ).fetchone()
+            if attempt is None:
+                raise ValueError(f"reminder attempt {reminder_attempt_id} not found")
+            now = datetime.now(UTC).isoformat()
+            self._create_reminder_deliveries(connection, reminder_attempt_id, destinations, now)
+            source_key = str(attempt["discord_destination_key"] or "webhook")
+            destination = next(
+                (
+                    item
+                    for item in destinations
+                    if item.key == source_key or (source_key == "webhook" and item.transport == "webhook")
+                ),
+                None,
+            )
+            if destination is not None:
+                connection.execute(
+                    """UPDATE reminder_deliveries SET state=?,discord_message_ids_json=?,last_error_code=?,updated_at=?
+                    WHERE reminder_attempt_id=? AND destination_key=?""",
+                    (
+                        attempt["state"],
+                        attempt["discord_message_ids_json"],
+                        attempt["last_error_code"],
+                        now,
+                        reminder_attempt_id,
+                        destination.key,
+                    ),
+                )
+
     def has_reminder_deliveries(self, reminder_attempt_id: int) -> bool:
         return (
             self.connection.execute(
@@ -264,15 +298,11 @@ class Database:
             is not None
         )
 
-    def due_reminder_deliveries(
-        self, now: datetime, destinations: list[DiscordDestination], skipped_attempt_ids: set[int] | None = None
-    ) -> list[sqlite3.Row]:
+    def due_reminder_deliveries(self, now: datetime, destinations: list[DiscordDestination]) -> list[sqlite3.Row]:
         if not destinations:
             return []
-        skipped_attempt_ids = skipped_attempt_ids or set()
         for attempt in self.due_attempts(now):
-            if int(attempt["id"]) not in skipped_attempt_ids:
-                self.ensure_reminder_deliveries(int(attempt["id"]), destinations)
+            self.ensure_reminder_deliveries(int(attempt["id"]), destinations)
         keys = [destination.key for destination in destinations]
         placeholders = ",".join("?" for _ in keys)
         return self.connection.execute(

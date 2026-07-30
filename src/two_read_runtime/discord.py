@@ -63,7 +63,13 @@ def configured_destination(mode: str, webhook_url: str, bot_token: str, bot_chan
     return destinations[0]
 
 
-def legacy_destination(destinations: list[DiscordDestination]) -> DiscordDestination:
+def legacy_destination(destinations: list[DiscordDestination], destination_key: str | None = None) -> DiscordDestination:
+    if destination_key:
+        destination = next((item for item in destinations if item.key == destination_key), None)
+        if destination is not None:
+            return destination
+        if destination_key != "webhook":
+            raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
     return next((destination for destination in destinations if destination.transport == "webhook"), destinations[0])
 
 

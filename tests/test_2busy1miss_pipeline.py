@@ -32,10 +32,10 @@ class FakeReminderDatabase:
     def delivery_checkpoint(self, attempt_id: int, destination_key: str) -> object:
         return next(attempt for attempt in self.attempts if attempt["id"] == attempt_id)["discord_message_ids_json"]
 
-    def record_delivery_progress(self, attempt_id: int, message_ids: list[str], destination_key: str) -> None:
+    def record_delivery_progress(self, attempt_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
         self.progress.append((attempt_id, message_ids))
 
-    def finish_delivery(self, attempt_id: int, message_ids: list[str], destination_key: str) -> None:
+    def finish_delivery(self, attempt_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
         self.finished.append((attempt_id, message_ids))
 
     def fail_delivery(self, attempt_id: int, error_code: str) -> None:
@@ -167,7 +167,7 @@ def test_retry_delivery_holds_process_lock(calendar_settings: Settings, monkeypa
     assert database.closed
 
 
-def test_retry_delivery_resumes_legacy_webhook_checkpoint_in_both_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_retry_delivery_preserves_legacy_bot_checkpoint_in_both_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     start = datetime(2026, 7, 8, 10, tzinfo=ZoneInfo("America/Montreal"))
     item = ReminderCandidate(
         CalendarEvent("primary", "Main", "legacy", "legacy", "Legacy", "", start, start + timedelta(hours=1), False),
@@ -188,14 +188,15 @@ def test_retry_delivery_resumes_legacy_webhook_checkpoint_in_both_mode(tmp_path:
     database = Database(settings.database_path)
     attempt_id = database.create_attempt(item, "legacy reminder")
     assert attempt_id is not None
-    database.record_delivery_progress(attempt_id, ["old-webhook-message"])
+    bot_key = settings.discord_destinations()[1].key
+    database.record_delivery_progress(attempt_id, ["old-bot-message"], bot_key)
     database.fail_delivery(attempt_id)
     database.close()
     calls: list[tuple[str, list[str] | None]] = []
 
     def fake_deliver(destination, _content, _username, message_ids, *_args, **_kwargs):
         calls.append((destination.transport, message_ids))
-        return ["old-webhook-message", "new-webhook-message"]
+        return [*(message_ids or []), f"new-{destination.transport}-message"]
 
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "deliver", fake_deliver)
@@ -204,15 +205,15 @@ def test_retry_delivery_resumes_legacy_webhook_checkpoint_in_both_mode(tmp_path:
 
     assert result.model_dump() == {
         "status": "ok",
-        "delivered": 1,
+        "delivered": 2,
         "failed": 0,
         "failed_by_error_code": {},
         "expired": 0,
     }
-    assert calls == [("webhook", ["old-webhook-message"])]
+    assert calls == [("webhook", []), ("bot", ["old-bot-message"])]
     database = Database(settings.database_path)
     assert database.attempt_state(attempt_id) == "delivered"
-    assert database.counts()["reminder_deliveries"] == 0
+    assert database.counts()["reminder_deliveries"] == 2
     database.close()
 
 

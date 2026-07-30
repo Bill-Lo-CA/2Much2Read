@@ -174,10 +174,10 @@ class FakeDigestDatabase:
     def delivery_checkpoint(self, digest_id: int, destination_key: str) -> object:
         return next(digest for digest in self.pending if digest["id"] == digest_id)["discord_message_ids_json"]
 
-    def record_delivery_progress(self, digest_id: int, message_ids: list[str], destination_key: str) -> None:
+    def record_delivery_progress(self, digest_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
         self.progress.append((digest_id, message_ids))
 
-    def finish_delivery(self, digest_id: int, message_ids: list[str], destination_key: str) -> None:
+    def finish_delivery(self, digest_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
         self.finished.append((digest_id, message_ids))
 
     def fail_delivery(self, digest_id: int, error_code: str) -> None:
@@ -714,7 +714,9 @@ def test_retry_delivery_preserves_corrupt_checkpoint_error(tmp_path: Path, monke
         "failed": 1,
         "failed_by_error_code": {"DISCORD_MESSAGE_IDS_CORRUPT": 1},
     }
-    error_code = database.connection.execute("SELECT last_error_code FROM digests WHERE id=?", (corrupt_id,)).fetchone()[0]
+    error_code = database.connection.execute(
+        "SELECT last_error_code FROM digest_deliveries WHERE digest_id=?", (corrupt_id,)
+    ).fetchone()[0]
     assert error_code == "DISCORD_MESSAGE_IDS_CORRUPT"
     assert database.pending_digest(good_id) is None
     database.close()
@@ -778,7 +780,7 @@ def test_retry_sends_only_the_failed_destination(tmp_path: Path, monkeypatch: py
     database.close()
 
 
-def test_retry_legacy_digest_uses_webhook_checkpoint_in_both_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_retry_legacy_digest_preserves_bot_checkpoint_in_both_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
@@ -790,25 +792,26 @@ def test_retry_legacy_digest_uses_webhook_checkpoint_in_both_mode(tmp_path: Path
     database = Database(settings.database_path)
     digest_id = database.save_digest("daily:legacy", "start", "end", "UTC", "digest")
     assert digest_id is not None
-    database.record_delivery_progress(digest_id, ["old-webhook-message"])
+    bot_key = settings.discord_destinations()[1].key
+    database.record_delivery_progress(digest_id, ["old-bot-message"], bot_key)
     database.fail_delivery(digest_id)
     calls: list[tuple[str, list[str] | None]] = []
 
     def fake_deliver(destination, _content, _username, message_ids, *_args, **_kwargs):
         calls.append((destination.transport, message_ids))
-        return ["old-webhook-message", "new-webhook-message"]
+        return [*(message_ids or []), f"new-{destination.transport}-message"]
 
     monkeypatch.setattr(pipeline, "deliver", fake_deliver)
 
     assert pipeline.retry_delivery(settings, database).model_dump() == {
         "status": "ok",
-        "delivered": 1,
+        "delivered": 2,
         "failed": 0,
         "failed_by_error_code": {},
     }
-    assert calls == [("webhook", ["old-webhook-message"])]
+    assert calls == [("webhook", []), ("bot", ["old-bot-message"])]
     assert database.pending_digests() == []
-    assert not database.has_digest_deliveries(digest_id)
+    assert database.has_digest_deliveries(digest_id)
     database.close()
 
 
