@@ -266,9 +266,9 @@ def test_reset_reminder_does_not_fall_back_to_a_colliding_legacy_attempt(tmp_pat
     attempt_id = database.create_attempt(candidate("current"), "current", destinations)
     assert attempt_id is not None
     delivery_id = int(
-        database.connection.execute(
-            "SELECT id FROM reminder_deliveries WHERE reminder_attempt_id=?", (attempt_id,)
-        ).fetchone()["id"]
+        database.connection.execute("SELECT id FROM reminder_deliveries WHERE reminder_attempt_id=?", (attempt_id,)).fetchone()[
+            "id"
+        ]
     )
     assert delivery_id == legacy_id
     database.close()
