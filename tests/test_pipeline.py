@@ -686,7 +686,11 @@ def test_retry_delivery_stops_when_recording_a_failure_hits_the_database(
 
 
 def test_retry_delivery_preserves_corrupt_checkpoint_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
+    settings = Settings(
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="https://discord.example/webhook",
+    )
     database = Database(settings.database_path)
     corrupt_id = database.save_digest("daily:corrupt", "start", "end", "UTC", "corrupt")
     good_id = database.save_digest("daily:good", "start", "end", "UTC", "good")
