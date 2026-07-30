@@ -1,10 +1,10 @@
 from pathlib import Path
 
-import httpx
 import pytest
 
 from two_much_two_read import diagnostics
 from two_much_two_read.config import Settings
+from two_read_runtime.discord import DiscordDeliveryError
 from two_read_runtime.paths import directory_is_creatable
 
 
@@ -54,12 +54,12 @@ def test_doctor_reports_an_unreachable_discord_test(newsletter_settings: Setting
             return {"models": []}
 
     def offline(*args: object, **kwargs: object) -> None:
-        raise httpx.ConnectError("offline")
+        raise DiscordDeliveryError()
 
     monkeypatch.setattr(diagnostics.httpx, "get", lambda *args, **kwargs: Response())
-    monkeypatch.setattr(diagnostics.httpx, "post", offline)
+    monkeypatch.setattr(diagnostics, "deliver", offline)
 
     result = diagnostics.doctor(newsletter_settings.model_copy(update={"discord_webhook_url": "https://discord.example"}), True)
 
     assert result.status == "warning"
-    assert result.checks["discord_test"] == "unreachable"
+    assert result.checks["discord_test"] == "failed"

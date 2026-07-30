@@ -512,7 +512,7 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
                         active_database.finish_delivery(target_id, message_ids)
 
                     deliver_resumable(
-                        settings.discord_webhook_url,
+                        settings.discord_destination(),
                         str(digest["rendered_content"]),
                         settings.discord_username,
                         digest["discord_message_ids_json"],
@@ -553,7 +553,7 @@ def deliver_digest(settings: Settings, database: Database, digest_id: int) -> No
 
     try:
         deliver_resumable(
-            settings.discord_webhook_url,
+            settings.discord_destination(),
             str(digest["rendered_content"]),
             settings.discord_username,
             digest["discord_message_ids_json"],

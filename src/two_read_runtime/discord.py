@@ -1,21 +1,66 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import time
 from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Literal
 
 import httpx
 
 CORRUPT_MESSAGE_IDS = "DISCORD_MESSAGE_IDS_CORRUPT"
-DiscordSender = Callable[[str, str, str, list[str] | None, Callable[[list[str]], None] | None], list[str]]
+DISCORD_CONFIG_INVALID = "DISCORD_CONFIG_INVALID"
+DiscordTransport = Literal["webhook", "bot"]
 
 
 class DiscordDeliveryError(ValueError):
-    pass
+    def __init__(self, code: str = "DISCORD_DELIVERY_FAILED") -> None:
+        super().__init__(code)
+        self.code = code
 
 
 class CorruptMessageIdsError(DiscordDeliveryError):
-    pass
+    def __init__(self) -> None:
+        super().__init__(CORRUPT_MESSAGE_IDS)
+
+
+@dataclass(frozen=True)
+class DiscordDestination:
+    transport: DiscordTransport
+    key: str
+    webhook_url: str | None = None
+    bot_token: str | None = None
+    bot_channel_id: str | None = None
+
+
+DiscordSender = Callable[[DiscordDestination | str, str, str, list[str] | None, Callable[[list[str]], None] | None], list[str]]
+
+
+def configured_destinations(mode: str, webhook_url: str, bot_token: str, bot_channel_id: str) -> list[DiscordDestination]:
+    if mode not in {"webhook", "bot", "both"}:
+        raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
+    destinations: list[DiscordDestination] = []
+    if mode in {"webhook", "both"}:
+        if not webhook_url:
+            raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
+        destinations.append(
+            DiscordDestination("webhook", f"webhook:{hashlib.sha256(webhook_url.encode()).hexdigest()}", webhook_url=webhook_url)
+        )
+    if mode in {"bot", "both"}:
+        if not bot_token or not (bot_channel_id.isascii() and bot_channel_id.isdecimal()):
+            raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
+        destinations.append(
+            DiscordDestination("bot", f"bot:{bot_channel_id}", bot_token=bot_token, bot_channel_id=bot_channel_id)
+        )
+    return destinations
+
+
+def configured_destination(mode: str, webhook_url: str, bot_token: str, bot_channel_id: str) -> DiscordDestination:
+    destinations = configured_destinations(mode, webhook_url, bot_token, bot_channel_id)
+    if len(destinations) != 1:
+        raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
+    return destinations[0]
 
 
 def parse_message_ids(value: object) -> list[str]:
@@ -24,20 +69,27 @@ def parse_message_ids(value: object) -> list[str]:
     try:
         parsed = json.loads(str(value))
     except json.JSONDecodeError as error:
-        raise CorruptMessageIdsError(f"{CORRUPT_MESSAGE_IDS}: expected a JSON array of strings") from error
+        raise CorruptMessageIdsError() from error
     if not isinstance(parsed, list) or not all(isinstance(item, str) for item in parsed):
-        raise CorruptMessageIdsError(f"{CORRUPT_MESSAGE_IDS}: expected a JSON array of strings")
+        raise CorruptMessageIdsError()
     return parsed
 
 
 def delivery_error_code(error: Exception) -> str:
-    if isinstance(error, CorruptMessageIdsError):
-        return CORRUPT_MESSAGE_IDS
-    return "DISCORD_DELIVERY_FAILED"
+    known_codes = {
+        CORRUPT_MESSAGE_IDS,
+        DISCORD_CONFIG_INVALID,
+        "DISCORD_BOT_UNAUTHORIZED",
+        "DISCORD_BOT_FORBIDDEN",
+        "DISCORD_BOT_CHANNEL_NOT_FOUND",
+        "DISCORD_RATE_LIMITED",
+        "DISCORD_DELIVERY_FAILED",
+    }
+    return error.code if isinstance(error, DiscordDeliveryError) and error.code in known_codes else "DISCORD_DELIVERY_FAILED"
 
 
 def deliver_resumable(
-    webhook_url: str,
+    destination: DiscordDestination | str,
     content: str,
     username: str,
     stored_message_ids: object,
@@ -46,7 +98,7 @@ def deliver_resumable(
     *,
     sender: DiscordSender,
 ) -> list[str]:
-    message_ids = sender(webhook_url, content, username, parse_message_ids(stored_message_ids), on_progress)
+    message_ids = sender(destination, content, username, parse_message_ids(stored_message_ids), on_progress)
     on_success(message_ids)
     return message_ids
 
@@ -109,8 +161,48 @@ def _chunk_with_mentions(text: str, user_ids: list[str], limit: int = 2000) -> l
     return [*prefix_chunks, f"{prefix} {body_chunks[0]}", *body_chunks[1:]]
 
 
+def _destination(value: DiscordDestination | str) -> DiscordDestination:
+    if isinstance(value, DiscordDestination):
+        return value
+    if not value:
+        raise DiscordDeliveryError("DISCORD_WEBHOOK_URL is required")
+    return DiscordDestination("webhook", f"webhook:{hashlib.sha256(value.encode()).hexdigest()}", webhook_url=value)
+
+
+def _request(
+    destination: DiscordDestination, content: str, username: str, allowed_mentions: dict[str, list[str]]
+) -> httpx.Response:
+    if destination.transport == "webhook":
+        assert destination.webhook_url is not None
+        url, params, headers = destination.webhook_url, {"wait": "true"}, {}
+        payload: dict[str, object] = {"content": content, "username": username, "allowed_mentions": allowed_mentions}
+    else:
+        assert destination.bot_token is not None and destination.bot_channel_id is not None
+        url = f"https://discord.com/api/v10/channels/{destination.bot_channel_id}/messages"
+        params = {}
+        headers = {"Authorization": f"Bot {destination.bot_token}"}
+        payload = {"content": content, "allowed_mentions": allowed_mentions}
+    with httpx.Client(timeout=30, trust_env=False) as client:
+        return client.post(url, params=params, headers=headers, json=payload)
+
+
+def _error_for_response(destination: DiscordDestination, response: httpx.Response) -> DiscordDeliveryError:
+    if destination.transport == "bot":
+        codes = {401: "DISCORD_BOT_UNAUTHORIZED", 403: "DISCORD_BOT_FORBIDDEN", 404: "DISCORD_BOT_CHANNEL_NOT_FOUND"}
+        if response.status_code in codes:
+            return DiscordDeliveryError(codes[response.status_code])
+    return DiscordDeliveryError()
+
+
+def _retry_after(response: httpx.Response, default: float) -> float:
+    try:
+        return max(0, min(float(response.headers.get("Retry-After", default)), 30))
+    except ValueError:
+        return default
+
+
 def deliver(
-    webhook_url: str,
+    destination: DiscordDestination | str,
     content: str,
     username: str,
     message_ids: list[str] | None = None,
@@ -118,8 +210,7 @@ def deliver(
     allowed_user_ids: list[str] | None = None,
     mention_user_ids: list[str] | None = None,
 ) -> list[str]:
-    if not webhook_url:
-        raise DiscordDeliveryError("DISCORD_WEBHOOK_URL is required")
+    resolved_destination = _destination(destination)
     allowed_user_ids = list(dict.fromkeys(allowed_user_ids or []))
     if not all(user_id.isascii() and user_id.isdecimal() for user_id in allowed_user_ids):
         raise DiscordDeliveryError("Discord allowed user IDs must contain digits only")
@@ -130,32 +221,36 @@ def deliver(
     chunks = _chunk_with_mentions(content, mention_user_ids) if mention_user_ids else chunk_text(content)
     if len(message_ids) > len(chunks):
         raise DiscordDeliveryError("stored Discord delivery progress exceeds message chunks")
+    allowed_mentions: dict[str, list[str]] = {"parse": []}
+    if allowed_user_ids:
+        allowed_mentions["users"] = allowed_user_ids
     for chunk in chunks[len(message_ids) :]:
         for attempt in range(4):
             try:
-                allowed_mentions: dict[str, list[str]] = {"parse": []}
-                if allowed_user_ids:
-                    allowed_mentions["users"] = allowed_user_ids
-                response = httpx.post(
-                    webhook_url,
-                    params={"wait": "true"},
-                    json={"content": chunk, "username": username, "allowed_mentions": allowed_mentions},
-                    timeout=30,
-                )
-                if response.status_code == 429:
-                    time.sleep(float(response.headers.get("Retry-After", "1")))
-                    continue
-                if response.status_code >= 500 and attempt < 3:
+                response = _request(resolved_destination, chunk, username, allowed_mentions)
+            except httpx.HTTPError as error:
+                if attempt < 3:
                     time.sleep(2**attempt)
                     continue
-                response.raise_for_status()
+                raise DiscordDeliveryError() from error
+            if response.status_code == 429:
+                if attempt < 3:
+                    time.sleep(_retry_after(response, 1))
+                    continue
+                raise DiscordDeliveryError("DISCORD_RATE_LIMITED")
+            if response.status_code >= 500:
+                if attempt < 3:
+                    time.sleep(2**attempt)
+                    continue
+                raise DiscordDeliveryError()
+            if response.is_error:
+                raise _error_for_response(resolved_destination, response)
+            try:
                 message_id = str(response.json()["id"])
-            except (httpx.HTTPError, KeyError, TypeError, ValueError) as error:
-                raise DiscordDeliveryError("DISCORD_DELIVERY_FAILED") from error
+            except (KeyError, TypeError, ValueError) as error:
+                raise DiscordDeliveryError() from error
             message_ids.append(message_id)
             if on_progress is not None:
                 on_progress(message_ids)
             break
-        else:
-            raise DiscordDeliveryError("DISCORD_DELIVERY_FAILED")
     return message_ids

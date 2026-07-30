@@ -12,6 +12,7 @@ import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from two_read_runtime.discord import DiscordDestination, configured_destination, configured_destinations
 from two_read_runtime.paths import config_dir, data_dir, env_file
 
 
@@ -142,8 +143,11 @@ class Settings(BaseSettings):
     ollama_num_ctx: int = 16384
     ollama_timeout_seconds: float = 300
     ollama_keep_alive: str = "10m"
+    discord_delivery_mode: Literal["webhook", "bot", "both"] = "webhook"
     discord_webhook_url: str = ""
     discord_username: str = "2much2read"
+    discord_bot_token: str = ""
+    discord_bot_channel_id: str = ""
     digest_language: str = "zh-TW"
     digest_timezone: str = "America/Montreal"
     digest_max_items: int = Field(default=10, ge=1)
@@ -151,6 +155,16 @@ class Settings(BaseSettings):
 
     def __init__(self, **data: Any) -> None:
         super().__init__(_env_file=env_file("2much2read"), **data)
+
+    def discord_destinations(self) -> list[DiscordDestination]:
+        return configured_destinations(
+            self.discord_delivery_mode, self.discord_webhook_url, self.discord_bot_token, self.discord_bot_channel_id
+        )
+
+    def discord_destination(self) -> DiscordDestination:
+        return configured_destination(
+            self.discord_delivery_mode, self.discord_webhook_url, self.discord_bot_token, self.discord_bot_channel_id
+        )
 
 
 def load_sources(path: Path) -> Sources:
