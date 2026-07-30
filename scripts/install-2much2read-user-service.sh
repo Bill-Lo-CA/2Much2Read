@@ -113,7 +113,7 @@ esac
 
 printf '%s\n' \
   "Config: $config_dir" \
-  "Edit Discord webhook: $env_file" \
+  "Edit Discord delivery settings: $env_file" \
   "Authorize Gmail: cd $repo_dir && uv run 2much2read auth gmail" \
   "Check setup: cd $repo_dir && uv run 2much2read doctor" \
   "Dry run: cd $repo_dir && uv run 2much2read run --dry-run" \

@@ -43,6 +43,7 @@ def test_source_variants_preserve_legacy_gmail_entries(tmp_path: Path) -> None:
         "{type: hackernews, id: hn, name: HN, gmail_query: from:news@example.com}",
         "{type: gmail, id: mail, name: Mail, gmail_query: from:mail@example.com, feed: beststories}",
         "{type: hackernews, id: hn, name: HN, max_articles_per_run: 31}",
+        "{type: hackernews, id: hn, name: HN, require_full_text: false}",
     ],
 )
 def test_rejects_mixed_or_invalid_source_variants(tmp_path: Path, source: str) -> None:

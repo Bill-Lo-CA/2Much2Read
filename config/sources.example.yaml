@@ -16,3 +16,17 @@ sources:
       criteria:
         from: news@alphasignal.ai
     max_items_per_email: 10
+
+  # Keep disabled until the Hacker News source is configured for your digest.
+  - type: hackernews
+    id: hn-best
+    name: Hacker News Best
+    enabled: false
+    category: DEV
+    feed: beststories
+    max_story_candidates: 60
+    max_articles_per_run: 10
+    max_age_hours: 36
+    min_score: 0
+    min_comments: 0
+    allow_metadata_fallback: false

@@ -77,7 +77,6 @@ class HackerNewsSource(SourceBase):
     max_age_hours: int = Field(default=36, ge=1, le=168)
     min_score: int = Field(default=0, ge=0, le=100_000)
     min_comments: int = Field(default=0, ge=0, le=100_000)
-    require_full_text: bool = True
     allow_metadata_fallback: bool = False
 
 
