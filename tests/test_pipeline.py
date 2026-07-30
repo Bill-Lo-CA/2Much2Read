@@ -780,6 +780,37 @@ def test_retry_sends_only_the_failed_destination(tmp_path: Path, monkeypatch: py
     database.close()
 
 
+def test_retry_adds_a_new_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    old_settings = Settings(
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="https://discord.example/old-webhook",
+    )
+    settings = Settings(
+        database_path=old_settings.database_path,
+        lock_path=old_settings.lock_path,
+        discord_webhook_url="https://discord.example/new-webhook",
+    )
+    old_destinations = old_settings.discord_destinations()
+    destinations = settings.discord_destinations()
+    database = Database(settings.database_path)
+    digest_id = database.save_digest("daily:new-destination", "start", "end", "UTC", "digest", destinations=old_destinations)
+    assert digest_id is not None
+    old_delivery_id = int(database.digest_deliveries(digest_id, old_destinations)[0]["id"])
+    database.fail_digest_delivery(old_delivery_id, "DISCORD_DELIVERY_FAILED", old_destinations)
+    calls: list[str] = []
+    monkeypatch.setattr(pipeline, "deliver", lambda destination, *args, **kwargs: calls.append(destination.key) or ["message"])
+
+    assert pipeline.retry_delivery(settings, database).model_dump() == {
+        "status": "ok",
+        "delivered": 1,
+        "failed": 0,
+        "failed_by_error_code": {},
+    }
+    assert calls == [destinations[0].key]
+    database.close()
+
+
 def test_retry_legacy_digest_preserves_bot_checkpoint_in_both_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = Settings(
         database_path=tmp_path / "digest.sqlite3",

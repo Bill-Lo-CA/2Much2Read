@@ -556,11 +556,10 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
                         failed += 1
                         failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
                     continue
-                if not active_database.has_digest_deliveries(digest_id):
-                    if digest["discord_message_ids_json"] is None:
-                        active_database.ensure_digest_deliveries(digest_id, destinations)
-                    else:
-                        active_database.migrate_legacy_digest_deliveries(digest_id, destinations)
+                if not active_database.has_digest_deliveries(digest_id) and digest["discord_message_ids_json"] is not None:
+                    active_database.migrate_legacy_digest_deliveries(digest_id, destinations)
+                else:
+                    active_database.ensure_digest_deliveries(digest_id, destinations)
             deliveries = (
                 active_database.pending_digest_deliveries(destinations)
                 if hasattr(active_database, "pending_digest_deliveries")

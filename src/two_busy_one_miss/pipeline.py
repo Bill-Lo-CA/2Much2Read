@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from contextlib import suppress
 from datetime import date, datetime, time, timedelta
 from typing import Literal
 from zoneinfo import ZoneInfo
@@ -178,9 +179,11 @@ def _sync_scheduled_reminders(
     settings: Settings | None = None,
 ) -> tuple[int, int]:
     candidates = schedule_reminders(config, events)
-    created = database.create_attempts(
-        [(candidate, render_reminder(candidate)) for candidate in candidates], settings.discord_destinations() if settings else []
-    )
+    destinations = []
+    if settings is not None:
+        with suppress(DiscordDeliveryError):
+            destinations = settings.discord_destinations()
+    created = database.create_attempts([(candidate, render_reminder(candidate)) for candidate in candidates], destinations)
     return created, database.cancel_unmatched_attempts(candidates, events, window_start, window_end)
 
 
@@ -234,15 +237,27 @@ def _dispatch_due_reminders(database: Database, settings: Settings, now: datetim
     failed = 0
     expired = 0
     failed_by_error_code: dict[str, int] = {}
-    destinations = {destination.key: destination for destination in settings.discord_destinations()}
+    attempts = database.due_attempts(now)
     expired_attempts: set[int] = set()
-    for attempt in database.due_attempts(now):
+    for attempt in attempts:
         attempt_id = int(attempt["id"])
-        if attempt["discord_message_ids_json"] is None or database.has_reminder_deliveries(attempt_id):
-            continue
         if datetime.fromisoformat(str(attempt["event_start_at"])) <= now:
             database.expire_attempt(attempt_id)
+            expired_attempts.add(attempt_id)
             expired += 1
+    pending_attempts = [attempt for attempt in attempts if int(attempt["id"]) not in expired_attempts]
+    if not pending_attempts:
+        return sent, failed, expired, failed_by_error_code
+    try:
+        destinations = {destination.key: destination for destination in settings.discord_destinations()}
+    except DiscordDeliveryError as error:
+        error_code = delivery_error_code(error)
+        for attempt in pending_attempts:
+            database.fail_delivery(int(attempt["id"]), error_code)
+        return sent, len(pending_attempts), expired, {error_code: len(pending_attempts)}
+    for attempt in pending_attempts:
+        attempt_id = int(attempt["id"])
+        if attempt["discord_message_ids_json"] is None or database.has_reminder_deliveries(attempt_id):
             continue
         database.migrate_legacy_reminder_deliveries(attempt_id, list(destinations.values()))
     for delivery in database.due_reminder_deliveries(now, list(destinations.values())):

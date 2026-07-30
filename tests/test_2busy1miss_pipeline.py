@@ -313,6 +313,29 @@ def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkey
     assert windows[0] == (datetime(2026, 3, 8, 21, tzinfo=timezone), datetime(2026, 3, 15, 21, tzinfo=timezone))
 
 
+def test_next_day_agenda_saves_reminders_before_invalid_discord_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    timezone = ZoneInfo("America/Montreal")
+    now = datetime(2026, 7, 9, 21, tzinfo=timezone)
+    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key, default_rules=[ReminderSpec(before="5m")])
+    settings = Settings(
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        discord_delivery_mode="bot",
+    )
+    event = CalendarEvent(
+        "primary", "Main", "event", "event", "Event", "", now + timedelta(hours=1), now + timedelta(hours=2), False
+    )
+    monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
+    monkeypatch.setattr(pipeline, "list_events_between", lambda *args: [event])
+
+    with pytest.raises(DiscordDeliveryError, match="DISCORD_CONFIG_INVALID"):
+        pipeline.next_day_agenda(settings, dry_run=False, force=False, now=now)
+
+    database = Database(settings.database_path)
+    assert len(database.pending_attempts()) == 1
+    database.close()
+
+
 def test_manual_agenda_is_idempotent_and_forceable(tmp_path: Path, monkeypatch) -> None:
     timezone = ZoneInfo("America/Montreal")
     config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
