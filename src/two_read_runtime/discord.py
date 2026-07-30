@@ -114,6 +114,8 @@ def deliver_resumable(
 
 
 def _split_text(text: str, limit: int) -> list[str]:
+    if limit <= 0:
+        raise ValueError("chunk limit must be positive")
     chunks: list[str] = []
     remaining = text
     while remaining:
@@ -124,6 +126,12 @@ def _split_text(text: str, limit: int) -> list[str]:
         chunks.append(remaining[:cut].rstrip())
         remaining = remaining[cut:].lstrip()
     return chunks
+
+
+def _numbered_chunks(text: str, limit: int) -> list[str]:
+    chunks = _split_text(text, limit - 12)
+    total = len(chunks)
+    return [f"({index}/{total}) {chunk}" for index, chunk in enumerate(chunks, 1)]
 
 
 def _fenced_block(text: str) -> tuple[str, str, str] | None:
@@ -139,11 +147,12 @@ def chunk_text(text: str, limit: int = 2000) -> list[str]:
         return [text]
     fenced = _fenced_block(text)
     if fenced is None:
-        chunks = _split_text(text, limit - 12)
-        total = len(chunks)
-        return [f"({index}/{total}) {chunk}" for index, chunk in enumerate(chunks, 1)]
+        return _numbered_chunks(text, limit)
     opener, body, footer = fenced
-    chunks = _split_text(body, limit - len(opener) - len("\n```") - 12)
+    body_limit = limit - len(opener) - len("\n```") - 12
+    if body_limit <= 0:
+        return _numbered_chunks(text.replace("```", "``\u200b`"), limit)
+    chunks = _split_text(body, body_limit)
     footer_chunks = _split_text(footer, limit - 12) if footer else []
     total = len(chunks) + len(footer_chunks)
     return [
@@ -192,7 +201,7 @@ def _request(
         params = {}
         headers = {"Authorization": f"Bot {destination.bot_token}"}
         payload = {"content": content, "allowed_mentions": allowed_mentions}
-    with httpx.Client(timeout=30) as client:
+    with httpx.Client(timeout=30, trust_env=False) as client:
         return client.post(url, params=params, headers=headers, json=payload)
 
 

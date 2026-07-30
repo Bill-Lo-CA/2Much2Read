@@ -73,6 +73,12 @@ def invoke(operation: Callable[[], BaseModel]) -> None:
         raise typer.BadParameter(str(error)) from error
 
 
+def emit_delivery_result(result: BaseModel) -> None:
+    emit(result)
+    if getattr(result, "status", "ok") in {"partial", "failed"}:
+        raise typer.Exit(code=1)
+
+
 def choose_category(candidate: SubscriptionCandidate) -> tuple[str, str] | None:
     typer.echo(f"\n{candidate.id}: {candidate.name}")
     while True:
@@ -167,7 +173,7 @@ def subscriptions_sync(
 
 @delivery_app.command("retry")
 def delivery_retry() -> None:
-    emit(retry_delivery(Settings()))
+    emit_delivery_result(retry_delivery(Settings()))
 
 
 @delivery_app.command("reset-checkpoint")

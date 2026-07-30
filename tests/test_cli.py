@@ -81,6 +81,21 @@ def test_delivery_retry_keeps_its_json_shape(monkeypatch: pytest.MonkeyPatch) ->
     assert json.loads(result.stdout) == {"status": "ok", "delivered": 1, "failed": 0, "failed_by_error_code": {}}
 
 
+def test_delivery_retry_exits_nonzero_when_delivery_fails(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cli,
+        "retry_delivery",
+        lambda _: NewsletterRetryResult(
+            status="failed", delivered=0, failed=1, failed_by_error_code={"DISCORD_DELIVERY_FAILED": 1}
+        ),
+    )
+
+    result = CliRunner().invoke(cli.app, ["delivery", "retry"])
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout)["status"] == "failed"
+
+
 def test_delivery_reset_checkpoint_requires_an_explicit_delivery_id(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cli, "reset_corrupt_delivery", lambda _, delivery_id: DeliveryCheckpointResetResult(delivery_id=delivery_id)

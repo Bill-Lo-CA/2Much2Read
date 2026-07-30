@@ -25,6 +25,7 @@ class NewsletterRunResult(CommandResult):
 
 
 class NewsletterRetryResult(CommandResult):
+    status: Literal["ok", "partial", "failed"] = "ok"
     delivered: int
     failed: int
     failed_by_error_code: dict[str, int] = Field(default_factory=dict)

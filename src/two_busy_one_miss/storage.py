@@ -38,7 +38,7 @@ CREATE TABLE IF NOT EXISTS reminder_deliveries(
   destination_key TEXT NOT NULL, transport TEXT NOT NULL CHECK(transport IN ('webhook','bot')),
   state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed')),
   attempt_count INTEGER NOT NULL DEFAULT 0, discord_message_ids_json TEXT, delivered_at TEXT, last_error_code TEXT,
-  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(reminder_attempt_id,destination_key)
+  retired_at TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL, UNIQUE(reminder_attempt_id,destination_key)
 );
 """
 
@@ -99,6 +99,10 @@ class Database:
                 self.connection.execute(
                     "UPDATE reminder_attempts SET discord_destination_key='webhook' WHERE discord_message_ids_json IS NOT NULL"
                 )
+                self.connection.commit()
+            delivery_columns = {str(row["name"]) for row in self.connection.execute("PRAGMA table_info(reminder_deliveries)")}
+            if "retired_at" not in delivery_columns:
+                self.connection.execute("ALTER TABLE reminder_deliveries ADD COLUMN retired_at TEXT")
                 self.connection.commit()
 
     @contextmanager
@@ -256,6 +260,24 @@ class Database:
         with self.transaction() as connection:
             self._create_reminder_deliveries(connection, reminder_attempt_id, destinations, datetime.now(UTC).isoformat())
 
+    def reconcile_reminder_deliveries(self, reminder_attempt_id: int, destinations: list[DiscordDestination]) -> None:
+        with self.transaction() as connection:
+            now = datetime.now(UTC).isoformat()
+            self._create_reminder_deliveries(connection, reminder_attempt_id, destinations, now)
+            keys = [destination.key for destination in destinations]
+            placeholders = ",".join("?" for _ in keys)
+            connection.execute(
+                f"""UPDATE reminder_deliveries SET retired_at=?,updated_at=? WHERE reminder_attempt_id=?
+                AND destination_key NOT IN ({placeholders}) AND state IN ('pending','failed') AND retired_at IS NULL""",
+                (now, now, reminder_attempt_id, *keys),
+            )
+            connection.execute(
+                f"""UPDATE reminder_deliveries SET retired_at=NULL,updated_at=? WHERE reminder_attempt_id=?
+                AND destination_key IN ({placeholders})""",
+                (now, reminder_attempt_id, *keys),
+            )
+            self._refresh_reminder_state(connection, reminder_attempt_id)
+
     def migrate_legacy_reminder_deliveries(self, reminder_attempt_id: int, destinations: list[DiscordDestination]) -> None:
         with self.transaction() as connection:
             attempt = connection.execute(
@@ -298,31 +320,24 @@ class Database:
         if not destinations:
             return []
         for attempt in self.due_attempts(now):
-            self.ensure_reminder_deliveries(int(attempt["id"]), destinations)
+            self.reconcile_reminder_deliveries(int(attempt["id"]), destinations)
         keys = [destination.key for destination in destinations]
         placeholders = ",".join("?" for _ in keys)
         return self.connection.execute(
             f"""SELECT rd.*,ra.content,e.start_at AS event_start_at FROM reminder_deliveries rd
             JOIN reminder_attempts ra ON ra.id=rd.reminder_attempt_id JOIN events e ON e.id=ra.event_row_id
             WHERE rd.destination_key IN ({placeholders}) AND rd.state IN ('pending','failed')
-            AND ra.state IN ('pending','failed') AND ra.reminder_at<=?
+            AND rd.retired_at IS NULL AND ra.state IN ('pending','failed') AND ra.reminder_at<=?
             ORDER BY ra.reminder_at,rd.id""",
             (*keys, now.isoformat()),
         ).fetchall()
 
-    def _refresh_reminder_state(
-        self, connection: sqlite3.Connection, reminder_attempt_id: int, destinations: list[DiscordDestination]
-    ) -> None:
-        if not destinations:
-            return
-        keys = [destination.key for destination in destinations]
-        placeholders = ",".join("?" for _ in keys)
+    def _refresh_reminder_state(self, connection: sqlite3.Connection, reminder_attempt_id: int) -> None:
         states = [
             str(row["state"])
             for row in connection.execute(
-                f"""SELECT state FROM reminder_deliveries WHERE reminder_attempt_id=?
-                AND destination_key IN ({placeholders})""",
-                (reminder_attempt_id, *keys),
+                "SELECT state FROM reminder_deliveries WHERE reminder_attempt_id=? AND retired_at IS NULL",
+                (reminder_attempt_id,),
             )
         ]
         if not states:
@@ -351,7 +366,7 @@ class Database:
                 attempt_count=attempt_count+1,last_error_code=NULL,updated_at=? WHERE id=?""",
                 (now, json.dumps(message_ids), now, delivery_id),
             )
-            self._refresh_reminder_state(connection, int(row["reminder_attempt_id"]), destinations)
+            self._refresh_reminder_state(connection, int(row["reminder_attempt_id"]))
 
     def fail_reminder_delivery(self, delivery_id: int, error_code: str, destinations: list[DiscordDestination]) -> None:
         now = datetime.now(UTC).isoformat()
@@ -364,7 +379,7 @@ class Database:
                 WHERE id=?""",
                 (error_code, now, delivery_id),
             )
-            self._refresh_reminder_state(connection, int(row["reminder_attempt_id"]), destinations)
+            self._refresh_reminder_state(connection, int(row["reminder_attempt_id"]))
 
     def reset_corrupt_reminder_delivery(self, delivery_id: int, destinations: list[DiscordDestination]) -> bool:
         with self.transaction() as connection:
@@ -376,7 +391,7 @@ class Database:
                 WHERE id=? AND state='failed' AND last_error_code='DISCORD_MESSAGE_IDS_CORRUPT'""",
                 (datetime.now(UTC).isoformat(), delivery_id),
             )
-            self._refresh_reminder_state(connection, int(row["reminder_attempt_id"]), destinations)
+            self._refresh_reminder_state(connection, int(row["reminder_attempt_id"]))
             return bool(cursor.rowcount)
 
     def cancel_unmatched_attempts(

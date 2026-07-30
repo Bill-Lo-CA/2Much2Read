@@ -49,6 +49,12 @@ def emit(result: BaseModel | Mapping[str, object]) -> None:
     typer.echo(json.dumps(values, ensure_ascii=False, default=_json_default))
 
 
+def emit_delivery_result(result: BaseModel) -> None:
+    emit(result)
+    if getattr(result, "status", "ok") in {"partial", "failed"}:
+        raise typer.Exit(code=1)
+
+
 @auth_app.command("calendar")
 def auth_calendar() -> None:
     settings = Settings()
@@ -100,12 +106,12 @@ def doctor(send_test: Annotated[bool, typer.Option()] = False) -> None:
         if not destinations:
             checks["discord_test"] = "missing"
         else:
-            try:
-                for destination in destinations:
+            for destination in destinations:
+                try:
                     deliver(destination, "2busy1miss connectivity test", settings.discord_username)
-                checks["discord_test"] = "ok"
-            except DiscordDeliveryError:
-                checks["discord_test"] = "failed"
+                    checks[f"discord_test_{destination.transport}"] = "ok"
+                except DiscordDeliveryError:
+                    checks[f"discord_test_{destination.transport}"] = "failed"
     status = "ok" if all(value in {"ok", "webhook", "bot", "both"} for value in checks.values()) else "warning"
     emit({"status": status, "checks": checks})
 
@@ -122,7 +128,7 @@ def rules_test(days: Annotated[int, typer.Option("--days", min=1, max=30)] = 7) 
 
 @app.command("run")
 def run_command(dry_run: Annotated[bool, typer.Option()] = False) -> None:
-    emit(run_with_elapsed("2busy1miss run", lambda: run(Settings(), dry_run)))
+    emit_delivery_result(run_with_elapsed("2busy1miss run", lambda: run(Settings(), dry_run)))
 
 
 @app.command("agenda")
@@ -153,12 +159,12 @@ def agenda_retry_command(day: Annotated[str, typer.Argument()]) -> None:
         parsed = date.fromisoformat(day)
     except ValueError as error:
         raise typer.BadParameter("date must use YYYY-MM-DD") from error
-    emit(run_with_elapsed("2busy1miss agenda retry", lambda: retry_agenda(Settings(), parsed)))
+    emit_delivery_result(run_with_elapsed("2busy1miss agenda retry", lambda: retry_agenda(Settings(), parsed)))
 
 
 @app.command("retry-delivery")
 def retry_delivery_command() -> None:
-    emit(run_with_elapsed("2busy1miss retry delivery", lambda: retry_delivery(Settings())))
+    emit_delivery_result(run_with_elapsed("2busy1miss retry delivery", lambda: retry_delivery(Settings())))
 
 
 @app.command("reset-delivery-checkpoint")
