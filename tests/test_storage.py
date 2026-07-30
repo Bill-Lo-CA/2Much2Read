@@ -166,7 +166,7 @@ def test_v2_schema_upgrades_without_losing_documents(tmp_path: Path) -> None:
 
     upgraded = Database(path)
 
-    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 5
+    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 6
     assert upgraded.connection.execute("SELECT gmail_message_id FROM gmail_document_state").fetchone()[0] == "gmail-1"
     assert upgraded.connection.execute("SELECT 1 FROM sqlite_master WHERE name='hackernews_document_state'").fetchone()[0] == 1
     upgraded.close()
@@ -214,8 +214,22 @@ def test_v3_hackernews_state_upgrades_without_losing_metadata(tmp_path: Path) ->
 
     row = upgraded.connection.execute("SELECT hn_item_id,requested_url,fetch_status FROM hackernews_document_state").fetchone()
     assert tuple(row) == (123, "https://example.com", "not_requested")
-    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 5
+    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 6
     upgraded.close()
+
+
+def test_digest_checkpoint_is_reset_for_a_new_destination(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    digest_id = database.save_digest("daily:1", "start", "end", "UTC", "digest")
+    assert digest_id is not None
+
+    database.record_delivery_progress(digest_id, ["webhook-message"], "webhook:old")
+
+    assert database.delivery_checkpoint(digest_id, "bot:123") is None
+    row = database.pending_digest(digest_id)
+    assert row is not None
+    assert (row["discord_message_ids_json"], row["discord_destination_key"]) == (None, "bot:123")
+    database.close()
 
 
 def test_backup_and_reset(tmp_path: Path) -> None:

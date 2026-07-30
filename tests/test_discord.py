@@ -4,6 +4,7 @@ import httpx
 import pytest
 import respx
 
+from two_read_runtime import discord
 from two_read_runtime.discord import (
     DiscordDeliveryError,
     chunk_text,
@@ -174,6 +175,46 @@ def test_bot_delivery_classifies_configuration_errors(status_code: int, code: st
         deliver(destination, "hello", "ignored")
 
     assert "secret-token" not in str(error.value)
+
+
+def test_uses_environment_proxy_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    client_options: list[dict[str, object]] = []
+
+    class Client:
+        def __init__(self, **options: object) -> None:
+            client_options.append(options)
+
+        def __enter__(self) -> "Client":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def post(self, *args: object, **kwargs: object) -> httpx.Response:
+            return httpx.Response(200, json={"id": "123"})
+
+    monkeypatch.setattr(discord.httpx, "Client", Client)
+
+    response = discord._request(configured_destinations("bot", "", "token", "123")[0], "hello", "ignored", {"parse": []})
+
+    assert response.status_code == 200
+    assert client_options == [{"timeout": 30}]
+
+
+def test_does_not_retry_ambiguous_post_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = 0
+
+    def request(*args: object) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("response lost")
+
+    monkeypatch.setattr(discord, "_request", request)
+
+    with pytest.raises(DiscordDeliveryError, match="DISCORD_DELIVERY_FAILED"):
+        deliver(configured_destinations("bot", "", "token", "123")[0], "hello", "ignored")
+
+    assert attempts == 1
 
 
 @pytest.mark.parametrize(

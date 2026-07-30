@@ -29,10 +29,13 @@ class FakeReminderDatabase:
     def due_attempts(self, now: datetime) -> list[dict[str, object]]:
         return self.attempts
 
-    def record_delivery_progress(self, attempt_id: int, message_ids: list[str]) -> None:
+    def delivery_checkpoint(self, attempt_id: int, destination_key: str) -> object:
+        return next(attempt for attempt in self.attempts if attempt["id"] == attempt_id)["discord_message_ids_json"]
+
+    def record_delivery_progress(self, attempt_id: int, message_ids: list[str], destination_key: str) -> None:
         self.progress.append((attempt_id, message_ids))
 
-    def finish_delivery(self, attempt_id: int, message_ids: list[str]) -> None:
+    def finish_delivery(self, attempt_id: int, message_ids: list[str], destination_key: str) -> None:
         self.finished.append((attempt_id, message_ids))
 
     def fail_delivery(self, attempt_id: int, error_code: str) -> None:

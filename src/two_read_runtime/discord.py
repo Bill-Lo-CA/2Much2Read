@@ -182,7 +182,7 @@ def _request(
         params = {}
         headers = {"Authorization": f"Bot {destination.bot_token}"}
         payload = {"content": content, "allowed_mentions": allowed_mentions}
-    with httpx.Client(timeout=30, trust_env=False) as client:
+    with httpx.Client(timeout=30) as client:
         return client.post(url, params=params, headers=headers, json=payload)
 
 
@@ -229,9 +229,6 @@ def deliver(
             try:
                 response = _request(resolved_destination, chunk, username, allowed_mentions)
             except httpx.HTTPError as error:
-                if attempt < 3:
-                    time.sleep(2**attempt)
-                    continue
                 raise DiscordDeliveryError() from error
             if response.status_code == 429:
                 if attempt < 3:

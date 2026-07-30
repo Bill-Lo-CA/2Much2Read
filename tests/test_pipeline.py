@@ -171,10 +171,13 @@ class FakeDigestDatabase:
     def pending_digests(self) -> list[dict[str, object]]:
         return self.pending
 
-    def record_delivery_progress(self, digest_id: int, message_ids: list[str]) -> None:
+    def delivery_checkpoint(self, digest_id: int, destination_key: str) -> object:
+        return next(digest for digest in self.pending if digest["id"] == digest_id)["discord_message_ids_json"]
+
+    def record_delivery_progress(self, digest_id: int, message_ids: list[str], destination_key: str) -> None:
         self.progress.append((digest_id, message_ids))
 
-    def finish_delivery(self, digest_id: int, message_ids: list[str]) -> None:
+    def finish_delivery(self, digest_id: int, message_ids: list[str], destination_key: str) -> None:
         self.finished.append((digest_id, message_ids))
 
     def fail_delivery(self, digest_id: int, error_code: str) -> None:

@@ -206,6 +206,7 @@ def _dispatch_due_reminders(database: Database, settings: Settings, now: datetim
     failed = 0
     expired = 0
     failed_by_error_code: dict[str, int] = {}
+    destination = settings.discord_destination()
     for attempt in database.due_attempts(now):
         attempt_id = int(attempt["id"])
         if datetime.fromisoformat(str(attempt["event_start_at"])) <= now:
@@ -214,17 +215,17 @@ def _dispatch_due_reminders(database: Database, settings: Settings, now: datetim
             continue
 
         def save_progress(message_ids: list[str], target_id: int = attempt_id) -> None:
-            database.record_delivery_progress(target_id, message_ids)
+            database.record_delivery_progress(target_id, message_ids, destination.key)
 
         def finish_delivery(message_ids: list[str], target_id: int = attempt_id) -> None:
-            database.finish_delivery(target_id, message_ids)
+            database.finish_delivery(target_id, message_ids, destination.key)
 
         try:
             deliver_resumable(
-                settings.discord_destination(),
+                destination,
                 str(attempt["content"]),
                 settings.discord_username,
-                attempt["discord_message_ids_json"],
+                database.delivery_checkpoint(attempt_id, destination.key),
                 save_progress,
                 finish_delivery,
                 sender=deliver,

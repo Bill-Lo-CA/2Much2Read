@@ -24,6 +24,7 @@ CREATE TABLE IF NOT EXISTS reminder_attempts(
   state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed','expired','cancelled')),
   attempt_count INTEGER NOT NULL DEFAULT 0,
   discord_message_ids_json TEXT,
+  discord_destination_key TEXT,
   delivered_at TEXT,
   last_error_code TEXT,
   created_at TEXT NOT NULL,
@@ -83,6 +84,13 @@ class Database:
             self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.execute("PRAGMA foreign_keys=ON")
             self.connection.executescript(SCHEMA)
+            columns = {str(row["name"]) for row in self.connection.execute("PRAGMA table_info(reminder_attempts)")}
+            if "discord_destination_key" not in columns:
+                self.connection.execute("ALTER TABLE reminder_attempts ADD COLUMN discord_destination_key TEXT")
+                self.connection.execute(
+                    "UPDATE reminder_attempts SET discord_destination_key='webhook' WHERE discord_message_ids_json IS NOT NULL"
+                )
+                self.connection.commit()
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -238,20 +246,44 @@ class Database:
         )
         self.connection.commit()
 
-    def record_delivery_progress(self, attempt_id: int, message_ids: list[str]) -> None:
+    def delivery_checkpoint(self, attempt_id: int, destination_key: str) -> object:
+        row = self.connection.execute(
+            "SELECT discord_message_ids_json,discord_destination_key FROM reminder_attempts WHERE id=?", (attempt_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"reminder attempt {attempt_id} not found")
+        previous_key = row["discord_destination_key"]
+        if previous_key == "webhook" and destination_key.startswith("webhook:"):
+            self.connection.execute(
+                "UPDATE reminder_attempts SET discord_destination_key=?,updated_at=? WHERE id=?",
+                (destination_key, datetime.now(UTC).isoformat(), attempt_id),
+            )
+            self.connection.commit()
+        elif previous_key is not None and previous_key != destination_key:
+            self.connection.execute(
+                """UPDATE reminder_attempts SET discord_message_ids_json=NULL,discord_destination_key=?,updated_at=?
+                WHERE id=?""",
+                (destination_key, datetime.now(UTC).isoformat(), attempt_id),
+            )
+            self.connection.commit()
+            return None
+        return row["discord_message_ids_json"]
+
+    def record_delivery_progress(self, attempt_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
         now = datetime.now(UTC).isoformat()
         self.connection.execute(
-            "UPDATE reminder_attempts SET discord_message_ids_json=?, updated_at=? WHERE id=?",
-            (json.dumps(message_ids), now, attempt_id),
+            "UPDATE reminder_attempts SET discord_message_ids_json=?,discord_destination_key=?,updated_at=? WHERE id=?",
+            (json.dumps(message_ids), destination_key, now, attempt_id),
         )
         self.connection.commit()
 
-    def finish_delivery(self, attempt_id: int, message_ids: list[str]) -> None:
+    def finish_delivery(self, attempt_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
         now = datetime.now(UTC).isoformat()
         self.connection.execute(
-            """UPDATE reminder_attempts SET state='delivered', delivered_at=?, discord_message_ids_json=?,
-            attempt_count=attempt_count+1, last_error_code=NULL, updated_at=? WHERE id=?""",
-            (now, json.dumps(message_ids), now, attempt_id),
+            """UPDATE reminder_attempts SET state='delivered', delivered_at=?,
+            discord_message_ids_json=?,discord_destination_key=?, attempt_count=attempt_count+1,
+            last_error_code=NULL, updated_at=? WHERE id=?""",
+            (now, json.dumps(message_ids), destination_key, now, attempt_id),
         )
         self.connection.commit()
 
