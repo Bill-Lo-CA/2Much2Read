@@ -698,7 +698,10 @@ def test_retry_delivery_preserves_corrupt_checkpoint_error(tmp_path: Path, monke
     corrupt_id = database.save_digest("daily:corrupt", "start", "end", "UTC", "corrupt")
     good_id = database.save_digest("daily:good", "start", "end", "UTC", "good")
     assert corrupt_id is not None and good_id is not None
-    database.connection.execute("UPDATE digests SET discord_message_ids_json='not json' WHERE id=?", (corrupt_id,))
+    database.connection.execute(
+        "UPDATE digests SET discord_message_ids_json='not json',discord_destination_key=? WHERE id=?",
+        (settings.discord_destinations()[0].key, corrupt_id),
+    )
     database.connection.commit()
     monkeypatch.setattr(pipeline, "deliver", lambda *args: ["discord-id"])
 
