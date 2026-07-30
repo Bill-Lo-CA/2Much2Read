@@ -837,6 +837,90 @@ def test_reset_legacy_corrupt_digest_checkpoint(tmp_path: Path) -> None:
     database.close()
 
 
+def test_reset_delivery_does_not_fall_back_to_a_colliding_legacy_digest(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="https://discord.example/webhook",
+    )
+    destinations = settings.discord_destinations()
+    database = Database(settings.database_path)
+    legacy_id = database.save_digest("daily:legacy", "start", "end", "UTC", "legacy")
+    assert legacy_id is not None
+    database.record_delivery_progress(legacy_id, ["partial"])
+    database.fail_delivery(legacy_id, "DISCORD_MESSAGE_IDS_CORRUPT")
+    digest_id = database.save_digest("daily:current", "start", "end", "UTC", "current", destinations=destinations)
+    assert digest_id is not None
+    delivery_id = int(database.digest_deliveries(digest_id, destinations)[0]["id"])
+    assert delivery_id == legacy_id
+    database.close()
+
+    with pytest.raises(ValueError, match="not a failed corrupt checkpoint"):
+        pipeline.reset_corrupt_delivery(settings, delivery_id)
+
+    database = Database(settings.database_path)
+    row = database.pending_digest(legacy_id)
+    assert row is not None
+    assert row["last_error_code"] == "DISCORD_MESSAGE_IDS_CORRUPT"
+    database.close()
+
+
+def test_invalid_discord_config_queues_digest_for_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_delivery_mode="bot",
+    )
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    def process_source(
+        database: Database, *_args: object, **_kwargs: object
+    ) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
+        document_id = discover_gmail_document(database, "message", "alphasignal")
+        assert document_id is not None
+        return 1, 1, 1, 0, [document_id], []
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_process_source", process_source)
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args: "digest")
+
+    result = run_pipeline(settings, now=datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert (result.status, result.delivery_failed) == ("partial", 1)
+    database = Database(settings.database_path)
+    digest = database.pending_digests()[0]
+    assert (digest["state"], digest["last_error_code"], digest["rendered_content"]) == (
+        "failed",
+        "DISCORD_CONFIG_INVALID",
+        "digest",
+    )
+    assert database.connection.execute("SELECT state FROM documents").fetchone()["state"] == "processed"
+    database.close()
+
+    corrected_settings = Settings(
+        database_path=settings.database_path,
+        lock_path=settings.lock_path,
+        discord_delivery_mode="bot",
+        discord_bot_token="token",
+        discord_bot_channel_id="123",
+    )
+    monkeypatch.setattr(pipeline, "deliver", lambda *args: ["message"])
+    assert pipeline.retry_delivery(corrected_settings).model_dump() == {
+        "status": "ok",
+        "delivered": 1,
+        "failed": 0,
+        "failed_by_error_code": {},
+    }
+
+
 def test_no_deliver_queues_configured_destinations(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = newsletter_settings
     write_sources(settings.sources_config_path)

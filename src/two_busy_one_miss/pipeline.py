@@ -504,9 +504,10 @@ def reset_reminder_checkpoint(settings: Settings, delivery_id: int) -> ReminderC
     database = Database(settings.database_path)
     try:
         with ProcessLock(settings.lock_path):
-            if not database.reset_corrupt_reminder_delivery(
-                delivery_id, settings.discord_destinations()
-            ) and not database.reset_corrupt_delivery(delivery_id):
+            if database.has_reminder_delivery(delivery_id):
+                if not database.reset_corrupt_reminder_delivery(delivery_id, settings.discord_destinations()):
+                    raise ValueError(f"reminder delivery {delivery_id} is not a failed corrupt checkpoint")
+            elif not database.reset_corrupt_delivery(delivery_id):
                 raise ValueError(f"reminder delivery {delivery_id} is not a failed corrupt checkpoint")
     finally:
         database.close()

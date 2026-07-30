@@ -245,6 +245,43 @@ def test_reset_legacy_corrupt_reminder_checkpoint(tmp_path: Path) -> None:
     database.close()
 
 
+def test_reset_reminder_does_not_fall_back_to_a_colliding_legacy_attempt(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        discord_webhook_url="https://discord.example/webhook",
+    )
+    destinations = settings.discord_destinations()
+    start = datetime(2026, 7, 8, 10, tzinfo=ZoneInfo("America/Montreal"))
+
+    def candidate(event_id: str) -> ReminderCandidate:
+        event = CalendarEvent("primary", "Main", event_id, event_id, event_id, "", start, start + timedelta(hours=1), False)
+        return ReminderCandidate(event, "default-5m", "5m", start - timedelta(minutes=5))
+
+    database = Database(settings.database_path)
+    legacy_id = database.create_attempt(candidate("legacy"), "legacy")
+    assert legacy_id is not None
+    database.record_delivery_progress(legacy_id, ["partial"])
+    database.fail_delivery(legacy_id, "DISCORD_MESSAGE_IDS_CORRUPT")
+    attempt_id = database.create_attempt(candidate("current"), "current", destinations)
+    assert attempt_id is not None
+    delivery_id = int(
+        database.connection.execute(
+            "SELECT id FROM reminder_deliveries WHERE reminder_attempt_id=?", (attempt_id,)
+        ).fetchone()["id"]
+    )
+    assert delivery_id == legacy_id
+    database.close()
+
+    with pytest.raises(ValueError, match="not a failed corrupt checkpoint"):
+        pipeline.reset_reminder_checkpoint(settings, delivery_id)
+
+    database = Database(settings.database_path)
+    row = database.connection.execute("SELECT last_error_code FROM reminder_attempts WHERE id=?", (legacy_id,)).fetchone()
+    assert row["last_error_code"] == "DISCORD_MESSAGE_IDS_CORRUPT"
+    database.close()
+
+
 def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     timezone = ZoneInfo("America/Montreal")
     config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)

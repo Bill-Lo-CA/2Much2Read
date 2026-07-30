@@ -449,6 +449,7 @@ def run_pipeline(
             )
             digest_id: int | None = None
             destinations = []
+            delivery_error: DiscordDeliveryError | None = None
             finalized = False
             if not dry_run:
                 if content:
@@ -459,7 +460,10 @@ def run_pipeline(
                         except DiscordDeliveryError:
                             destinations = []
                     else:
-                        destinations = settings.discord_destinations()
+                        try:
+                            destinations = settings.discord_destinations()
+                        except DiscordDeliveryError as error:
+                            delivery_error = error
                     digest_id = database.save_digest(
                         digest_key,
                         period_start.isoformat(),
@@ -480,7 +484,11 @@ def run_pipeline(
                             failed += 1
                 if digest_id is not None and not no_deliver:
                     status("Delivering digest")
-                    delivery_succeeded, delivery_failed, delivery_pending = deliver_digest(settings, database, digest_id)
+                    if delivery_error is not None:
+                        delivery_failed = 1
+                        database.fail_delivery(digest_id, delivery_error_code(delivery_error))
+                    else:
+                        delivery_succeeded, delivery_failed, delivery_pending = deliver_digest(settings, database, digest_id)
                     delivered = int(delivery_succeeded and not delivery_failed and not delivery_pending)
             result = NewsletterRunResult(
                 status="partial" if failed or delivery_failed else "ok" if content else "no_content",
@@ -596,9 +604,10 @@ def reset_corrupt_delivery(settings: Settings, delivery_id: int) -> DeliveryChec
     with ProcessLock(settings.lock_path):
         database = Database(settings.database_path)
         try:
-            if not database.reset_corrupt_digest_delivery(
-                delivery_id, settings.discord_destinations()
-            ) and not database.reset_corrupt_delivery(delivery_id):
+            if database.has_digest_delivery(delivery_id):
+                if not database.reset_corrupt_digest_delivery(delivery_id, settings.discord_destinations()):
+                    raise ValueError(f"digest delivery {delivery_id} is not a failed corrupt checkpoint")
+            elif not database.reset_corrupt_delivery(delivery_id):
                 raise ValueError(f"digest delivery {delivery_id} is not a failed corrupt checkpoint")
         finally:
             database.close()

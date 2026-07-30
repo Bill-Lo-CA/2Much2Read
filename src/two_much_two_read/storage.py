@@ -641,15 +641,8 @@ class Database:
                 raise ValueError(f"digest {digest_id} not found")
             now = datetime.now(UTC).isoformat()
             self._create_digest_deliveries(connection, digest_id, destinations, now)
-            source_key = str(digest["discord_destination_key"] or "webhook")
-            destination = next(
-                (
-                    item
-                    for item in destinations
-                    if item.key == source_key or (source_key == "webhook" and item.transport == "webhook")
-                ),
-                None,
-            )
+            source_key = digest["discord_destination_key"]
+            destination = next((item for item in destinations if item.key == source_key), None)
             if destination is not None:
                 connection.execute(
                     """UPDATE digest_deliveries SET state=?,discord_message_ids_json=?,last_error_code=?,updated_at=?
@@ -666,6 +659,9 @@ class Database:
 
     def has_digest_deliveries(self, digest_id: int) -> bool:
         return self.connection.execute("SELECT 1 FROM digest_deliveries WHERE digest_id=?", (digest_id,)).fetchone() is not None
+
+    def has_digest_delivery(self, delivery_id: int) -> bool:
+        return self.connection.execute("SELECT 1 FROM digest_deliveries WHERE id=?", (delivery_id,)).fetchone() is not None
 
     def digest_deliveries(self, digest_id: int, destinations: list[DiscordDestination]) -> list[sqlite3.Row]:
         if not destinations:

@@ -133,6 +133,23 @@ def test_reminder_checkpoint_with_legacy_webhook_marker_is_reset(tmp_path: Path)
     database.close()
 
 
+def test_migrating_legacy_reminder_does_not_adopt_unknown_webhook_checkpoint(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    attempt_id = database.create_attempt(candidate(), "message")
+    assert attempt_id is not None
+    database.record_delivery_progress(attempt_id, ["webhook-message"], "webhook")
+    database.fail_delivery(attempt_id)
+    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+
+    database.migrate_legacy_reminder_deliveries(attempt_id, destinations)
+
+    rows = database.connection.execute(
+        "SELECT discord_message_ids_json FROM reminder_deliveries WHERE reminder_attempt_id=? ORDER BY id", (attempt_id,)
+    ).fetchall()
+    assert [row["discord_message_ids_json"] for row in rows] == [None, None]
+    database.close()
+
+
 def test_resync_updates_pending_attempt_content(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     item = candidate()

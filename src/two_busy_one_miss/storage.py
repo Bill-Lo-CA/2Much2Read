@@ -267,15 +267,8 @@ class Database:
                 raise ValueError(f"reminder attempt {reminder_attempt_id} not found")
             now = datetime.now(UTC).isoformat()
             self._create_reminder_deliveries(connection, reminder_attempt_id, destinations, now)
-            source_key = str(attempt["discord_destination_key"] or "webhook")
-            destination = next(
-                (
-                    item
-                    for item in destinations
-                    if item.key == source_key or (source_key == "webhook" and item.transport == "webhook")
-                ),
-                None,
-            )
+            source_key = attempt["discord_destination_key"]
+            destination = next((item for item in destinations if item.key == source_key), None)
             if destination is not None:
                 connection.execute(
                     """UPDATE reminder_deliveries SET state=?,discord_message_ids_json=?,last_error_code=?,updated_at=?
@@ -297,6 +290,9 @@ class Database:
             ).fetchone()
             is not None
         )
+
+    def has_reminder_delivery(self, delivery_id: int) -> bool:
+        return self.connection.execute("SELECT 1 FROM reminder_deliveries WHERE id=?", (delivery_id,)).fetchone() is not None
 
     def due_reminder_deliveries(self, now: datetime, destinations: list[DiscordDestination]) -> list[sqlite3.Row]:
         if not destinations:

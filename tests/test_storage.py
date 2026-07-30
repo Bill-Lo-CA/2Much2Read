@@ -286,6 +286,20 @@ def test_digest_checkpoint_with_legacy_webhook_marker_is_reset(tmp_path: Path) -
     database.close()
 
 
+def test_migrating_legacy_digest_does_not_adopt_unknown_webhook_checkpoint(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    digest_id = database.save_digest("daily:1", "start", "end", "UTC", "digest")
+    assert digest_id is not None
+    database.record_delivery_progress(digest_id, ["webhook-message"], "webhook")
+    database.fail_delivery(digest_id)
+    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+
+    database.migrate_legacy_digest_deliveries(digest_id, destinations)
+
+    assert [row["discord_message_ids_json"] for row in database.digest_deliveries(digest_id, destinations)] == [None, None]
+    database.close()
+
+
 def test_backup_and_reset(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     assert discover(database, "gmail-1") is not None
