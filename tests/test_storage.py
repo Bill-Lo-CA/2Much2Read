@@ -232,6 +232,20 @@ def test_digest_checkpoint_is_reset_for_a_new_destination(tmp_path: Path) -> Non
     database.close()
 
 
+def test_digest_checkpoint_with_legacy_webhook_marker_is_reset(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    digest_id = database.save_digest("daily:1", "start", "end", "UTC", "digest")
+    assert digest_id is not None
+
+    database.record_delivery_progress(digest_id, ["webhook-message"], "webhook")
+
+    assert database.delivery_checkpoint(digest_id, "webhook:new") is None
+    row = database.pending_digest(digest_id)
+    assert row is not None
+    assert (row["discord_message_ids_json"], row["discord_destination_key"]) == (None, "webhook:new")
+    database.close()
+
+
 def test_backup_and_reset(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     assert discover(database, "gmail-1") is not None
