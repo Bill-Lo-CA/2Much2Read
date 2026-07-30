@@ -778,6 +778,84 @@ def test_retry_sends_only_the_failed_destination(tmp_path: Path, monkeypatch: py
     database.close()
 
 
+def test_retry_legacy_digest_uses_webhook_checkpoint_in_both_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = Settings(
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_delivery_mode="both",
+        discord_webhook_url="https://discord.example/webhook",
+        discord_bot_token="token",
+        discord_bot_channel_id="123",
+    )
+    database = Database(settings.database_path)
+    digest_id = database.save_digest("daily:legacy", "start", "end", "UTC", "digest")
+    assert digest_id is not None
+    database.record_delivery_progress(digest_id, ["old-webhook-message"])
+    database.fail_delivery(digest_id)
+    calls: list[tuple[str, list[str] | None]] = []
+
+    def fake_deliver(destination, _content, _username, message_ids, *_args, **_kwargs):
+        calls.append((destination.transport, message_ids))
+        return ["old-webhook-message", "new-webhook-message"]
+
+    monkeypatch.setattr(pipeline, "deliver", fake_deliver)
+
+    assert pipeline.retry_delivery(settings, database).model_dump() == {
+        "status": "ok",
+        "delivered": 1,
+        "failed": 0,
+        "failed_by_error_code": {},
+    }
+    assert calls == [("webhook", ["old-webhook-message"])]
+    assert database.pending_digests() == []
+    assert not database.has_digest_deliveries(digest_id)
+    database.close()
+
+
+def test_reset_legacy_corrupt_digest_checkpoint(tmp_path: Path) -> None:
+    settings = Settings(
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="https://discord.example/webhook",
+    )
+    database = Database(settings.database_path)
+    digest_id = database.save_digest("daily:legacy-corrupt", "start", "end", "UTC", "digest")
+    assert digest_id is not None
+    database.record_delivery_progress(digest_id, ["partial"])
+    database.fail_delivery(digest_id, "DISCORD_MESSAGE_IDS_CORRUPT")
+    database.close()
+
+    assert pipeline.reset_corrupt_delivery(settings, digest_id).model_dump() == {"status": "ok", "delivery_id": digest_id}
+
+    database = Database(settings.database_path)
+    row = database.pending_digest(digest_id)
+    assert row is not None
+    assert (row["discord_message_ids_json"], row["last_error_code"]) == (None, None)
+    database.close()
+
+
+def test_no_deliver_queues_configured_destinations(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    settings = newsletter_settings
+    write_sources(settings.sources_config_path)
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "_process_source", lambda *args, **kwargs: (0, 0, 0, 0, [], []))
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args: "digest")
+
+    result = run_pipeline(settings, no_deliver=True, force=True, now=datetime(2026, 1, 1, tzinfo=UTC))
+
+    assert result.delivery_pending == 1
+    database = Database(settings.database_path)
+    digest = database.pending_digests()[0]
+    assert len(database.digest_deliveries(int(digest["id"]), settings.discord_destinations())) == 1
+    database.close()
+
+
 def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sources_path = tmp_path / "sources.yaml"
     sources_path.write_text(
@@ -834,6 +912,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
         sources_config_path=sources_path,
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="",
     )
 
     class FakeGmailClient:
@@ -927,6 +1006,7 @@ def test_mime_failure_marks_one_message_failed_and_continues(tmp_path: Path, mon
         sources_config_path=sources_path,
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="",
     )
     good_body = urlsafe_b64encode(b"good newsletter").decode().rstrip("=")
     gmail = StubGmailClient(
@@ -1048,6 +1128,7 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
         sources_config_path=sources_path,
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="",
     )
     gmail = StubGmailClient(
         ["transient"],

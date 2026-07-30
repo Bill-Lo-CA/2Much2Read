@@ -63,3 +63,29 @@ def test_doctor_reports_an_unreachable_discord_test(newsletter_settings: Setting
 
     assert result.status == "warning"
     assert result.checks["discord_test"] == "failed"
+
+
+def test_doctor_tests_each_both_destination(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, object]:
+            return {"models": []}
+
+    sent: list[str] = []
+    monkeypatch.setattr(diagnostics.httpx, "get", lambda *args, **kwargs: Response())
+    monkeypatch.setattr(
+        diagnostics, "deliver", lambda destination, *args: sent.append(destination.transport) or [destination.transport]
+    )
+
+    result = diagnostics.doctor(
+        newsletter_settings.model_copy(
+            update={"discord_delivery_mode": "both", "discord_bot_token": "token", "discord_bot_channel_id": "123"}
+        ),
+        True,
+    )
+
+    assert result.checks["discord"] == "both"
+    assert result.checks["discord_test"] == "ok"
+    assert sent == ["webhook", "bot"]

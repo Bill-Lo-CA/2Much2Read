@@ -256,11 +256,23 @@ class Database:
         with self.transaction() as connection:
             self._create_reminder_deliveries(connection, reminder_attempt_id, destinations, datetime.now(UTC).isoformat())
 
-    def due_reminder_deliveries(self, now: datetime, destinations: list[DiscordDestination]) -> list[sqlite3.Row]:
+    def has_reminder_deliveries(self, reminder_attempt_id: int) -> bool:
+        return (
+            self.connection.execute(
+                "SELECT 1 FROM reminder_deliveries WHERE reminder_attempt_id=?", (reminder_attempt_id,)
+            ).fetchone()
+            is not None
+        )
+
+    def due_reminder_deliveries(
+        self, now: datetime, destinations: list[DiscordDestination], skipped_attempt_ids: set[int] | None = None
+    ) -> list[sqlite3.Row]:
         if not destinations:
             return []
+        skipped_attempt_ids = skipped_attempt_ids or set()
         for attempt in self.due_attempts(now):
-            self.ensure_reminder_deliveries(int(attempt["id"]), destinations)
+            if int(attempt["id"]) not in skipped_attempt_ids:
+                self.ensure_reminder_deliveries(int(attempt["id"]), destinations)
         keys = [destination.key for destination in destinations]
         placeholders = ",".join("?" for _ in keys)
         return self.connection.execute(

@@ -8,7 +8,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code
+from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code, legacy_destination
 from two_read_runtime.locking import ProcessLock
 
 from .article_extractor import ArticleExtractionError
@@ -448,10 +448,18 @@ def run_pipeline(
                 settings.digest_language,
             )
             digest_id: int | None = None
+            destinations = []
             finalized = False
             if not dry_run:
                 if content:
                     period_start = now - timedelta(days=1)
+                    if no_deliver:
+                        try:
+                            destinations = settings.discord_destinations()
+                        except DiscordDeliveryError:
+                            destinations = []
+                    else:
+                        destinations = settings.discord_destinations()
                     digest_id = database.save_digest(
                         digest_key,
                         period_start.isoformat(),
@@ -459,7 +467,7 @@ def run_pipeline(
                         settings.digest_timezone,
                         content,
                         processed_document_ids,
-                        settings.discord_destinations() if not no_deliver else [],
+                        destinations,
                     )
                     finalized = digest_id is not None
                 elif processed_document_ids:
@@ -482,7 +490,7 @@ def run_pipeline(
                 delivered=delivered,
                 delivery_succeeded=delivery_succeeded if digest_id is not None and not no_deliver else 0,
                 delivery_failed=delivery_failed if digest_id is not None and not no_deliver else 0,
-                delivery_pending=delivery_pending if digest_id is not None and not no_deliver else 0,
+                delivery_pending=delivery_pending if digest_id is not None and not no_deliver else len(destinations),
             )
             run_status = result.status
             return result
@@ -511,7 +519,9 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
             assert active_database is not None
             for digest in active_database.pending_digests():
                 digest_id = int(digest["id"])
-                if not hasattr(active_database, "has_digest_deliveries") or not active_database.has_digest_deliveries(digest_id):
+                if not hasattr(active_database, "has_digest_deliveries") or (
+                    not active_database.has_digest_deliveries(digest_id) and digest["discord_message_ids_json"] is not None
+                ):
                     try:
 
                         def save_legacy_progress(message_ids: list[str], target_id: int = digest_id) -> None:
@@ -521,7 +531,7 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
                             active_database.finish_delivery(target_id, message_ids)
 
                         deliver_resumable(
-                            settings.discord_destination(),
+                            legacy_destination(destinations),
                             str(digest["rendered_content"]),
                             settings.discord_username,
                             digest["discord_message_ids_json"],
@@ -580,7 +590,9 @@ def reset_corrupt_delivery(settings: Settings, delivery_id: int) -> DeliveryChec
     with ProcessLock(settings.lock_path):
         database = Database(settings.database_path)
         try:
-            if not database.reset_corrupt_digest_delivery(delivery_id, settings.discord_destinations()):
+            if not database.reset_corrupt_digest_delivery(
+                delivery_id, settings.discord_destinations()
+            ) and not database.reset_corrupt_delivery(delivery_id):
                 raise ValueError(f"digest delivery {delivery_id} is not a failed corrupt checkpoint")
         finally:
             database.close()

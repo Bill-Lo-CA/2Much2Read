@@ -17,7 +17,7 @@ def settings_env_file() -> Path:
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
-    discord_delivery_mode: Literal["webhook", "bot"] = "webhook"
+    discord_delivery_mode: Literal["webhook", "bot", "both"] = "webhook"
     discord_webhook_url: str = ""
     discord_username: str = "2bored1made"
     discord_bot_token: str = ""

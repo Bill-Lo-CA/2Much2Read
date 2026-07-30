@@ -11,6 +11,7 @@ from two_read_runtime.discord import (
     configured_destinations,
     deliver,
     deliver_resumable,
+    legacy_destination,
     parse_message_ids,
 )
 
@@ -223,10 +224,15 @@ def test_does_not_retry_ambiguous_post_errors(monkeypatch: pytest.MonkeyPatch) -
         ("webhook", "", "", ""),
         ("bot", "", "", "123"),
         ("bot", "", "token", "bad"),
-        ("both", "url", "token", "123"),
         ("invalid", "url", "token", "123"),
     ],
 )
 def test_rejects_incomplete_delivery_destinations(mode: str, webhook_url: str, bot_token: str, channel_id: str) -> None:
     with pytest.raises(DiscordDeliveryError, match="DISCORD_CONFIG_INVALID"):
         configured_destinations(mode, webhook_url, bot_token, channel_id)
+
+
+def test_both_mode_prefers_the_webhook_for_legacy_checkpoints() -> None:
+    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+
+    assert legacy_destination(destinations) is destinations[0]

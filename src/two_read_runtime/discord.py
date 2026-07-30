@@ -38,16 +38,16 @@ DiscordSender = Callable[[DiscordDestination | str, str, str, list[str] | None, 
 
 
 def configured_destinations(mode: str, webhook_url: str, bot_token: str, bot_channel_id: str) -> list[DiscordDestination]:
-    if mode not in {"webhook", "bot"}:
+    if mode not in {"webhook", "bot", "both"}:
         raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
     destinations: list[DiscordDestination] = []
-    if mode == "webhook":
+    if mode in {"webhook", "both"}:
         if not webhook_url:
             raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
         destinations.append(
             DiscordDestination("webhook", f"webhook:{hashlib.sha256(webhook_url.encode()).hexdigest()}", webhook_url=webhook_url)
         )
-    if mode == "bot":
+    if mode in {"bot", "both"}:
         if not bot_token or not (bot_channel_id.isascii() and bot_channel_id.isdecimal()):
             raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
         destinations.append(
@@ -61,6 +61,10 @@ def configured_destination(mode: str, webhook_url: str, bot_token: str, bot_chan
     if len(destinations) != 1:
         raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
     return destinations[0]
+
+
+def legacy_destination(destinations: list[DiscordDestination]) -> DiscordDestination:
+    return next((destination for destination in destinations if destination.transport == "webhook"), destinations[0])
 
 
 def parse_message_ids(value: object) -> list[str]:

@@ -89,23 +89,24 @@ def doctor(send_test: Annotated[bool, typer.Option()] = False) -> None:
     )
     checks["database_directory"] = "ok" if directory_is_creatable(settings.database_path.parent) else "not_writable"
     try:
-        destination = settings.discord_destination()
-        checks["discord"] = destination.transport
+        destinations = settings.discord_destinations()
+        checks["discord"] = settings.discord_delivery_mode
     except DiscordDeliveryError:
-        destination = None
+        destinations = []
         checks["discord"] = (
             "missing" if settings.discord_delivery_mode == "webhook" and not settings.discord_webhook_url else "invalid"
         )
     if send_test:
-        if destination is None:
+        if not destinations:
             checks["discord_test"] = "missing"
         else:
             try:
-                deliver(destination, "2busy1miss connectivity test", settings.discord_username)
+                for destination in destinations:
+                    deliver(destination, "2busy1miss connectivity test", settings.discord_username)
                 checks["discord_test"] = "ok"
             except DiscordDeliveryError:
                 checks["discord_test"] = "failed"
-    status = "ok" if all(value in {"ok", "webhook", "bot"} for value in checks.values()) else "warning"
+    status = "ok" if all(value in {"ok", "webhook", "bot", "both"} for value in checks.values()) else "warning"
     emit({"status": status, "checks": checks})
 
 

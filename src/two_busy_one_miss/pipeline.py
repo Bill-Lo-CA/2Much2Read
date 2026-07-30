@@ -6,7 +6,14 @@ from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
 
-from two_read_runtime.discord import DiscordDeliveryError, DiscordDestination, deliver, deliver_resumable, delivery_error_code
+from two_read_runtime.discord import (
+    DiscordDeliveryError,
+    DiscordDestination,
+    deliver,
+    deliver_resumable,
+    delivery_error_code,
+    legacy_destination,
+)
 from two_read_runtime.locking import ProcessLock
 
 from .config import RemindersConfig, Settings, load_reminders
@@ -227,25 +234,49 @@ def _dispatch_due_reminders(database: Database, settings: Settings, now: datetim
     failed = 0
     expired = 0
     failed_by_error_code: dict[str, int] = {}
-    attempts = database.due_attempts(now)
-    pending_attempts = []
-    for attempt in attempts:
+    destinations = {destination.key: destination for destination in settings.discord_destinations()}
+    expired_attempts: set[int] = set()
+    legacy_attempt_ids: set[int] = set()
+    for attempt in database.due_attempts(now):
         attempt_id = int(attempt["id"])
+        if attempt["discord_message_ids_json"] is None or database.has_reminder_deliveries(attempt_id):
+            continue
+        legacy_attempt_ids.add(attempt_id)
         if datetime.fromisoformat(str(attempt["event_start_at"])) <= now:
             database.expire_attempt(attempt_id)
             expired += 1
             continue
-        pending_attempts.append(attempt)
-    if not pending_attempts:
-        return sent, failed, expired, failed_by_error_code
-    try:
-        destinations = {destination.key: destination for destination in settings.discord_destinations()}
-    except DiscordDeliveryError as error:
-        error_code = delivery_error_code(error)
-        for attempt in pending_attempts:
-            database.fail_delivery(int(attempt["id"]), error_code)
-        return sent, len(pending_attempts), expired, {error_code: len(pending_attempts)}
-    for delivery in database.due_reminder_deliveries(now, list(destinations.values())):
+        try:
+
+            def save_legacy_progress(message_ids: list[str], target_id: int = attempt_id) -> None:
+                database.record_delivery_progress(target_id, message_ids)
+
+            def finish_legacy_delivery(message_ids: list[str], target_id: int = attempt_id) -> None:
+                database.finish_delivery(target_id, message_ids)
+
+            deliver_resumable(
+                legacy_destination(list(destinations.values())),
+                str(attempt["content"]),
+                settings.discord_username,
+                attempt["discord_message_ids_json"],
+                save_legacy_progress,
+                finish_legacy_delivery,
+                sender=deliver,
+            )
+            sent += 1
+        except DiscordDeliveryError as error:
+            error_code = delivery_error_code(error)
+            database.fail_delivery(attempt_id, error_code)
+            failed += 1
+            failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
+    for delivery in database.due_reminder_deliveries(now, list(destinations.values()), legacy_attempt_ids):
+        attempt_id = int(delivery["reminder_attempt_id"])
+        if datetime.fromisoformat(str(delivery["event_start_at"])) <= now:
+            if attempt_id not in expired_attempts:
+                database.expire_attempt(attempt_id)
+                expired_attempts.add(attempt_id)
+                expired += 1
+            continue
         delivery_id = int(delivery["id"])
         destination = destinations[str(delivery["destination_key"])]
 
@@ -284,19 +315,17 @@ def _dispatch_legacy_due_reminders(database: Database, settings: Settings, now: 
             expired += 1
             continue
         try:
-            destination = settings.discord_destination()
+            def save_progress(message_ids: list[str], target_id: int = attempt_id) -> None:
+                database.record_delivery_progress(target_id, message_ids)
 
-            def save_progress(message_ids: list[str], target_id: int = attempt_id, key: str = destination.key) -> None:
-                database.record_delivery_progress(target_id, message_ids, key)
-
-            def finish_delivery(message_ids: list[str], target_id: int = attempt_id, key: str = destination.key) -> None:
-                database.finish_delivery(target_id, message_ids, key)
+            def finish_delivery(message_ids: list[str], target_id: int = attempt_id) -> None:
+                database.finish_delivery(target_id, message_ids)
 
             deliver_resumable(
-                destination,
+                legacy_destination(settings.discord_destinations()),
                 str(attempt["content"]),
                 settings.discord_username,
-                database.delivery_checkpoint(attempt_id, destination.key),
+                attempt["discord_message_ids_json"],
                 save_progress,
                 finish_delivery,
                 sender=deliver,
@@ -492,7 +521,9 @@ def reset_reminder_checkpoint(settings: Settings, delivery_id: int) -> ReminderC
     database = Database(settings.database_path)
     try:
         with ProcessLock(settings.lock_path):
-            if not database.reset_corrupt_reminder_delivery(delivery_id, settings.discord_destinations()):
+            if not database.reset_corrupt_reminder_delivery(
+                delivery_id, settings.discord_destinations()
+            ) and not database.reset_corrupt_delivery(delivery_id):
                 raise ValueError(f"reminder delivery {delivery_id} is not a failed corrupt checkpoint")
     finally:
         database.close()

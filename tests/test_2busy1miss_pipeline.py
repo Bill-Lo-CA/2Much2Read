@@ -167,6 +167,83 @@ def test_retry_delivery_holds_process_lock(calendar_settings: Settings, monkeypa
     assert database.closed
 
 
+def test_retry_delivery_resumes_legacy_webhook_checkpoint_in_both_mode(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    start = datetime(2026, 7, 8, 10, tzinfo=ZoneInfo("America/Montreal"))
+    item = ReminderCandidate(
+        CalendarEvent("primary", "Main", "legacy", "legacy", "Legacy", "", start, start + timedelta(hours=1), False),
+        "default-5m",
+        "5m",
+        start - timedelta(minutes=5),
+    )
+    config = RemindersConfig(calendars=[{"id": "primary"}], timezone="America/Montreal")
+    settings = Settings(
+        reminders_config_path=tmp_path / "reminders.yaml",
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        discord_delivery_mode="both",
+        discord_webhook_url="https://discord.example/webhook",
+        discord_bot_token="token",
+        discord_bot_channel_id="123",
+    )
+    database = Database(settings.database_path)
+    attempt_id = database.create_attempt(item, "legacy reminder")
+    assert attempt_id is not None
+    database.record_delivery_progress(attempt_id, ["old-webhook-message"])
+    database.fail_delivery(attempt_id)
+    database.close()
+    calls: list[tuple[str, list[str] | None]] = []
+
+    def fake_deliver(destination, _content, _username, message_ids, *_args, **_kwargs):
+        calls.append((destination.transport, message_ids))
+        return ["old-webhook-message", "new-webhook-message"]
+
+    monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
+    monkeypatch.setattr(pipeline, "deliver", fake_deliver)
+
+    result = pipeline.retry_delivery(settings, now=item.reminder_time + timedelta(minutes=1))
+
+    assert result.model_dump() == {
+        "status": "ok",
+        "delivered": 1,
+        "failed": 0,
+        "failed_by_error_code": {},
+        "expired": 0,
+    }
+    assert calls == [("webhook", ["old-webhook-message"])]
+    database = Database(settings.database_path)
+    assert database.attempt_state(attempt_id) == "delivered"
+    assert database.counts()["reminder_deliveries"] == 0
+    database.close()
+
+
+def test_reset_legacy_corrupt_reminder_checkpoint(tmp_path: Path) -> None:
+    start = datetime(2026, 7, 8, 10, tzinfo=ZoneInfo("America/Montreal"))
+    item = ReminderCandidate(
+        CalendarEvent("primary", "Main", "legacy", "legacy", "Legacy", "", start, start + timedelta(hours=1), False),
+        "default-5m",
+        "5m",
+        start - timedelta(minutes=5),
+    )
+    settings = Settings(
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        discord_webhook_url="https://discord.example/webhook",
+    )
+    database = Database(settings.database_path)
+    attempt_id = database.create_attempt(item, "legacy reminder")
+    assert attempt_id is not None
+    database.record_delivery_progress(attempt_id, ["partial"])
+    database.fail_delivery(attempt_id, "DISCORD_MESSAGE_IDS_CORRUPT")
+    database.close()
+
+    assert pipeline.reset_reminder_checkpoint(settings, attempt_id).model_dump() == {"status": "ok", "delivery_id": attempt_id}
+
+    database = Database(settings.database_path)
+    row = database.pending_attempts()[0]
+    assert (row["discord_message_ids_json"], row["last_error_code"]) == (None, None)
+    database.close()
+
+
 def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkeypatch) -> None:
     timezone = ZoneInfo("America/Montreal")
     config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
