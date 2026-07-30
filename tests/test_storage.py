@@ -6,6 +6,7 @@ import pytest
 
 from two_much_two_read.schemas import EmailExtraction, NewsletterItemAnalysis, ResolvedContent, SourceDocument
 from two_much_two_read.storage import Database, DatabaseSchemaResetRequiredError
+from two_read_runtime.discord import configured_destinations
 
 
 def discover(database: Database, gmail_id: str, body: str = "body", *, force: bool = False) -> int | None:
@@ -58,6 +59,24 @@ def test_document_and_digest_idempotency(tmp_path: Path) -> None:
     assert digest_id is not None
     assert database.pending_digest(digest_id)["rendered_content"] == "digest"
     assert database.save_digest("daily:1", "start", "end", "UTC", "digest") is None
+    database.close()
+
+
+def test_digest_destinations_retry_independently(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+    digest_id = database.save_digest("daily:1", "start", "end", "UTC", "digest", destinations=destinations)
+    assert digest_id is not None
+
+    deliveries = database.digest_deliveries(digest_id, destinations)
+    assert len(deliveries) == 2
+    database.finish_digest_delivery(int(deliveries[0]["id"]), ["webhook-message"], destinations)
+    database.fail_digest_delivery(int(deliveries[1]["id"]), "DISCORD_BOT_FORBIDDEN", destinations)
+
+    pending = database.digest_deliveries(digest_id, destinations)
+    assert [row["destination_key"] for row in pending] == [deliveries[1]["destination_key"]]
+    database.finish_digest_delivery(int(deliveries[1]["id"]), ["bot-message"], destinations)
+    assert database.pending_digest(digest_id) is None
     database.close()
 
 
@@ -166,7 +185,7 @@ def test_v2_schema_upgrades_without_losing_documents(tmp_path: Path) -> None:
 
     upgraded = Database(path)
 
-    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 6
+    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 7
     assert upgraded.connection.execute("SELECT gmail_message_id FROM gmail_document_state").fetchone()[0] == "gmail-1"
     assert upgraded.connection.execute("SELECT 1 FROM sqlite_master WHERE name='hackernews_document_state'").fetchone()[0] == 1
     upgraded.close()
@@ -214,7 +233,28 @@ def test_v3_hackernews_state_upgrades_without_losing_metadata(tmp_path: Path) ->
 
     row = upgraded.connection.execute("SELECT hn_item_id,requested_url,fetch_status FROM hackernews_document_state").fetchone()
     assert tuple(row) == (123, "https://example.com", "not_requested")
-    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 6
+    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
+    upgraded.close()
+
+
+def test_v6_schema_adds_parent_checkpoint_destination(tmp_path: Path) -> None:
+    path = tmp_path / "v6.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.executescript(
+        """CREATE TABLE schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
+        INSERT INTO schema_version VALUES(6,'now');
+        CREATE TABLE digests(id INTEGER PRIMARY KEY, discord_message_ids_json TEXT);
+        INSERT INTO digests VALUES(1,'[\"message\"]');"""
+    )
+    connection.close()
+
+    upgraded = Database(path)
+
+    row = upgraded.connection.execute(
+        "SELECT discord_message_ids_json,discord_destination_key FROM digests WHERE id=1"
+    ).fetchone()
+    assert tuple(row) == ('["message"]', "webhook")
+    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 7
     upgraded.close()
 
 
@@ -246,6 +286,20 @@ def test_digest_checkpoint_with_legacy_webhook_marker_is_reset(tmp_path: Path) -
     database.close()
 
 
+def test_migrating_legacy_digest_does_not_adopt_unknown_webhook_checkpoint(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    digest_id = database.save_digest("daily:1", "start", "end", "UTC", "digest")
+    assert digest_id is not None
+    database.record_delivery_progress(digest_id, ["webhook-message"], "webhook")
+    database.fail_delivery(digest_id)
+    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+
+    database.migrate_legacy_digest_deliveries(digest_id, destinations)
+
+    assert [row["discord_message_ids_json"] for row in database.digest_deliveries(digest_id, destinations)] == [None, None]
+    database.close()
+
+
 def test_backup_and_reset(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     assert discover(database, "gmail-1") is not None
@@ -260,6 +314,7 @@ def test_backup_and_reset(tmp_path: Path) -> None:
         "gmail_document_state": 0,
         "hackernews_document_state": 0,
         "items": 0,
+        "digest_deliveries": 0,
         "digests": 0,
         "runs": 0,
         "url_resolution_cache": 0,

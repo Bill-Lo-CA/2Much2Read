@@ -59,7 +59,16 @@ def test_run_avoids_ansi_progress_when_stderr_is_not_a_tty(monkeypatch: pytest.M
     result = CliRunner().invoke(cli.app, ["run", "--source", "news", "--max-messages", "1"])
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout) == {"status": "ok", "discovered": 1, "processed": 1, "failed": 0, "delivered": 0}
+    assert json.loads(result.stdout) == {
+        "status": "ok",
+        "discovered": 1,
+        "processed": 1,
+        "failed": 0,
+        "delivered": 0,
+        "delivery_succeeded": 0,
+        "delivery_failed": 0,
+        "delivery_pending": 0,
+    }
     assert result.stderr == ""
 
 
@@ -72,13 +81,15 @@ def test_delivery_retry_keeps_its_json_shape(monkeypatch: pytest.MonkeyPatch) ->
     assert json.loads(result.stdout) == {"status": "ok", "delivered": 1, "failed": 0, "failed_by_error_code": {}}
 
 
-def test_delivery_reset_checkpoint_requires_an_explicit_digest_id(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(cli, "reset_corrupt_delivery", lambda _, digest_id: DeliveryCheckpointResetResult(digest_id=digest_id))
+def test_delivery_reset_checkpoint_requires_an_explicit_delivery_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(
+        cli, "reset_corrupt_delivery", lambda _, delivery_id: DeliveryCheckpointResetResult(delivery_id=delivery_id)
+    )
 
-    result = CliRunner().invoke(cli.app, ["delivery", "reset-checkpoint", "--digest-id", "7"])
+    result = CliRunner().invoke(cli.app, ["delivery", "reset-checkpoint", "--delivery-id", "7"])
 
     assert result.exit_code == 0
-    assert json.loads(result.stdout) == {"status": "ok", "digest_id": 7}
+    assert json.loads(result.stdout) == {"status": "ok", "delivery_id": 7}
 
 
 def test_hackernews_commands_emit_typed_results(monkeypatch: pytest.MonkeyPatch) -> None:

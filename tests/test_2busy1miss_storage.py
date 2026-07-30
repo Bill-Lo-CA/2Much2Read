@@ -5,6 +5,7 @@ from zoneinfo import ZoneInfo
 from two_busy_one_miss.google_calendar import CalendarEvent
 from two_busy_one_miss.rules import ReminderCandidate
 from two_busy_one_miss.storage import Database
+from two_read_runtime.discord import configured_destinations
 
 
 def candidate(event_id: str = "event-1") -> ReminderCandidate:
@@ -31,7 +32,7 @@ def test_attempt_idempotency_and_delivery_state(tmp_path: Path) -> None:
     attempt_id = database.create_attempt(item, "message")
     assert attempt_id is not None
     assert database.create_attempt(item, "message") is None
-    assert database.counts() == {"events": 1, "reminder_attempts": 1}
+    assert database.counts() == {"events": 1, "reminder_attempts": 1, "reminder_deliveries": 0}
 
     database.finish_delivery(attempt_id, ["123"])
     assert database.attempt_state(attempt_id) == "delivered"
@@ -42,7 +43,27 @@ def test_create_attempts_batches_distinct_candidates(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
 
     assert database.create_attempts([(candidate("one"), "one"), (candidate("two"), "two")]) == 2
-    assert database.counts() == {"events": 2, "reminder_attempts": 2}
+    assert database.counts() == {"events": 2, "reminder_attempts": 2, "reminder_deliveries": 0}
+    database.close()
+
+
+def test_reminder_destinations_retry_independently(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    item = candidate()
+    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+    attempt_id = database.create_attempt(item, "message", destinations)
+    assert attempt_id is not None
+
+    deliveries = database.due_reminder_deliveries(item.reminder_time + timedelta(minutes=1), destinations)
+    assert len(deliveries) == 2
+    database.finish_reminder_delivery(int(deliveries[0]["id"]), ["webhook-message"], destinations)
+    database.fail_reminder_delivery(int(deliveries[1]["id"]), "DISCORD_BOT_FORBIDDEN", destinations)
+    assert database.attempt_state(attempt_id) == "failed"
+
+    pending = database.due_reminder_deliveries(item.reminder_time + timedelta(minutes=1), destinations)
+    assert [row["id"] for row in pending] == [deliveries[1]["id"]]
+    database.finish_reminder_delivery(int(deliveries[1]["id"]), ["bot-message"], destinations)
+    assert database.attempt_state(attempt_id) == "delivered"
     database.close()
 
 
@@ -109,6 +130,23 @@ def test_reminder_checkpoint_with_legacy_webhook_marker_is_reset(tmp_path: Path)
     assert database.delivery_checkpoint(attempt_id, "webhook:new") is None
     row = database.pending_attempts()[0]
     assert (row["discord_message_ids_json"], row["discord_destination_key"]) == (None, "webhook:new")
+    database.close()
+
+
+def test_migrating_legacy_reminder_does_not_adopt_unknown_webhook_checkpoint(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    attempt_id = database.create_attempt(candidate(), "message")
+    assert attempt_id is not None
+    database.record_delivery_progress(attempt_id, ["webhook-message"], "webhook")
+    database.fail_delivery(attempt_id)
+    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+
+    database.migrate_legacy_reminder_deliveries(attempt_id, destinations)
+
+    rows = database.connection.execute(
+        "SELECT discord_message_ids_json FROM reminder_deliveries WHERE reminder_attempt_id=? ORDER BY id", (attempt_id,)
+    ).fetchall()
+    assert [row["discord_message_ids_json"] for row in rows] == [None, None]
     database.close()
 
 

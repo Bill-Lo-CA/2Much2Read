@@ -18,6 +18,9 @@ class NewsletterRunResult(CommandResult):
     processed: int
     failed: int
     delivered: int
+    delivery_succeeded: int = 0
+    delivery_failed: int = 0
+    delivery_pending: int = 0
     reason: Literal["daily_digest_exists"] | None = None
 
 
@@ -28,7 +31,7 @@ class NewsletterRetryResult(CommandResult):
 
 
 class DeliveryCheckpointResetResult(CommandResult):
-    digest_id: int
+    delivery_id: int
 
 
 class MailSelector(BaseModel):
