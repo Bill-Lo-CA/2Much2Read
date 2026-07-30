@@ -86,6 +86,32 @@ def test_attempt_progress_is_preserved_and_unmatched_jobs_are_cancelled(tmp_path
     database.close()
 
 
+def test_reminder_checkpoint_is_reset_for_a_new_destination(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    attempt_id = database.create_attempt(candidate(), "message")
+    assert attempt_id is not None
+
+    database.record_delivery_progress(attempt_id, ["webhook-message"], "webhook:old")
+
+    assert database.delivery_checkpoint(attempt_id, "bot:123") is None
+    row = database.pending_attempts()[0]
+    assert (row["discord_message_ids_json"], row["discord_destination_key"]) == (None, "bot:123")
+    database.close()
+
+
+def test_reminder_checkpoint_with_legacy_webhook_marker_is_reset(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    attempt_id = database.create_attempt(candidate(), "message")
+    assert attempt_id is not None
+
+    database.record_delivery_progress(attempt_id, ["webhook-message"], "webhook")
+
+    assert database.delivery_checkpoint(attempt_id, "webhook:new") is None
+    row = database.pending_attempts()[0]
+    assert (row["discord_message_ids_json"], row["discord_destination_key"]) == (None, "webhook:new")
+    database.close()
+
+
 def test_resync_updates_pending_attempt_content(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     item = candidate()

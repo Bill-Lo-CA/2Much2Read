@@ -29,10 +29,13 @@ class FakeReminderDatabase:
     def due_attempts(self, now: datetime) -> list[dict[str, object]]:
         return self.attempts
 
-    def record_delivery_progress(self, attempt_id: int, message_ids: list[str]) -> None:
+    def delivery_checkpoint(self, attempt_id: int, destination_key: str) -> object:
+        return next(attempt for attempt in self.attempts if attempt["id"] == attempt_id)["discord_message_ids_json"]
+
+    def record_delivery_progress(self, attempt_id: int, message_ids: list[str], destination_key: str) -> None:
         self.progress.append((attempt_id, message_ids))
 
-    def finish_delivery(self, attempt_id: int, message_ids: list[str]) -> None:
+    def finish_delivery(self, attempt_id: int, message_ids: list[str], destination_key: str) -> None:
         self.finished.append((attempt_id, message_ids))
 
     def fail_delivery(self, attempt_id: int, error_code: str) -> None:
@@ -468,4 +471,33 @@ def test_run_reads_scheduled_jobs_without_calendar_and_expires_started_events(tm
     database = Database(settings.database_path)
     assert database.attempt_state(future_id) == "delivered"
     assert database.attempt_state(past_id) == "expired"
+    database.close()
+
+
+def test_run_expires_started_events_without_discord_config(tmp_path: Path, monkeypatch) -> None:
+    timezone = ZoneInfo("America/Montreal")
+    now = datetime(2026, 7, 9, 9, 56, tzinfo=timezone)
+    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    settings = Settings(
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        discord_delivery_mode="bot",
+    )
+    database = Database(settings.database_path)
+    event = pipeline.CalendarEvent("primary", "Main", "past", "past", "Past", "", now - timedelta(minutes=1), now, False)
+    attempt_id = database.create_attempt(ReminderCandidate(event, "default-5m", "5m", now - timedelta(minutes=2)), "past")
+    assert attempt_id is not None
+    database.close()
+
+    monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
+
+    assert pipeline.run(settings, dry_run=False, now=now).model_dump() == {
+        "status": "ok",
+        "sent": 0,
+        "failed": 0,
+        "failed_by_error_code": {},
+        "expired": 1,
+    }
+    database = Database(settings.database_path)
+    assert database.attempt_state(attempt_id) == "expired"
     database.close()

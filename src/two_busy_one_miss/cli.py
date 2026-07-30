@@ -88,17 +88,24 @@ def doctor(send_test: Annotated[bool, typer.Option()] = False) -> None:
         ("https://www.googleapis.com/auth/calendar.readonly",),
     )
     checks["database_directory"] = "ok" if directory_is_creatable(settings.database_path.parent) else "not_writable"
-    checks["discord"] = "configured" if settings.discord_webhook_url else "missing"
+    try:
+        destination = settings.discord_destination()
+        checks["discord"] = destination.transport
+    except DiscordDeliveryError:
+        destination = None
+        checks["discord"] = (
+            "missing" if settings.discord_delivery_mode == "webhook" and not settings.discord_webhook_url else "invalid"
+        )
     if send_test:
-        if not settings.discord_webhook_url:
+        if destination is None:
             checks["discord_test"] = "missing"
         else:
             try:
-                deliver(settings.discord_webhook_url, "2busy1miss connectivity test", settings.discord_username)
+                deliver(destination, "2busy1miss connectivity test", settings.discord_username)
                 checks["discord_test"] = "ok"
             except DiscordDeliveryError:
                 checks["discord_test"] = "failed"
-    status = "ok" if all(value in {"ok", "configured"} for value in checks.values()) else "warning"
+    status = "ok" if all(value in {"ok", "webhook", "bot"} for value in checks.values()) else "warning"
     emit({"status": status, "checks": checks})
 
 

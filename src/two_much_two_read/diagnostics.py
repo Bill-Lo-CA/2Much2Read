@@ -3,6 +3,7 @@ from __future__ import annotations
 import httpx
 import yaml
 
+from two_read_runtime.discord import DiscordDeliveryError, deliver
 from two_read_runtime.oauth import token_status
 from two_read_runtime.paths import directory_is_creatable
 
@@ -41,20 +42,22 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
         )
     except (httpx.HTTPError, ValueError):
         checks["ollama"] = "unreachable"
-    checks["discord"] = "configured" if settings.discord_webhook_url else "missing"
+    try:
+        destination = settings.discord_destination()
+        checks["discord"] = destination.transport
+    except DiscordDeliveryError:
+        destination = None
+        checks["discord"] = (
+            "missing" if settings.discord_delivery_mode == "webhook" and not settings.discord_webhook_url else "invalid"
+        )
     if send_test:
-        if not settings.discord_webhook_url:
+        if destination is None:
             checks["discord_test"] = "missing"
         else:
             try:
-                response = httpx.post(
-                    settings.discord_webhook_url,
-                    params={"wait": "true"},
-                    json={"content": "2much2read connectivity test", "allowed_mentions": {"parse": []}},
-                    timeout=30,
-                )
-                checks["discord_test"] = "ok" if response.is_success else "failed"
-            except httpx.HTTPError:
-                checks["discord_test"] = "unreachable"
-    status = "ok" if all(value in {"ok", "configured"} for value in checks.values()) else "warning"
+                deliver(destination, "2much2read connectivity test", settings.discord_username)
+                checks["discord_test"] = "ok"
+            except DiscordDeliveryError:
+                checks["discord_test"] = "failed"
+    status = "ok" if all(value in {"ok", "webhook", "bot"} for value in checks.values()) else "warning"
     return DoctorResult(status=status, checks=checks)

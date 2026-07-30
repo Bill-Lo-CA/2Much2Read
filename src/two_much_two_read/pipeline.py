@@ -504,18 +504,20 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
             for digest in active_database.pending_digests():
                 try:
                     digest_id = int(digest["id"])
+                    destination = settings.discord_destination()
+                    destination_key = destination.key
 
-                    def save_progress(message_ids: list[str], target_id: int = digest_id) -> None:
-                        active_database.record_delivery_progress(target_id, message_ids)
+                    def save_progress(message_ids: list[str], target_id: int = digest_id, key: str = destination_key) -> None:
+                        active_database.record_delivery_progress(target_id, message_ids, key)
 
-                    def finish_delivery(message_ids: list[str], target_id: int = digest_id) -> None:
-                        active_database.finish_delivery(target_id, message_ids)
+                    def finish_delivery(message_ids: list[str], target_id: int = digest_id, key: str = destination_key) -> None:
+                        active_database.finish_delivery(target_id, message_ids, key)
 
                     deliver_resumable(
-                        settings.discord_webhook_url,
+                        destination,
                         str(digest["rendered_content"]),
                         settings.discord_username,
-                        digest["discord_message_ids_json"],
+                        active_database.delivery_checkpoint(digest_id, destination.key),
                         save_progress,
                         finish_delivery,
                         sender=deliver,
@@ -547,18 +549,19 @@ def deliver_digest(settings: Settings, database: Database, digest_id: int) -> No
     digest = database.pending_digest(digest_id)
     if digest is None:
         raise ValueError(f"digest {digest_id} is not pending")
+    destination = settings.discord_destination()
 
     def save_progress(message_ids: list[str]) -> None:
-        database.record_delivery_progress(digest_id, message_ids)
+        database.record_delivery_progress(digest_id, message_ids, destination.key)
 
     try:
         deliver_resumable(
-            settings.discord_webhook_url,
+            destination,
             str(digest["rendered_content"]),
             settings.discord_username,
-            digest["discord_message_ids_json"],
+            database.delivery_checkpoint(digest_id, destination.key),
             save_progress,
-            lambda message_ids: database.finish_delivery(digest_id, message_ids),
+            lambda message_ids: database.finish_delivery(digest_id, message_ids, destination.key),
             sender=deliver,
         )
     except DiscordDeliveryError as error:

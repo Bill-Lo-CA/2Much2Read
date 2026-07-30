@@ -171,10 +171,13 @@ class FakeDigestDatabase:
     def pending_digests(self) -> list[dict[str, object]]:
         return self.pending
 
-    def record_delivery_progress(self, digest_id: int, message_ids: list[str]) -> None:
+    def delivery_checkpoint(self, digest_id: int, destination_key: str) -> object:
+        return next(digest for digest in self.pending if digest["id"] == digest_id)["discord_message_ids_json"]
+
+    def record_delivery_progress(self, digest_id: int, message_ids: list[str], destination_key: str) -> None:
         self.progress.append((digest_id, message_ids))
 
-    def finish_delivery(self, digest_id: int, message_ids: list[str]) -> None:
+    def finish_delivery(self, digest_id: int, message_ids: list[str], destination_key: str) -> None:
         self.finished.append((digest_id, message_ids))
 
     def fail_delivery(self, digest_id: int, error_code: str) -> None:
@@ -686,12 +689,19 @@ def test_retry_delivery_stops_when_recording_a_failure_hits_the_database(
 
 
 def test_retry_delivery_preserves_corrupt_checkpoint_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
+    settings = Settings(
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="https://discord.example/webhook",
+    )
     database = Database(settings.database_path)
     corrupt_id = database.save_digest("daily:corrupt", "start", "end", "UTC", "corrupt")
     good_id = database.save_digest("daily:good", "start", "end", "UTC", "good")
     assert corrupt_id is not None and good_id is not None
-    database.connection.execute("UPDATE digests SET discord_message_ids_json='not json' WHERE id=?", (corrupt_id,))
+    database.connection.execute(
+        "UPDATE digests SET discord_message_ids_json='not json',discord_destination_key=? WHERE id=?",
+        (settings.discord_destinations()[0].key, corrupt_id),
+    )
     database.connection.commit()
     monkeypatch.setattr(pipeline, "deliver", lambda *args: ["discord-id"])
 

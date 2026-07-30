@@ -37,7 +37,7 @@ def send(
     content = message.replace("@", "@\u200b")
     result = SendResult(
         discord_message_ids=deliver(
-            settings.discord_webhook_url,
+            settings.discord_destination(),
             content,
             settings.discord_username,
             allowed_user_ids=mention_ids,

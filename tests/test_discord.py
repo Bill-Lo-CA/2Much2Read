@@ -4,7 +4,15 @@ import httpx
 import pytest
 import respx
 
-from two_read_runtime.discord import chunk_text, deliver, deliver_resumable, parse_message_ids
+from two_read_runtime import discord
+from two_read_runtime.discord import (
+    DiscordDeliveryError,
+    chunk_text,
+    configured_destinations,
+    deliver,
+    deliver_resumable,
+    parse_message_ids,
+)
 
 
 @pytest.mark.parametrize(
@@ -140,3 +148,85 @@ def test_deliver_resumable_restores_checkpoint_and_records_success() -> None:
     ) == ["one", "two"]
     assert progress == [["one", "two"]]
     assert delivered == [["one", "two"]]
+
+
+@respx.mock
+def test_bot_delivery_uses_v10_without_enabling_mentions() -> None:
+    destination = configured_destinations("bot", "", "secret-token", "123")[0]
+    route = respx.post("https://discord.com/api/v10/channels/123/messages").mock(
+        return_value=httpx.Response(200, json={"id": "456"})
+    )
+
+    assert deliver(destination, "hello", "ignored") == ["456"]
+    assert route.calls[0].request.headers["Authorization"] == "Bot secret-token"
+    assert json.loads(route.calls[0].request.content) == {"content": "hello", "allowed_mentions": {"parse": []}}
+
+
+@pytest.mark.parametrize(
+    ("status_code", "code"),
+    [(401, "DISCORD_BOT_UNAUTHORIZED"), (403, "DISCORD_BOT_FORBIDDEN"), (404, "DISCORD_BOT_CHANNEL_NOT_FOUND")],
+)
+@respx.mock
+def test_bot_delivery_classifies_configuration_errors(status_code: int, code: str) -> None:
+    destination = configured_destinations("bot", "", "secret-token", "123")[0]
+    respx.post("https://discord.com/api/v10/channels/123/messages").mock(return_value=httpx.Response(status_code))
+
+    with pytest.raises(DiscordDeliveryError, match=code) as error:
+        deliver(destination, "hello", "ignored")
+
+    assert "secret-token" not in str(error.value)
+
+
+def test_uses_environment_proxy_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
+    client_options: list[dict[str, object]] = []
+
+    class Client:
+        def __init__(self, **options: object) -> None:
+            client_options.append(options)
+
+        def __enter__(self) -> "Client":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def post(self, *args: object, **kwargs: object) -> httpx.Response:
+            return httpx.Response(200, json={"id": "123"})
+
+    monkeypatch.setattr(discord.httpx, "Client", Client)
+
+    response = discord._request(configured_destinations("bot", "", "token", "123")[0], "hello", "ignored", {"parse": []})
+
+    assert response.status_code == 200
+    assert client_options == [{"timeout": 30}]
+
+
+def test_does_not_retry_ambiguous_post_errors(monkeypatch: pytest.MonkeyPatch) -> None:
+    attempts = 0
+
+    def request(*args: object) -> httpx.Response:
+        nonlocal attempts
+        attempts += 1
+        raise httpx.ReadTimeout("response lost")
+
+    monkeypatch.setattr(discord, "_request", request)
+
+    with pytest.raises(DiscordDeliveryError, match="DISCORD_DELIVERY_FAILED"):
+        deliver(configured_destinations("bot", "", "token", "123")[0], "hello", "ignored")
+
+    assert attempts == 1
+
+
+@pytest.mark.parametrize(
+    ("mode", "webhook_url", "bot_token", "channel_id"),
+    [
+        ("webhook", "", "", ""),
+        ("bot", "", "", "123"),
+        ("bot", "", "token", "bad"),
+        ("both", "url", "token", "123"),
+        ("invalid", "url", "token", "123"),
+    ],
+)
+def test_rejects_incomplete_delivery_destinations(mode: str, webhook_url: str, bot_token: str, channel_id: str) -> None:
+    with pytest.raises(DiscordDeliveryError, match="DISCORD_CONFIG_INVALID"):
+        configured_destinations(mode, webhook_url, bot_token, channel_id)

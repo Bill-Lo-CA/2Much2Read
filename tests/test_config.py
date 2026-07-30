@@ -145,6 +145,16 @@ def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, mo
     assert settings.database_path == Path("/tmp/2much2read.sqlite3")
 
 
+def test_bot_delivery_settings_require_a_numeric_channel() -> None:
+    destination = Settings(
+        discord_delivery_mode="bot", discord_bot_token="secret", discord_bot_channel_id="123"
+    ).discord_destination()
+
+    assert (destination.transport, destination.bot_channel_id) == ("bot", "123")
+    with pytest.raises(ValueError, match="DISCORD_CONFIG_INVALID"):
+        Settings(discord_delivery_mode="bot", discord_bot_token="secret", discord_bot_channel_id="bad").discord_destination()
+
+
 def test_subscription_file_update_restores_both_files_when_second_replace_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

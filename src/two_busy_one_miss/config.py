@@ -3,13 +3,14 @@ from __future__ import annotations
 import re
 from datetime import time, timedelta
 from pathlib import Path
-from typing import Any, Self
+from typing import Any, Literal, Self
 from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
+from two_read_runtime.discord import DiscordDestination, configured_destination, configured_destinations
 from two_read_runtime.paths import config_dir, data_dir, env_file
 
 MAX_REMINDER_OFFSET = timedelta(days=366)
@@ -106,8 +107,11 @@ class Settings(BaseSettings):
     reminders_config_path: Path = Field(default_factory=lambda: config_dir() / "reminders.yaml")
     database_path: Path = Field(default_factory=lambda: data_dir() / "2busy1miss.sqlite3")
     lock_path: Path = Field(default_factory=lambda: data_dir() / "2busy1miss.lock")
+    discord_delivery_mode: Literal["webhook", "bot"] = "webhook"
     discord_webhook_url: str = ""
     discord_username: str = "2busy1miss"
+    discord_bot_token: str = ""
+    discord_bot_channel_id: str = ""
     reminder_timezone: str = "America/Montreal"
     reminder_lookahead_days: int = Field(default=7, ge=1, le=366)
     agenda_schedule_time: time = time(21)
@@ -126,6 +130,16 @@ class Settings(BaseSettings):
 
     def __init__(self, **data: Any) -> None:
         super().__init__(_env_file=settings_env_file(), **data)
+
+    def discord_destinations(self) -> list[DiscordDestination]:
+        return configured_destinations(
+            self.discord_delivery_mode, self.discord_webhook_url, self.discord_bot_token, self.discord_bot_channel_id
+        )
+
+    def discord_destination(self) -> DiscordDestination:
+        return configured_destination(
+            self.discord_delivery_mode, self.discord_webhook_url, self.discord_bot_token, self.discord_bot_channel_id
+        )
 
 
 def load_reminders(path: Path) -> RemindersConfig:

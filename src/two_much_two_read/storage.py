@@ -14,7 +14,7 @@ from urllib.parse import urlsplit
 from .digest import canonical_url, normalized_title
 from .schemas import DigestItem, EmailExtraction, ItemAnalysis, ResolvedContent, SourceDocument
 
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS documents(
@@ -56,7 +56,8 @@ CREATE TABLE IF NOT EXISTS digests(
   id INTEGER PRIMARY KEY, digest_key TEXT NOT NULL UNIQUE, period_start TEXT NOT NULL, period_end TEXT NOT NULL,
   timezone TEXT NOT NULL, content_sha256 TEXT NOT NULL, rendered_content TEXT NOT NULL,
   state TEXT NOT NULL CHECK(state IN ('pending','delivered','failed')), delivery_attempt_count INTEGER NOT NULL DEFAULT 0,
-  discord_message_ids_json TEXT, delivered_at TEXT, last_error_code TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+  discord_message_ids_json TEXT, discord_destination_key TEXT, delivered_at TEXT, last_error_code TEXT,
+  created_at TEXT NOT NULL, updated_at TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS runs(
   id INTEGER PRIMARY KEY, run_type TEXT NOT NULL, started_at TEXT NOT NULL, finished_at TEXT, status TEXT NOT NULL,
@@ -112,6 +113,9 @@ class Database:
             version = 4
         if version == 4:
             self._migrate_v4_to_v5()
+            version = 5
+        if version == 5:
+            self._migrate_v5_to_v6()
         elif version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
             self.connection.close()
             raise DatabaseSchemaResetRequiredError(
@@ -159,6 +163,16 @@ class Database:
                 )"""
             )
             connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(5, datetime('now'))")
+
+    def _migrate_v5_to_v6(self) -> None:
+        with self.transaction() as connection:
+            columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(digests)")}
+            if "discord_destination_key" not in columns:
+                connection.execute("ALTER TABLE digests ADD COLUMN discord_destination_key TEXT")
+                connection.execute(
+                    "UPDATE digests SET discord_destination_key='webhook' WHERE discord_message_ids_json IS NOT NULL"
+                )
+            connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(6, datetime('now'))")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -624,20 +638,36 @@ class Database:
                 connection.execute(f"DELETE FROM {table}")
         return counts
 
-    def finish_delivery(self, digest_id: int, message_ids: list[str]) -> None:
+    def delivery_checkpoint(self, digest_id: int, destination_key: str) -> object:
+        row = self.connection.execute(
+            "SELECT discord_message_ids_json,discord_destination_key FROM digests WHERE id=?", (digest_id,)
+        ).fetchone()
+        if row is None:
+            raise ValueError(f"digest {digest_id} not found")
+        previous_key = row["discord_destination_key"]
+        if previous_key != destination_key:
+            self.connection.execute(
+                "UPDATE digests SET discord_message_ids_json=NULL,discord_destination_key=?,updated_at=? WHERE id=?",
+                (destination_key, datetime.now(UTC).isoformat(), digest_id),
+            )
+            self.connection.commit()
+            return None
+        return row["discord_message_ids_json"]
+
+    def finish_delivery(self, digest_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
         now = datetime.now(UTC).isoformat()
         self.connection.execute(
-            """UPDATE digests SET state='delivered', delivered_at=?, discord_message_ids_json=?,
+            """UPDATE digests SET state='delivered', delivered_at=?, discord_message_ids_json=?,discord_destination_key=?,
             delivery_attempt_count=delivery_attempt_count+1, last_error_code=NULL, updated_at=? WHERE id=?""",
-            (now, json.dumps(message_ids), now, digest_id),
+            (now, json.dumps(message_ids), destination_key, now, digest_id),
         )
         self.connection.commit()
 
-    def record_delivery_progress(self, digest_id: int, message_ids: list[str]) -> None:
+    def record_delivery_progress(self, digest_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
         now = datetime.now(UTC).isoformat()
         self.connection.execute(
-            "UPDATE digests SET discord_message_ids_json=?, updated_at=? WHERE id=?",
-            (json.dumps(message_ids), now, digest_id),
+            "UPDATE digests SET discord_message_ids_json=?,discord_destination_key=?,updated_at=? WHERE id=?",
+            (json.dumps(message_ids), destination_key, now, digest_id),
         )
         self.connection.commit()
 

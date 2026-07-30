@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from datetime import date, datetime, time, timedelta
-from hashlib import sha256
 from typing import Literal
 from zoneinfo import ZoneInfo
 
@@ -176,8 +175,9 @@ def _sync_scheduled_reminders(
 def _create_agenda_delivery(
     database: Database, settings: Settings, day: date, timezone: ZoneInfo, content: str, *, force: bool
 ) -> int | None:
-    destination_hash = sha256(settings.discord_webhook_url.encode()).hexdigest()
-    return database.create_agenda_delivery(day, timezone.key, destination_hash, content, force=force)
+    return database.create_agenda_delivery(
+        day, timezone.key, settings.discord_destination().key.removeprefix("webhook:"), content, force=force
+    )
 
 
 def _deliver_agenda(
@@ -188,7 +188,7 @@ def _deliver_agenda(
 
     try:
         return deliver_resumable(
-            settings.discord_webhook_url,
+            settings.discord_destination(),
             content,
             settings.discord_username,
             stored_message_ids,
@@ -213,18 +213,20 @@ def _dispatch_due_reminders(database: Database, settings: Settings, now: datetim
             expired += 1
             continue
 
-        def save_progress(message_ids: list[str], target_id: int = attempt_id) -> None:
-            database.record_delivery_progress(target_id, message_ids)
-
-        def finish_delivery(message_ids: list[str], target_id: int = attempt_id) -> None:
-            database.finish_delivery(target_id, message_ids)
-
         try:
+            destination = settings.discord_destination()
+
+            def save_progress(message_ids: list[str], target_id: int = attempt_id, key: str = destination.key) -> None:
+                database.record_delivery_progress(target_id, message_ids, key)
+
+            def finish_delivery(message_ids: list[str], target_id: int = attempt_id, key: str = destination.key) -> None:
+                database.finish_delivery(target_id, message_ids, key)
+
             deliver_resumable(
-                settings.discord_webhook_url,
+                destination,
                 str(attempt["content"]),
                 settings.discord_username,
-                attempt["discord_message_ids_json"],
+                database.delivery_checkpoint(attempt_id, destination.key),
                 save_progress,
                 finish_delivery,
                 sender=deliver,
@@ -323,7 +325,7 @@ def next_day_agenda(
 def retry_agenda(settings: Settings, day: date) -> AgendaRetryResult:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
-    destination_hash = sha256(settings.discord_webhook_url.encode()).hexdigest()
+    destination_hash = settings.discord_destination().key.removeprefix("webhook:")
     delivered = 0
     failed = 0
     failed_by_error_code: dict[str, int] = {}
