@@ -513,15 +513,20 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
                 digest_id = int(digest["id"])
                 if not hasattr(active_database, "has_digest_deliveries") or not active_database.has_digest_deliveries(digest_id):
                     try:
+
+                        def save_legacy_progress(message_ids: list[str], target_id: int = digest_id) -> None:
+                            active_database.record_delivery_progress(target_id, message_ids)
+
+                        def finish_legacy_delivery(message_ids: list[str], target_id: int = digest_id) -> None:
+                            active_database.finish_delivery(target_id, message_ids)
+
                         deliver_resumable(
                             settings.discord_destination(),
                             str(digest["rendered_content"]),
                             settings.discord_username,
                             digest["discord_message_ids_json"],
-                            lambda message_ids, target_id=digest_id: active_database.record_delivery_progress(
-                                target_id, message_ids
-                            ),
-                            lambda message_ids, target_id=digest_id: active_database.finish_delivery(target_id, message_ids),
+                            save_legacy_progress,
+                            finish_legacy_delivery,
                             sender=deliver,
                         )
                         delivered += 1
@@ -593,13 +598,20 @@ def deliver_digest(settings: Settings, database: Database, digest_id: int) -> tu
         delivery_id = int(delivery["id"])
         destination = next(destination for destination in destinations if destination.key == delivery["destination_key"])
         try:
+
+            def save_progress(message_ids: list[str], target_id: int = delivery_id) -> None:
+                database.record_digest_delivery_progress(target_id, message_ids)
+
+            def finish_delivery(message_ids: list[str], target_id: int = delivery_id) -> None:
+                database.finish_digest_delivery(target_id, message_ids, destinations)
+
             deliver_resumable(
                 destination,
                 str(delivery["rendered_content"]),
                 settings.discord_username,
                 delivery["discord_message_ids_json"],
-                lambda message_ids, target_id=delivery_id: database.record_digest_delivery_progress(target_id, message_ids),
-                lambda message_ids, target_id=delivery_id: database.finish_digest_delivery(target_id, message_ids, destinations),
+                save_progress,
+                finish_delivery,
                 sender=deliver,
             )
             delivered += 1
