@@ -37,7 +37,8 @@ The environment files may contain duplicate variable names because each command 
 Each private environment file selects one mode; the default remains `webhook`:
 
 ```dotenv
-DISCORD_DELIVERY_MODE=webhook # webhook, bot, or both
+# Select one: webhook, bot, or both.
+DISCORD_DELIVERY_MODE=webhook
 DISCORD_WEBHOOK_URL=
 DISCORD_USERNAME=2much2read
 DISCORD_BOT_TOKEN=

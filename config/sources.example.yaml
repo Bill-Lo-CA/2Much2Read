@@ -29,5 +29,4 @@ sources:
     max_age_hours: 36
     min_score: 0
     min_comments: 0
-    require_full_text: true
     allow_metadata_fallback: false
