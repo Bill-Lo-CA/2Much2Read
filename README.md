@@ -1,6 +1,6 @@
 # 2Much2Read
 
-Three local-first tools that post only their final output to a private Discord webhook:
+Three local-first tools that post only their final output to a private Discord destination:
 
 - `2much2read` reads configured Gmail newsletters, summarizes them with local Ollama, and records digests in SQLite.
 - `2busy1miss` syncs configured Google Calendar events into SQLite reminder jobs,
@@ -32,13 +32,39 @@ Both tools use one private root, not the repository `.env`:
 
 The environment files may contain duplicate variable names because each command and systemd unit loads only its own file. Do not source them together. The installers set both runtime directories to mode `0700`, set copied environment/YAML files, OAuth credentials/tokens, and lock files to `0600`, and keep SQLite databases inside the protected data directory.
 
+## Discord delivery
+
+Each private environment file selects one mode; the default remains `webhook`:
+
+```dotenv
+DISCORD_DELIVERY_MODE=webhook # webhook, bot, or both
+DISCORD_WEBHOOK_URL=
+DISCORD_USERNAME=2much2read
+DISCORD_BOT_TOKEN=
+DISCORD_BOT_CHANNEL_ID=
+```
+
+`webhook` requires `DISCORD_WEBHOOK_URL`; `bot` requires a bot token and numeric
+channel ID; `both` independently sends to each. Newsletter and Calendar deliveries
+persist one checkpoint per destination, so a retry sends only a failed destination.
+`2bored1made` intentionally remains stateless: it reports a partial result when one
+destination fails, and a manual resend is required.
+
+To use bot mode, create a Discord application and bot manually, invite it only to
+the private server/channel it should write to, and grant `View Channel` and `Send
+Messages`. This REST-only sender needs no Gateway connection or privileged intents.
+Keep `DISCORD_BOT_TOKEN` in the installer-created `0600` environment file; never
+place it in YAML, the repository, or command-line arguments. `doctor` validates the
+configured mode without sending; `doctor --send-test` explicitly posts one test
+message to each configured destination.
+
 ## Destructive reset
 
 Existing 2Much2Read, newsletter-digest, and 2busy1miss runtime data is unsupported and is not migrated. Before installing this version, run `sh scripts/legacy_cleanup.sh`; it permanently deletes all listed configuration, OAuth credentials, tokens, and SQLite data. It removes exactly these legacy locations: `~/.config/2Much2Read`, `~/.config/2much2read`, `~/.config/newsletter-digest`, `~/.config/2busy1miss`, their matching `~/.local/share/` directories, the checkout `.env`, and the `newsletter-digest`, `2much2read`, and `2busy1miss` user unit files. The new `2much2read-runtime` roots and `*-runtime` units are not cleanup targets, so the script is safe to run again.
 
 ## 2much2read
 
-Requirements: Gmail API desktop OAuth credentials, a Discord webhook, and local Ollama.
+Requirements: Gmail API desktop OAuth credentials, a Discord webhook or bot, and local Ollama.
 
 ```bash
 uv sync --all-groups
@@ -73,9 +99,25 @@ uv run 2much2read delivery retry
 uv run 2much2read delivery reset-checkpoint --delivery-id ID
 ```
 
+### Hacker News sources
+
+Add an enabled `type: hackernews` entry to `sources.yaml`; the disabled example
+in `config/sources.example.yaml` is ready to copy. Supported feeds are
+`topstories`, `beststories`, `newstories`, `askstories`, and `showstories`.
+`max_story_candidates` is capped at 200, `max_articles_per_run` at 30, and
+`max_age_hours` at 168. External stories enter a digest only after bounded,
+SSRF-safe full-text extraction by default; set `allow_metadata_fallback: true`
+only when a clearly marked metadata-only result is acceptable.
+
+```bash
+uv run 2much2read hackernews list --source hn-best
+uv run 2much2read hackernews inspect --source hn-best --story-id ID --fetch-article
+uv run 2much2read run --source hn-best --dry-run
+```
+
 ## 2busy1miss
 
-Requirements: Google Calendar API desktop OAuth credentials, a Discord webhook, and local reminder rules.
+Requirements: Google Calendar API desktop OAuth credentials, a Discord webhook or bot, and local reminder rules.
 
 ```bash
 uv sync --all-groups
@@ -136,6 +178,7 @@ This is a direct notification skeleton: no database, retry queue, YAML hooks, or
 uv sync --all-groups
 sh scripts/install-2bored1made.sh
 # Edit ~/.config/2much2read-runtime/.2bored1made.env:
+# DISCORD_DELIVERY_MODE=webhook
 # DISCORD_WEBHOOK_URL=...
 # DISCORD_ALLOWED_MENTION_IDS=123456789012345678
 uv run 2bored1made send --message "Build failed" --mention 123456789012345678
@@ -154,7 +197,7 @@ send it later with `uv run 2much2read delivery retry`. Durable digest, reminder,
 and agenda deliveries checkpoint each confirmed Discord chunk, so a retry
 only sends the remaining chunks.
 
-If a stored Discord checkpoint is corrupt, reset only its known failed record,
+If a stored Discord checkpoint is corrupt, reset only its known failed destination record,
 then run the usual retry command:
 
 ```bash
@@ -202,7 +245,7 @@ journalctl --user -u 2much2read-runtime.service -u 2busy1miss-runtime.service -u
 ```
 
 `LOCK_CONTENDED` means another local run is active; retry after it finishes.
-`DISCORD_DELIVERY_FAILED` leaves a durable delivery pending, so use the relevant
+`DISCORD_DELIVERY_FAILED` leaves a durable destination delivery pending, so use the relevant
 retry command after fixing the webhook or network. `doctor` checks local setup
 without posting unless `--send-test` is explicitly supplied.
 

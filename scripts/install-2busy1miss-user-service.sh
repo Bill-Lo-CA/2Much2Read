@@ -103,7 +103,7 @@ esac
 
 printf '%s\n' \
   "Config: $config_dir" \
-  "Edit Discord webhook: $env_file" \
+  "Edit Discord delivery settings: $env_file" \
   "Authorize calendar: cd $repo_dir && uv run 2busy1miss auth calendar" \
   "Check setup: cd $repo_dir && uv run 2busy1miss doctor" \
   "Dry run: cd $repo_dir && uv run 2busy1miss run --dry-run" \

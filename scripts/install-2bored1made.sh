@@ -15,5 +15,5 @@ if [ ! -f "$env_file" ]; then
 fi
 
 printf '%s\n' \
-  "Edit Discord webhook and allowed user IDs: $env_file" \
+  "Edit Discord delivery settings and allowed user IDs: $env_file" \
   "Send: cd $repo_dir && uv run 2bored1made send --message 'Hello' --mention DISCORD_USER_ID"
