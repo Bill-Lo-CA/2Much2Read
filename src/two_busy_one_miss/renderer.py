@@ -1,10 +1,9 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import date, datetime, time, timedelta
 from urllib.parse import urlsplit
-
-from two_read_runtime.discord import sanitize_discord_text
 
 from .google_calendar import CalendarEvent
 from .rules import ReminderCandidate
@@ -35,9 +34,14 @@ def render_reminder(candidate: ReminderCandidate) -> str:
 
 
 def _agenda_cell(value: str) -> str:
-    return " ".join(
-        sanitize_discord_text(URL.sub("", value).replace("@", "＠").replace("`", "ˋ")).replace("＠", "@\u200b").split()
+    value = URL.sub("", value).replace("\r\n", "\n").replace("\r", "\n")
+    value = "".join(
+        character
+        for character in value
+        if character in "\n\t"
+        or (ord(character) >= 0x20 and not 0x7F <= ord(character) <= 0x9F and unicodedata.category(character) != "Cf")
     )
+    return " ".join(value.replace("@", "@\u200b").replace("`", "ˋ").split())
 
 
 def _valid_link(raw_url: str) -> tuple[str, str] | None:

@@ -143,8 +143,8 @@ def test_render_agenda_keeps_event_text_inside_code_block() -> None:
         calendar_name="Main",
         event_id="event-1",
         instance_id="event-1",
-        title="Deploy ``` now",
-        location="Room\n2",
+        title="API_v2 (room [3]) ```",
+        location="Room\n2 *draft*",
         start=datetime(2026, 7, 9, 7, 0, tzinfo=ZoneInfo("America/Montreal")),
         end=datetime(2026, 7, 9, 8, 0, tzinfo=ZoneInfo("America/Montreal")),
         all_day=False,
@@ -152,9 +152,9 @@ def test_render_agenda_keeps_event_text_inside_code_block() -> None:
 
     rendered = render_agenda(date(2026, 7, 9), [event])
 
-    assert "``` now" not in rendered
-    assert "Deploy ˋˋˋ now" in rendered
-    assert "Room 2" in rendered
+    assert "API_v2 (room [3]) ˋˋˋ" in rendered
+    assert "Room 2 *draft*" in rendered
+    assert "\\_" not in rendered
 
 
 def test_render_agenda_shows_valid_location_hosts_and_rejects_credentials() -> None:
