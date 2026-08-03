@@ -23,7 +23,7 @@ from .mail_operations import (
     list_mails,
     reconcile_labels,
 )
-from .ollama import OllamaClient, OllamaSchemaError, create_ollama_client
+from .ollama import OllamaClient, OllamaSchemaError, close_ollama_client, create_ollama_client
 from .pipeline import reset_corrupt_delivery, retry_delivery, run_pipeline
 from .subscription_operations import (
     CATEGORY_OPTIONS,
@@ -160,6 +160,7 @@ def subscriptions_sync(
     limit: Annotated[int, typer.Option(min=1, max=500)] = 100,
 ) -> None:
     settings = Settings()
+    ollama: OllamaClient | None = None
     if apply:
         ollama = create_ollama_client(settings)
 
@@ -168,7 +169,11 @@ def subscriptions_sync(
 
     else:
         category_picker = choose_category
-    invoke(lambda: sync_subscriptions(settings, gmail_client(settings), limit, apply, category_picker))
+    try:
+        invoke(lambda: sync_subscriptions(settings, gmail_client(settings), limit, apply, category_picker))
+    finally:
+        if ollama is not None:
+            close_ollama_client(ollama)
 
 
 @delivery_app.command("retry")

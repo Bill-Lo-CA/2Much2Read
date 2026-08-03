@@ -22,7 +22,7 @@ def newsletter_settings(tmp_path: Path, newsletter_sources_path: Path) -> Newsle
         sources_config_path=newsletter_sources_path,
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
 
 
@@ -43,7 +43,7 @@ def calendar_settings(tmp_path: Path) -> CalendarSettings:
         reminders_config_path=reminders_path,
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
 
 

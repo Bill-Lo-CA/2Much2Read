@@ -181,7 +181,7 @@ def test_retry_delivery_preserves_legacy_bot_checkpoint_in_both_mode(tmp_path: P
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
         discord_delivery_mode="both",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
         discord_bot_token="token",
         discord_bot_channel_id="123",
     )
@@ -233,7 +233,7 @@ def test_retry_retires_a_removed_failed_destination(tmp_path: Path, monkeypatch:
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
         discord_delivery_mode="both",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
         discord_bot_token="token",
         discord_bot_channel_id="123",
     )
@@ -275,7 +275,7 @@ def test_reset_legacy_corrupt_reminder_checkpoint(tmp_path: Path) -> None:
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
     database = Database(settings.database_path)
     attempt_id = database.create_attempt(item, "legacy reminder")
@@ -296,7 +296,7 @@ def test_reset_reminder_does_not_fall_back_to_a_colliding_legacy_attempt(tmp_pat
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
     destinations = settings.discord_destinations()
     start = datetime(2026, 7, 8, 10, tzinfo=ZoneInfo("America/Montreal"))
@@ -335,7 +335,7 @@ def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkey
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
-        discord_webhook_url="https://busy.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
     windows: list[tuple[datetime, datetime]] = []
     deliveries: list[str] = []
@@ -389,7 +389,7 @@ def test_manual_agenda_is_idempotent_and_forceable(tmp_path: Path, monkeypatch) 
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
-        discord_webhook_url="https://busy.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
     delivered: list[str] = []
 
@@ -424,7 +424,7 @@ def test_agenda_retries_only_the_failed_destination(tmp_path: Path, monkeypatch)
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
         discord_delivery_mode="both",
-        discord_webhook_url="https://busy.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
         discord_bot_token="token",
         discord_bot_channel_id="123",
     )
@@ -617,7 +617,7 @@ def test_retry_agenda_delivers_only_the_current_destination(tmp_path: Path, monk
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
-        discord_webhook_url="https://busy.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
     day = date(2026, 7, 9)
     database = Database(settings.database_path)
@@ -646,7 +646,7 @@ def test_reset_agenda_checkpoint_allows_retry(tmp_path: Path, monkeypatch) -> No
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
-        discord_webhook_url="https://busy.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
     day = date(2026, 7, 9)
     database = Database(settings.database_path)
@@ -675,7 +675,7 @@ def test_run_reads_scheduled_jobs_without_calendar_and_expires_started_events(tm
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
-        discord_webhook_url="https://busy.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
     database = Database(settings.database_path)
     current = datetime(2026, 7, 9, 10, 0, tzinfo=timezone)

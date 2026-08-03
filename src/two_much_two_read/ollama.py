@@ -11,6 +11,8 @@ from langdetect_zh import LangDetectException as ChineseLangDetectException
 from langdetect_zh import detect as detect_chinese
 from pydantic import BaseModel, ValidationError
 
+from two_read_runtime.endpoint_policy import validate_ollama_endpoint
+
 from .config import Settings
 from .schemas import ArticleAnalysis, DigestReview, EmailExtraction
 
@@ -114,14 +116,28 @@ class OllamaClient:
         keep_alive: str = "10m",
         digest_language: str = "zh-TW",
         review_model: str = "qwen3:8b",
+        *,
+        allow_remote: bool = False,
+        trust_env: bool = False,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
+        endpoint = validate_ollama_endpoint(base_url, allow_remote=allow_remote)
+        self.base_url = endpoint.url
         self.model = model
         self.timeout = timeout
         self.num_ctx = num_ctx
         self.keep_alive = keep_alive
         self.digest_language = digest_language
         self.review_model = review_model
+        self._client = httpx.Client(timeout=timeout, trust_env=trust_env)
+
+    def close(self) -> None:
+        self._client.close()
+
+    def __enter__(self) -> OllamaClient:
+        return self
+
+    def __exit__(self, *_: object) -> None:
+        self.close()
 
     def extract(
         self,
@@ -145,7 +161,7 @@ class OllamaClient:
             {"role": "user", "content": prompt},
         ]
         for attempt in range(2):
-            response = httpx.post(
+            response = self._client.post(
                 f"{self.base_url}/api/chat",
                 json={
                     "model": self.model,
@@ -220,7 +236,7 @@ class OllamaClient:
         validation_error: str | None = None
         for attempt in range(2):
             repair = "" if validation_error is None else f"\nvalidation_error={validation_error!r}\nRepair to valid schema JSON."
-            response = httpx.post(
+            response = self._client.post(
                 f"{self.base_url}/api/chat",
                 json={
                     "model": self.model,
@@ -263,7 +279,7 @@ class OllamaClient:
     def classify_subscription(self, name: str, sender: str, list_id: str | None, subject: str | None) -> str:
         schema = SubscriptionClassification.model_json_schema()
         metadata = json.dumps({"name": name, "sender": sender, "list_id": list_id, "subject": subject})
-        response = httpx.post(
+        response = self._client.post(
             f"{self.base_url}/api/chat",
             json={
                 "model": self.model,
@@ -297,7 +313,7 @@ class OllamaClient:
             f"maximum_selected={maximum}\nSchema: {json.dumps(schema)}\n"
             f"<digest_candidates>\n{json.dumps(candidates, ensure_ascii=False)}\n</digest_candidates>"
         )
-        response = httpx.post(
+        response = self._client.post(
             f"{self.base_url}/api/chat",
             json={
                 "model": self.review_model,
@@ -331,7 +347,7 @@ class OllamaClient:
 
     def unload(self, model: str) -> None:
         try:
-            response = httpx.post(
+            response = self._client.post(
                 f"{self.base_url}/api/generate",
                 json={"model": model, "keep_alive": 0, "stream": False},
                 timeout=self.timeout,
@@ -350,4 +366,12 @@ def create_ollama_client(settings: Settings) -> OllamaClient:
         settings.ollama_keep_alive,
         settings.digest_language,
         settings.ollama_review_model,
+        allow_remote=settings.ollama_allow_remote,
+        trust_env=settings.ollama_trust_env,
     )
+
+
+def close_ollama_client(client: object) -> None:
+    close = getattr(client, "close", None)
+    if callable(close):
+        close()

@@ -18,7 +18,7 @@ from .command_models import (
 from .config import GmailSource, Settings, load_sources
 from .gmail import FilterStatus, GmailClient, credentials, display_id, message_headers
 from .mime import extract_gmail_payload
-from .ollama import create_ollama_client
+from .ollama import close_ollama_client, create_ollama_client
 from .storage import Database
 from .subscription_operations import configured_candidates
 
@@ -97,11 +97,11 @@ def inspect_mail(settings: Settings, selector: MailSelector, message_id: str, li
             if source is not None and not isinstance(source, GmailSource):
                 raise ValueError(f"source {source_id!r} is not a Gmail source")
             max_items = source.max_items_per_email if source else 10
-            extraction = (
-                create_ollama_client(settings)
-                .extract(source_id, llm_input, len(text) > 45_000, max_items)
-                .model_dump(mode="json")
-            )
+            ollama = create_ollama_client(settings)
+            try:
+                extraction = ollama.extract(source_id, llm_input, len(text) > 45_000, max_items).model_dump(mode="json")
+            finally:
+                close_ollama_client(ollama)
         headers = payload.get("headers", [])
         label_ids = message.get("labelIds", [])
         return MailInspectionResult(

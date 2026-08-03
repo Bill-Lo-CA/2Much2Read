@@ -4,6 +4,7 @@ import httpx
 import pytest
 import respx
 
+from two_much_two_read import ollama
 from two_much_two_read.config import Settings
 from two_much_two_read.ollama import OllamaClient, OllamaSchemaError, create_ollama_client
 
@@ -41,6 +42,26 @@ def valid_article_result() -> dict[str, object]:
     }
 
 
+def test_client_uses_explicit_proxy_policy(monkeypatch: pytest.MonkeyPatch) -> None:
+    options: list[dict[str, object]] = []
+
+    class Client:
+        def __init__(self, **kwargs: object) -> None:
+            options.append(kwargs)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(ollama.httpx, "Client", Client)
+
+    local_client = OllamaClient()
+    remote_client = OllamaClient("https://ollama.example", allow_remote=True, trust_env=True)
+    local_client.close()
+    remote_client.close()
+
+    assert options == [{"timeout": 300, "trust_env": False}, {"timeout": 300, "trust_env": True}]
+
+
 def result_with_prose(overview: str, summary: str, significance: str) -> dict[str, object]:
     result = valid_result()
     result["overview_zh_tw"] = overview
@@ -69,7 +90,8 @@ TRADITIONAL_CHINESE = ("這是一份關於新模型的每日摘要。", "該模�
 
 
 def test_create_ollama_client_uses_digest_language() -> None:
-    assert create_ollama_client(Settings(digest_language="zh-TW")).digest_language == "zh-TW"
+    with create_ollama_client(Settings(digest_language="zh-TW")) as client:
+        assert client.digest_language == "zh-TW"
 
 
 @respx.mock

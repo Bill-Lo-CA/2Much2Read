@@ -138,6 +138,8 @@ class Settings(BaseSettings):
     database_path: Path = Field(default_factory=lambda: data_dir() / "2much2read.sqlite3")
     lock_path: Path = Field(default_factory=lambda: data_dir() / "2much2read.lock")
     ollama_base_url: str = "http://127.0.0.1:11434"
+    ollama_allow_remote: bool = False
+    ollama_trust_env: bool = False
     ollama_model: str = "llama3.2:3b"
     ollama_review_model: str = "qwen3:8b"
     ollama_num_ctx: int = 16384

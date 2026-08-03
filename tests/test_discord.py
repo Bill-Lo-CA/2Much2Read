@@ -83,17 +83,26 @@ def test_chunk_text_keeps_long_link_footers_outside_fences() -> None:
 @respx.mock
 def test_disables_mentions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("HTTPS_PROXY", "socks5://127.0.0.1:1080")
-    route = respx.post("https://discord.example/webhook").mock(return_value=httpx.Response(200, json={"id": "123"}))
-    assert deliver("https://discord.example/webhook", "hello", "2much2read") == ["123"]
+    route = respx.post("https://discord.com/api/webhooks/123456789012345678/test-webhook-token").mock(
+        return_value=httpx.Response(200, json={"id": "123"})
+    )
+    assert deliver("https://discord.com/api/webhooks/123456789012345678/test-webhook-token", "hello", "2much2read") == ["123"]
     assert route.calls[0].request.read()
     assert b'"allowed_mentions":{"parse":[]}' in route.calls[0].request.content
 
 
 @respx.mock
 def test_allows_only_explicit_user_mentions() -> None:
-    route = respx.post("https://discord.example/webhook").mock(return_value=httpx.Response(200, json={"id": "123"}))
+    route = respx.post("https://discord.com/api/webhooks/123456789012345678/test-webhook-token").mock(
+        return_value=httpx.Response(200, json={"id": "123"})
+    )
 
-    assert deliver("https://discord.example/webhook", "<@123> hello", "2bored1made", allowed_user_ids=["123"]) == ["123"]
+    assert deliver(
+        "https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
+        "<@123> hello",
+        "2bored1made",
+        allowed_user_ids=["123"],
+    ) == ["123"]
 
     assert json.loads(route.calls[0].request.content)["allowed_mentions"] == {"parse": [], "users": ["123"]}
 
@@ -101,10 +110,12 @@ def test_allows_only_explicit_user_mentions() -> None:
 @respx.mock
 def test_keeps_many_mention_tokens_intact() -> None:
     user_ids = [f"{index:019d}" for index in range(87)]
-    route = respx.post("https://discord.example/webhook").mock(return_value=httpx.Response(200, json={"id": "123"}))
+    route = respx.post("https://discord.com/api/webhooks/123456789012345678/test-webhook-token").mock(
+        return_value=httpx.Response(200, json={"id": "123"})
+    )
 
     assert deliver(
-        "https://discord.example/webhook",
+        "https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
         "body",
         "2bored1made",
         allowed_user_ids=user_ids,
@@ -120,11 +131,13 @@ def test_keeps_many_mention_tokens_intact() -> None:
 
 @respx.mock
 def test_resumes_after_saved_chunk_progress() -> None:
-    route = respx.post("https://discord.example/webhook").mock(return_value=httpx.Response(200, json={"id": "2"}))
+    route = respx.post("https://discord.com/api/webhooks/123456789012345678/test-webhook-token").mock(
+        return_value=httpx.Response(200, json={"id": "2"})
+    )
     progress: list[list[str]] = []
 
     message_ids = deliver(
-        "https://discord.example/webhook",
+        "https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
         "x" * 3000,
         "2much2read",
         message_ids=["1"],
@@ -148,7 +161,7 @@ def test_deliver_resumable_restores_checkpoint_and_records_success() -> None:
         on_progress: object,
     ) -> list[str]:
         assert (webhook_url, content, username, message_ids) == (
-            "https://discord.example/webhook",
+            "https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
             "content",
             "2much2read",
             ["one"],
@@ -158,7 +171,13 @@ def test_deliver_resumable_restores_checkpoint_and_records_success() -> None:
         return ["one", "two"]
 
     assert deliver_resumable(
-        "https://discord.example/webhook", "content", "2much2read", '["one"]', progress.append, delivered.append, sender=sender
+        "https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
+        "content",
+        "2much2read",
+        '["one"]',
+        progress.append,
+        delivered.append,
+        sender=sender,
     ) == ["one", "two"]
     assert progress == [["one", "two"]]
     assert delivered == [["one", "two"]]
@@ -193,6 +212,7 @@ def test_bot_delivery_classifies_configuration_errors(status_code: int, code: st
 
 def test_discord_client_ignores_environment_proxy_configuration(monkeypatch: pytest.MonkeyPatch) -> None:
     client_options: list[dict[str, object]] = []
+    posts = 0
 
     class Client:
         def __init__(self, **options: object) -> None:
@@ -205,20 +225,23 @@ def test_discord_client_ignores_environment_proxy_configuration(monkeypatch: pyt
             pass
 
         def post(self, *args: object, **kwargs: object) -> httpx.Response:
+            nonlocal posts
+            posts += 1
             return httpx.Response(200, json={"id": "123"})
 
     monkeypatch.setattr(discord.httpx, "Client", Client)
 
-    response = discord._request(configured_destinations("bot", "", "token", "123")[0], "hello", "ignored", {"parse": []})
+    message_ids = deliver(configured_destinations("bot", "", "token", "123")[0], "x" * 3_000, "ignored")
 
-    assert response.status_code == 200
+    assert message_ids == ["123", "123"]
+    assert posts == 2
     assert client_options == [{"timeout": 30, "trust_env": False}]
 
 
 def test_does_not_retry_ambiguous_post_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     attempts = 0
 
-    def request(*args: object) -> httpx.Response:
+    def request(*args: object, **kwargs: object) -> httpx.Response:
         nonlocal attempts
         attempts += 1
         raise httpx.ReadTimeout("response lost")
@@ -246,9 +269,26 @@ def test_rejects_incomplete_delivery_destinations(mode: str, webhook_url: str, b
 
 
 def test_both_mode_prefers_the_webhook_for_legacy_checkpoints() -> None:
-    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+    destinations = configured_destinations(
+        "both", "https://discord.com/api/webhooks/123456789012345678/test-webhook-token", "token", "123"
+    )
 
     assert legacy_destination(destinations) is destinations[0]
     assert legacy_destination(destinations, destinations[1].key) is destinations[1]
     with pytest.raises(DiscordDeliveryError, match="DISCORD_CONFIG_INVALID"):
         legacy_destination(destinations, "bot:456")
+
+
+@pytest.mark.parametrize(
+    "webhook_url",
+    [
+        "http://discord.com/api/webhooks/123/secret-token",
+        "https://example.com/api/webhooks/123/secret-token",
+        "https://discord.com/api/webhooks/123",
+    ],
+)
+def test_rejects_invalid_webhook_destinations_without_leaking_tokens(webhook_url: str) -> None:
+    with pytest.raises(DiscordDeliveryError, match="DISCORD_WEBHOOK_INVALID") as error:
+        configured_destinations("webhook", webhook_url, "", "")
+
+    assert "secret-token" not in str(error.value)

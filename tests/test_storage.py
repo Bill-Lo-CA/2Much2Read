@@ -64,7 +64,9 @@ def test_document_and_digest_idempotency(tmp_path: Path) -> None:
 
 def test_digest_destinations_retry_independently(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
-    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+    destinations = configured_destinations(
+        "both", "https://discord.com/api/webhooks/123456789012345678/test-webhook-token", "token", "123"
+    )
     digest_id = database.save_digest("daily:1", "start", "end", "UTC", "digest", destinations=destinations)
     assert digest_id is not None
 
@@ -293,7 +295,9 @@ def test_migrating_legacy_digest_does_not_adopt_unknown_webhook_checkpoint(tmp_p
     assert digest_id is not None
     database.record_delivery_progress(digest_id, ["webhook-message"], "webhook")
     database.fail_delivery(digest_id)
-    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+    destinations = configured_destinations(
+        "both", "https://discord.com/api/webhooks/123456789012345678/test-webhook-token", "token", "123"
+    )
 
     database.migrate_legacy_digest_deliveries(digest_id, destinations)
 

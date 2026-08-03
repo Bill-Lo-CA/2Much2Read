@@ -4,10 +4,12 @@ import hashlib
 import json
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal
 
 import httpx
+
+from .endpoint_policy import DISCORD_WEBHOOK_INVALID, EndpointPolicyError, validate_discord_webhook
 
 CORRUPT_MESSAGE_IDS = "DISCORD_MESSAGE_IDS_CORRUPT"
 DISCORD_CONFIG_INVALID = "DISCORD_CONFIG_INVALID"
@@ -44,6 +46,10 @@ def configured_destinations(mode: str, webhook_url: str, bot_token: str, bot_cha
     if mode in {"webhook", "both"}:
         if not webhook_url:
             raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
+        try:
+            webhook_url = validate_discord_webhook(webhook_url)
+        except EndpointPolicyError as error:
+            raise DiscordDeliveryError(error.code) from None
         destinations.append(
             DiscordDestination("webhook", f"webhook:{hashlib.sha256(webhook_url.encode()).hexdigest()}", webhook_url=webhook_url)
         )
@@ -89,6 +95,7 @@ def delivery_error_code(error: Exception) -> str:
     known_codes = {
         CORRUPT_MESSAGE_IDS,
         DISCORD_CONFIG_INVALID,
+        DISCORD_WEBHOOK_INVALID,
         "DISCORD_BOT_UNAUTHORIZED",
         "DISCORD_BOT_FORBIDDEN",
         "DISCORD_BOT_CHANNEL_NOT_FOUND",
@@ -182,14 +189,31 @@ def _chunk_with_mentions(text: str, user_ids: list[str], limit: int = 2000) -> l
 
 def _destination(value: DiscordDestination | str) -> DiscordDestination:
     if isinstance(value, DiscordDestination):
+        if value.transport == "webhook":
+            if not value.webhook_url:
+                raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
+            try:
+                webhook_url = validate_discord_webhook(value.webhook_url)
+            except EndpointPolicyError as error:
+                raise DiscordDeliveryError(error.code) from None
+            return replace(value, webhook_url=webhook_url)
         return value
     if not value:
         raise DiscordDeliveryError("DISCORD_WEBHOOK_URL is required")
-    return DiscordDestination("webhook", f"webhook:{hashlib.sha256(value.encode()).hexdigest()}", webhook_url=value)
+    try:
+        webhook_url = validate_discord_webhook(value)
+    except EndpointPolicyError as error:
+        raise DiscordDeliveryError(error.code) from None
+    return DiscordDestination("webhook", f"webhook:{hashlib.sha256(webhook_url.encode()).hexdigest()}", webhook_url=webhook_url)
 
 
 def _request(
-    destination: DiscordDestination, content: str, username: str, allowed_mentions: dict[str, list[str]]
+    destination: DiscordDestination,
+    content: str,
+    username: str,
+    allowed_mentions: dict[str, list[str]],
+    *,
+    client: httpx.Client | None = None,
 ) -> httpx.Response:
     if destination.transport == "webhook":
         assert destination.webhook_url is not None
@@ -201,8 +225,10 @@ def _request(
         params = {}
         headers = {"Authorization": f"Bot {destination.bot_token}"}
         payload = {"content": content, "allowed_mentions": allowed_mentions}
-    with httpx.Client(timeout=30, trust_env=False) as client:
+    if client is not None:
         return client.post(url, params=params, headers=headers, json=payload)
+    with httpx.Client(timeout=30, trust_env=False) as owned_client:
+        return owned_client.post(url, params=params, headers=headers, json=payload)
 
 
 def _error_for_response(destination: DiscordDestination, response: httpx.Response) -> DiscordDeliveryError:
@@ -243,30 +269,31 @@ def deliver(
     allowed_mentions: dict[str, list[str]] = {"parse": []}
     if allowed_user_ids:
         allowed_mentions["users"] = allowed_user_ids
-    for chunk in chunks[len(message_ids) :]:
-        for attempt in range(4):
-            try:
-                response = _request(resolved_destination, chunk, username, allowed_mentions)
-            except httpx.HTTPError as error:
-                raise DiscordDeliveryError() from error
-            if response.status_code == 429:
-                if attempt < 3:
-                    time.sleep(_retry_after(response, 1))
-                    continue
-                raise DiscordDeliveryError("DISCORD_RATE_LIMITED")
-            if response.status_code >= 500:
-                if attempt < 3:
-                    time.sleep(2**attempt)
-                    continue
-                raise DiscordDeliveryError()
-            if response.is_error:
-                raise _error_for_response(resolved_destination, response)
-            try:
-                message_id = str(response.json()["id"])
-            except (KeyError, TypeError, ValueError) as error:
-                raise DiscordDeliveryError() from error
-            message_ids.append(message_id)
-            if on_progress is not None:
-                on_progress(message_ids)
-            break
+    with httpx.Client(timeout=30, trust_env=False) as client:
+        for chunk in chunks[len(message_ids) :]:
+            for attempt in range(4):
+                try:
+                    response = _request(resolved_destination, chunk, username, allowed_mentions, client=client)
+                except httpx.HTTPError as error:
+                    raise DiscordDeliveryError() from error
+                if response.status_code == 429:
+                    if attempt < 3:
+                        time.sleep(_retry_after(response, 1))
+                        continue
+                    raise DiscordDeliveryError("DISCORD_RATE_LIMITED")
+                if response.status_code >= 500:
+                    if attempt < 3:
+                        time.sleep(2**attempt)
+                        continue
+                    raise DiscordDeliveryError()
+                if response.is_error:
+                    raise _error_for_response(resolved_destination, response)
+                try:
+                    message_id = str(response.json()["id"])
+                except (KeyError, TypeError, ValueError) as error:
+                    raise DiscordDeliveryError() from error
+                message_ids.append(message_id)
+                if on_progress is not None:
+                    on_progress(message_ids)
+                break
     return message_ids

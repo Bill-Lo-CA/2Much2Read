@@ -11,7 +11,10 @@ def test_send_mentions_only_configured_user_ids(monkeypatch) -> None:
     monkeypatch.setattr(
         cli,
         "Settings",
-        lambda: Settings(discord_webhook_url="https://discord.example", discord_allowed_mention_ids="123,456"),
+        lambda: Settings(
+            discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
+            discord_allowed_mention_ids="123,456",
+        ),
     )
     calls: list[tuple[DiscordDestination, str, str, list[str], list[str]]] = []
 
@@ -38,7 +41,7 @@ def test_send_mentions_only_configured_user_ids(monkeypatch) -> None:
     }
     destination, content, username, allowed_user_ids, mention_user_ids = calls[0]
     assert destination.transport == "webhook"
-    assert destination.webhook_url == "https://discord.example"
+    assert destination.webhook_url == "https://discord.com/api/webhooks/123456789012345678/test-webhook-token"
     assert (content, username, allowed_user_ids, mention_user_ids) == (
         "Build @\u200beveryone <@\u200b456>",
         "2bored1made",
@@ -62,7 +65,7 @@ def test_send_both_reports_a_partial_delivery(monkeypatch) -> None:
         "Settings",
         lambda: Settings(
             discord_delivery_mode="both",
-            discord_webhook_url="https://discord.example",
+            discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
             discord_bot_token="token",
             discord_bot_channel_id="123",
         ),

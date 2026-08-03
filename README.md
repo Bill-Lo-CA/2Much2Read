@@ -51,6 +51,12 @@ persist one checkpoint per destination, so a retry sends only a failed destinati
 `2bored1made` intentionally remains stateless: it reports a partial result when one
 destination fails, and a manual resend is required.
 
+Webhook mode accepts only HTTPS Discord webhook URLs on official Discord hosts with
+the standard `/api/webhooks/{id}/{token}` path. For `2much2read`, Ollama is local by
+default and ignores proxy environment variables. Set `OLLAMA_ALLOW_REMOTE=true` only
+for an HTTPS remote Ollama server; email and article content will then leave this
+machine. `OLLAMA_TRUST_ENV=true` explicitly enables HTTPX proxy environment handling.
+
 To use bot mode, create a Discord application and bot manually, invite it only to
 the private server/channel it should write to, and grant `View Channel` and `Send
 Messages`. This REST-only sender needs no Gateway connection or privileged intents.
