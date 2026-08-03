@@ -13,6 +13,7 @@ from two_read_runtime.discord import (
     deliver_resumable,
     legacy_destination,
     parse_message_ids,
+    sanitize_discord_text,
 )
 
 
@@ -78,6 +79,64 @@ def test_chunk_text_keeps_long_link_footers_outside_fences() -> None:
     assert all(len(chunk) <= 2000 for chunk in chunks)
     assert chunks[0].endswith("\n```")
     assert "\n".join(chunk.removeprefix(f"({index}/{len(chunks)}) ") for index, chunk in enumerate(chunks[1:], 2)) == links
+
+
+def test_sanitize_discord_text_neutralizes_links_and_urls() -> None:
+    sanitized = sanitize_discord_text("[example](https://example.com) https://example.net <https://example.org>")
+
+    assert "https://" not in sanitized
+    assert "[example](" not in sanitized
+    assert r"\<https" in sanitized
+
+
+def test_sanitize_discord_text_neutralizes_discord_markdown() -> None:
+    sanitized = sanitize_discord_text("```python\n||secret||\n# heading\n> quote\n**bold** _italic_ ~~strike~~")
+
+    assert "```" not in sanitized
+    assert "||" not in sanitized
+    assert "\n# " not in sanitized
+    assert "\n> " not in sanitized
+    assert "**" not in sanitized
+    assert "~~" not in sanitized
+
+
+def test_sanitize_discord_text_neutralizes_mentions() -> None:
+    sanitized = sanitize_discord_text("@everyone @here <@123> <@!456> <@&789>")
+
+    assert "@everyone" not in sanitized
+    assert "@here" not in sanitized
+    assert "<@" not in sanitized
+    assert "＠everyone" in sanitized
+    assert "<＠123" in sanitized
+
+
+def test_sanitize_discord_text_removes_controls_and_preserves_readable_text() -> None:
+    sanitized = sanitize_discord_text(
+        "繁體中文 日本語 Français\r\n\tif (x[0] >= 1) { return x; }\u0000\u001b\u007f\u0085\u202ehidden"
+    )
+
+    assert "繁體中文 日本語 Français" in sanitized
+    assert "\n\t" in sanitized
+    assert "if" in sanitized and "x" in sanitized and "0" in sanitized and ">=" in sanitized
+    assert all(control not in sanitized for control in ("\x00", "\x1b", "\x7f", "\x85", "\u202e"))
+
+
+def test_sanitized_expanded_text_still_chunks_at_discord_limit() -> None:
+    sanitized = sanitize_discord_text("*[]()_~|#>`!\\" * 500)
+
+    assert len(sanitized) > 2_000
+    assert all(len(chunk) <= 2_000 for chunk in chunk_text(sanitized))
+
+
+@respx.mock
+def test_deliver_leaves_application_owned_urls_untouched() -> None:
+    route = respx.post("https://discord.com/api/webhooks/123456789012345678/test-webhook-token").mock(
+        return_value=httpx.Response(200, json={"id": "123"})
+    )
+    content = "Open https://calendar.example/event/123"
+
+    assert deliver("https://discord.com/api/webhooks/123456789012345678/test-webhook-token", content, "2much2read") == ["123"]
+    assert json.loads(route.calls[0].request.content)["content"] == content
 
 
 @respx.mock

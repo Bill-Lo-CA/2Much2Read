@@ -1,11 +1,13 @@
 from __future__ import annotations
 
+import re
 from datetime import date, datetime
-from typing import Literal
+from typing import ClassVar, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, HttpUrl, TypeAdapter, field_validator
 
 HTTP_URL = TypeAdapter(HttpUrl)
+MODEL_TEXT_INJECTION = re.compile(r"https?://|\[[^\]\r\n]*\]\([^)]*\)", re.IGNORECASE)
 
 DigestCategory = Literal[
     "AI_MODEL",
@@ -55,19 +57,37 @@ class ExtractedEmailContent(BaseModel):
 
 class ItemAnalysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
+    model_owned_text: ClassVar[bool] = True
 
     title: str = Field(min_length=1, max_length=200)
     category: DigestCategory
-    summary_zh_tw: str = Field(min_length=1)
-    why_it_matters_zh_tw: str = Field(min_length=1)
+    summary_zh_tw: str = Field(min_length=1, max_length=800)
+    why_it_matters_zh_tw: str = Field(min_length=1, max_length=800)
     importance: int = Field(ge=1, le=10)
     confidence: float = Field(ge=0, le=1)
-    tags: list[str] = Field(default_factory=list)
+    tags: list[str] = Field(default_factory=list, max_length=8)
+
+    @field_validator("title", "summary_zh_tw", "why_it_matters_zh_tw")
+    @classmethod
+    def reject_model_links(cls, value: str) -> str:
+        if cls.model_owned_text and MODEL_TEXT_INJECTION.search(value):
+            raise ValueError("model-owned text must not contain URLs or Markdown links")
+        return value
 
     @field_validator("tags")
     @classmethod
     def normalize_tags(cls, values: list[str]) -> list[str]:
-        return ["-".join(value.lower().strip().split()) for value in values if value.strip()]
+        normalized: list[str] = []
+        for value in values:
+            if not value.strip():
+                continue
+            if cls.model_owned_text and MODEL_TEXT_INJECTION.search(value):
+                raise ValueError("model-owned text must not contain URLs or Markdown links")
+            tag = "-".join(value.lower().strip().split())
+            if len(tag) > 40:
+                raise ValueError("normalized tags must be at most 40 characters")
+            normalized.append(tag)
+        return normalized
 
 
 class NewsletterItemAnalysis(ItemAnalysis):
@@ -75,6 +95,8 @@ class NewsletterItemAnalysis(ItemAnalysis):
 
 
 class DigestItem(ItemAnalysis):
+    model_owned_text: ClassVar[bool] = False
+
     source_url: HttpUrl | None = None
     raw_url: HttpUrl | None = None
     resolved_url: HttpUrl | None = None
@@ -105,6 +127,13 @@ class EmailExtraction(BaseModel):
     source_id: str
     newsletter_title: str
     newsletter_date: date | None
-    overview_zh_tw: str
+    overview_zh_tw: str = Field(max_length=1500)
     items: list[NewsletterItemAnalysis]
     truncated_input: bool = False
+
+    @field_validator("overview_zh_tw")
+    @classmethod
+    def reject_model_links(cls, value: str) -> str:
+        if MODEL_TEXT_INJECTION.search(value):
+            raise ValueError("model-owned text must not contain URLs or Markdown links")
+        return value
