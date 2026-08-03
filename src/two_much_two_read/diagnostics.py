@@ -37,8 +37,11 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
             if isinstance(payload, dict)
             else []
         )
+        available_models = {model_name(str(model)) for model in models}
         checks["ollama"] = (
-            "ok" if model_name(settings.ollama_model) in {model_name(str(model)) for model in models} else "model_missing"
+            "ok"
+            if all(model_name(model) in available_models for model in (settings.ollama_model, settings.ollama_review_model))
+            else "model_missing"
         )
     except (httpx.HTTPError, ValueError):
         checks["ollama"] = "unreachable"

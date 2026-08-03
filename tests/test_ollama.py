@@ -73,6 +73,43 @@ def test_create_ollama_client_uses_digest_language() -> None:
 
 
 @respx.mock
+def test_reviews_candidates_with_the_dedicated_model() -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        return_value=httpx.Response(
+            200,
+            json={
+                "message": {
+                    "content": json.dumps({"selected": [{"candidate_id": 2, "score": 91, "reason_zh_tw": "具體的新模型發布"}]})
+                }
+            },
+        )
+    )
+
+    result = OllamaClient(review_model="qwen3:8b").review_digest(
+        [
+            {"candidate_id": 1, "title": "Trial", "source": "AlphaSignal"},
+            {"candidate_id": 2, "title": "Release", "source": "TLDR AI"},
+        ],
+        5,
+    )
+
+    assert result.selected[0].candidate_id == 2
+    payload = json.loads(route.calls[0].request.content)
+    assert payload["model"] == "qwen3:8b"
+    assert payload["keep_alive"] == "0"
+    assert "AlphaSignal" in payload["messages"][1]["content"]
+
+
+@respx.mock
+def test_unload_uses_zero_keep_alive() -> None:
+    route = respx.post("http://127.0.0.1:11434/api/generate").mock(return_value=httpx.Response(200, json={}))
+
+    OllamaClient().unload("qwen3:4b")
+
+    assert json.loads(route.calls[0].request.content) == {"model": "qwen3:4b", "keep_alive": 0, "stream": False}
+
+
+@respx.mock
 def test_repairs_invalid_schema_once() -> None:
     invalid_result = valid_result()
     invalid_result["items"][0]["confidence"] = 9  # type: ignore[index]

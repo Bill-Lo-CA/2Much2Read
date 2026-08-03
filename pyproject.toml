@@ -19,6 +19,7 @@ dependencies = [
   "pydantic>=2.11,<3",
   "pydantic-settings>=2.9,<3",
   "pyyaml>=6.0,<7",
+  "sentence-transformers>=5,<6",
   "typer>=0.16,<1",
 ]
 
@@ -51,6 +52,10 @@ python_version = "3.11"
 strict = true
 packages = ["two_bored_one_made", "two_busy_one_miss", "two_much_two_read", "two_read_runtime"]
 mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["numpy", "numpy.*", "sentence_transformers", "sentence_transformers.*", "torch", "torch.*", "transformers", "transformers.*"]
+follow_imports = "skip"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

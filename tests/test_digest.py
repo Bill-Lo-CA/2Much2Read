@@ -43,6 +43,17 @@ def test_renderer_and_chunks_disable_mentions() -> None:
     assert all(len(chunk) <= 2000 for chunk in chunks)
 
 
+def test_renderer_shows_item_source_even_when_extraction_confidence_is_low() -> None:
+    text = render_digest(
+        [DigestEntry(item("Update", "https://example.com/a", confidence=0.1), source_name="AlphaSignal")],
+        datetime.now(UTC),
+        "AI",
+        "AlphaSignal",
+    )
+
+    assert "來源：AlphaSignal" in text
+
+
 @pytest.mark.parametrize("topic", ["Cloud & Data", "Cybersecurity"])
 def test_renderer_uses_actual_topic_and_sources(topic: str) -> None:
     text = render_digest([item("Update", None)], datetime(2026, 6, 22, tzinfo=UTC), topic, "Source One, Source Two")

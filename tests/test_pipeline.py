@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 from base64 import urlsafe_b64encode
+from dataclasses import replace
 from datetime import UTC, datetime
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -77,6 +78,29 @@ class StubOllamaClient:
             raise self.error
         assert self.extraction is not None
         return self.extraction
+
+
+@pytest.fixture(autouse=True)
+def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeReranker:
+        def __init__(self, _: str) -> None:
+            pass
+
+        def rank(self, entries):
+            return entries
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "RelevanceReranker", FakeReranker)
+    monkeypatch.setattr(pipeline, "_unload_model", lambda *_: None)
+    monkeypatch.setattr(
+        pipeline,
+        "_reviewed_entries",
+        lambda settings, _ollama, entries: [
+            replace(entry, review_score=100 - index) for index, entry in enumerate(entries[: settings.digest_max_items])
+        ],
+    )
 
 
 def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

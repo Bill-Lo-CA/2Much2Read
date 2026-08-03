@@ -86,6 +86,16 @@ class DigestItem(ItemAnalysis):
     url_checked_at: datetime | None = None
 
 
+class DigestReviewSelection(BaseModel):
+    candidate_id: int = Field(gt=0)
+    score: int = Field(ge=0, le=100)
+    reason_zh_tw: str = Field(min_length=1, max_length=300)
+
+
+class DigestReview(BaseModel):
+    selected: list[DigestReviewSelection]
+
+
 class ArticleAnalysis(ItemAnalysis):
     pass
 

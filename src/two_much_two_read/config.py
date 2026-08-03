@@ -139,9 +139,11 @@ class Settings(BaseSettings):
     lock_path: Path = Field(default_factory=lambda: data_dir() / "2much2read.lock")
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_model: str = "llama3.2:3b"
+    ollama_review_model: str = "qwen3:8b"
     ollama_num_ctx: int = 16384
     ollama_timeout_seconds: float = 300
     ollama_keep_alive: str = "10m"
+    reranker_model: str = "Qwen/Qwen3-Reranker-0.6B"
     discord_delivery_mode: Literal["webhook", "bot", "both"] = "webhook"
     discord_webhook_url: str = ""
     discord_username: str = "2much2read"
@@ -149,8 +151,9 @@ class Settings(BaseSettings):
     discord_bot_channel_id: str = ""
     digest_language: str = "zh-TW"
     digest_timezone: str = "America/Montreal"
-    digest_max_items: int = Field(default=10, ge=1)
+    digest_max_items: int = Field(default=5, ge=1)
     digest_top_items: int = Field(default=5, ge=0)
+    digest_review_candidate_limit: int = Field(default=20, ge=1)
 
     def __init__(self, **data: Any) -> None:
         super().__init__(_env_file=env_file("2much2read"), **data)

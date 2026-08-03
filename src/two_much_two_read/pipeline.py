@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Callable
+from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -15,11 +16,12 @@ from .article_extractor import ArticleExtractionError
 from .article_fetcher import ArticleFetcher, ArticleFetchError, ResolvedUrl, UrlResolutionError
 from .command_models import DeliveryCheckpointResetResult, NewsletterRetryResult, NewsletterRunResult
 from .config import GmailSource, HackerNewsSource, Settings, load_sources
-from .digest import DigestEntry, render_digest
+from .digest import DigestEntry, dedupe_entries, render_digest
 from .gmail import GmailClient, credentials, message_headers
 from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
 from .mime import EmptyEmailError, extract_gmail_payload
 from .ollama import OllamaClient, OllamaSchemaError, create_ollama_client
+from .reranker import RelevanceReranker
 from .schemas import DigestItem, ExtractedEmailContent, ResolvedContent
 from .storage import Database
 from .url_enrichment import UrlEnricher, resolve_match
@@ -35,7 +37,7 @@ def _email_content(value: ExtractedEmailContent | str) -> ExtractedEmailContent:
     return value if isinstance(value, ExtractedEmailContent) else ExtractedEmailContent(analysis_text=value)
 
 
-def _items(database: Database, document_ids: list[int], maximum: int) -> list[DigestEntry]:
+def _items(database: Database, document_ids: list[int], maximum: int, source_names: dict[str, str]) -> list[DigestEntry]:
     result: list[DigestEntry] = []
     for row in database.items_for_documents(document_ids, maximum * 5):
         item = DigestItem.model_validate(
@@ -53,6 +55,9 @@ def _items(database: Database, document_ids: list[int], maximum: int) -> list[Di
         result.append(
             DigestEntry(
                 item=item,
+                candidate_id=int(str(row["id"])),
+                source_id=str(row["source_id"]),
+                source_name=source_names.get(str(row["source_id"]), str(row["source_id"])),
                 published_at=datetime.fromisoformat(str(row["published_at"])),
                 article_url=str(row["source_url"]) if row["source_url"] else None,
                 discussion_url=str(row["discussion_url"]) if row["discussion_url"] else None,
@@ -63,6 +68,40 @@ def _items(database: Database, document_ids: list[int], maximum: int) -> list[Di
             )
         )
     return result
+
+
+def _ranked_entries(settings: Settings, reranker: RelevanceReranker, entries: list[DigestEntry]) -> list[DigestEntry]:
+    if not entries:
+        return []
+    return reranker.rank(dedupe_entries(entries))[: settings.digest_review_candidate_limit]
+
+
+def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[DigestEntry]) -> list[DigestEntry]:
+    if not ranked:
+        return []
+    candidates: list[dict[str, object]] = []
+    for entry in ranked:
+        assert entry.candidate_id is not None
+        candidates.append(
+            {
+                "candidate_id": entry.candidate_id,
+                "title": entry.item.title,
+                "category": entry.item.category,
+                "summary": entry.item.summary_zh_tw,
+                "why_it_matters": entry.item.why_it_matters_zh_tw,
+                "source": entry.source_name,
+            }
+        )
+    try:
+        review = ollama.review_digest(candidates, settings.digest_max_items)
+    finally:
+        _unload_model(ollama, settings.ollama_review_model)
+    scores = {selection.candidate_id: selection.score for selection in review.selected}
+    return [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]
+
+
+def _unload_model(ollama: OllamaClient, model: str) -> None:
+    ollama.unload(model)
 
 
 def _enabled_sources(settings: Settings, source_id: str | None) -> list[GmailSource | HackerNewsSource]:
@@ -403,47 +442,61 @@ def run_pipeline(
             if any(isinstance(source, HackerNewsSource) for source in sources):
                 hackernews = HackerNewsClient()
             ollama = create_ollama_client(settings)
+            reranker = RelevanceReranker(settings.reranker_model)
             gmail_remaining = settings.gmail_max_messages_per_run
             command_remaining = max_messages
             status(f"Starting {len(sources)} source(s)")
-            for source in sources:
-                if command_remaining is not None and command_remaining <= 0:
-                    break
-                if isinstance(source, GmailSource):
-                    source_remaining = (
-                        min(gmail_remaining, command_remaining) if command_remaining is not None else gmail_remaining
-                    )
-                    if source_remaining <= 0:
-                        continue
-                    assert gmail is not None
-                    used, source_discovered, source_processed, source_failed, source_ids, source_documents = _process_source(
-                        database, gmail, ollama, settings, source, source_remaining, status, force=force, dry_run=dry_run
-                    )
-                    gmail_remaining -= used
-                else:
-                    source_remaining = (
-                        min(source.max_articles_per_run, command_remaining)
-                        if command_remaining is not None
-                        else source.max_articles_per_run
-                    )
-                    assert hackernews is not None
-                    used, source_discovered, source_processed, source_failed, source_ids = _process_hackernews_source(
-                        database, hackernews, ollama, source, source_remaining, status, force=force, now=now
-                    )
-                    source_documents = []
-                if command_remaining is not None:
-                    command_remaining -= used
-                discovered += source_discovered
-                processed += source_processed
-                failed += source_failed
-                processed_document_ids.extend(source_ids)
-                processed_documents.extend(source_documents)
+            try:
+                for source in sources:
+                    if command_remaining is not None and command_remaining <= 0:
+                        break
+                    if isinstance(source, GmailSource):
+                        source_remaining = (
+                            min(gmail_remaining, command_remaining) if command_remaining is not None else gmail_remaining
+                        )
+                        if source_remaining <= 0:
+                            continue
+                        assert gmail is not None
+                        used, source_discovered, source_processed, source_failed, source_ids, source_documents = _process_source(
+                            database, gmail, ollama, settings, source, source_remaining, status, force=force, dry_run=dry_run
+                        )
+                        gmail_remaining -= used
+                    else:
+                        source_remaining = (
+                            min(source.max_articles_per_run, command_remaining)
+                            if command_remaining is not None
+                            else source.max_articles_per_run
+                        )
+                        assert hackernews is not None
+                        used, source_discovered, source_processed, source_failed, source_ids = _process_hackernews_source(
+                            database, hackernews, ollama, source, source_remaining, status, force=force, now=now
+                        )
+                        source_documents = []
+                    if command_remaining is not None:
+                        command_remaining -= used
+                    discovered += source_discovered
+                    processed += source_processed
+                    failed += source_failed
+                    processed_document_ids.extend(source_ids)
+                    processed_documents.extend(source_documents)
+                source_names_by_id = {source.id: source.name for source in sources}
+                ranked_entries = _ranked_entries(
+                    settings,
+                    reranker,
+                    _items(database, processed_document_ids, settings.digest_review_candidate_limit, source_names_by_id),
+                )
+            finally:
+                try:
+                    reranker.close()
+                finally:
+                    _unload_model(ollama, settings.ollama_model)
 
+            reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
             content = render_digest(
-                _items(database, processed_document_ids, settings.digest_max_items),
+                reviewed_entries,
                 now,
                 ", ".join(dict.fromkeys(source.category for source in sources)),
-                ", ".join(source.name for source in sources),
+                ", ".join(dict.fromkeys(entry.source_name or entry.source_id or "Unknown" for entry in reviewed_entries)),
                 settings.digest_top_items,
                 settings.digest_language,
             )

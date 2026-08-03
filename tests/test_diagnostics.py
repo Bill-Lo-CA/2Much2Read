@@ -32,13 +32,19 @@ def test_doctor_accepts_default_model_tag_and_creatable_database_directory(
 
     monkeypatch.setattr(diagnostics.httpx, "get", lambda *args, **kwargs: Response())
     settings = newsletter_settings.model_copy(
-        update={"database_path": tmp_path / "new-directory" / "digest.sqlite3", "ollama_model": "mistral"}
+        update={
+            "database_path": tmp_path / "new-directory" / "digest.sqlite3",
+            "ollama_model": "mistral",
+            "ollama_review_model": "mistral",
+        }
     )
 
     assert diagnostics.doctor(settings, send_test=False).checks["ollama"] == "ok"
     assert diagnostics.doctor(settings, send_test=False).checks["database_directory"] == "ok"
     tagged_settings = settings.model_copy(update={"ollama_model": "mistral:7b"})
     assert diagnostics.doctor(tagged_settings, send_test=False).checks["ollama"] == "model_missing"
+    missing_reviewer = settings.model_copy(update={"ollama_review_model": "qwen3:8b"})
+    assert diagnostics.doctor(missing_reviewer, send_test=False).checks["ollama"] == "model_missing"
 
 
 def test_missing_database_directory_is_creatable_under_writable_parent(tmp_path: Path) -> None:
