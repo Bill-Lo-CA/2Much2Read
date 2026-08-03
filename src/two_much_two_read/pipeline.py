@@ -72,14 +72,17 @@ def _items(
     return result
 
 
-def _reviewed_entries(settings: Settings, ollama: OllamaClient, entries: list[DigestEntry]) -> list[DigestEntry]:
+def _ranked_entries(
+    settings: Settings, reranker: RelevanceReranker, entries: list[DigestEntry]
+) -> list[DigestEntry]:
     if not entries:
         return []
-    reranker = RelevanceReranker(settings.reranker_model)
-    try:
-        ranked = reranker.rank(dedupe_entries(entries))[: settings.digest_review_candidate_limit]
-    finally:
-        reranker.close()
+    return reranker.rank(dedupe_entries(entries))[: settings.digest_review_candidate_limit]
+
+
+def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[DigestEntry]) -> list[DigestEntry]:
+    if not ranked:
+        return []
     candidates: list[dict[str, object]] = []
     for entry in ranked:
         assert entry.candidate_id is not None
@@ -443,6 +446,7 @@ def run_pipeline(
             if any(isinstance(source, HackerNewsSource) for source in sources):
                 hackernews = HackerNewsClient()
             ollama = create_ollama_client(settings)
+            reranker = RelevanceReranker(settings.reranker_model)
             gmail_remaining = settings.gmail_max_messages_per_run
             command_remaining = max_messages
             status(f"Starting {len(sources)} source(s)")
@@ -479,15 +483,19 @@ def run_pipeline(
                     failed += source_failed
                     processed_document_ids.extend(source_ids)
                     processed_documents.extend(source_documents)
+                source_names_by_id = {source.id: source.name for source in sources}
+                ranked_entries = _ranked_entries(
+                    settings,
+                    reranker,
+                    _items(database, processed_document_ids, settings.digest_review_candidate_limit, source_names_by_id),
+                )
             finally:
-                _unload_model(ollama, settings.ollama_model)
+                try:
+                    reranker.close()
+                finally:
+                    _unload_model(ollama, settings.ollama_model)
 
-            source_names_by_id = {source.id: source.name for source in sources}
-            reviewed_entries = _reviewed_entries(
-                settings,
-                ollama,
-                _items(database, processed_document_ids, settings.digest_review_candidate_limit, source_names_by_id),
-            )
+            reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
             content = render_digest(
                 reviewed_entries,
                 now,

@@ -36,17 +36,7 @@ def test_reranker_orders_by_model_score() -> None:
     assert [value.candidate_id for value in ranked] == [2, 1]
 
 
-def test_final_review_selects_scored_items_and_releases_the_reviewer(monkeypatch) -> None:
-    class FakeReranker:
-        def __init__(self, _: str) -> None:
-            pass
-
-        def rank(self, entries: list[DigestEntry]) -> list[DigestEntry]:
-            return list(reversed(entries))
-
-        def close(self) -> None:
-            pass
-
+def test_final_review_selects_scored_items_and_releases_the_reviewer() -> None:
     class FakeOllama:
         review_model = "qwen3:8b"
 
@@ -64,11 +54,10 @@ def test_final_review_selects_scored_items_and_releases_the_reviewer(monkeypatch
         def unload(self, model: str) -> None:
             self.unloaded.append(model)
 
-    monkeypatch.setattr(pipeline, "RelevanceReranker", FakeReranker)
     ollama = FakeOllama()
     settings = Settings(digest_max_items=1, digest_review_candidate_limit=2, ollama_review_model="qwen3:8b")
 
-    reviewed = pipeline._reviewed_entries(settings, ollama, [entry(1, "Trial", "AlphaSignal"), entry(2, "Release", "TLDR AI")])
+    reviewed = pipeline._reviewed_entries(settings, ollama, [entry(2, "Release", "TLDR AI"), entry(1, "Trial", "AlphaSignal")])
 
     assert [(value.candidate_id, value.review_score) for value in reviewed] == [(2, 90)]
     assert ollama.candidates[0]["source"] == "TLDR AI"

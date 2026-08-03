@@ -82,6 +82,17 @@ class StubOllamaClient:
 
 @pytest.fixture(autouse=True)
 def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
+    class FakeReranker:
+        def __init__(self, _: str) -> None:
+            pass
+
+        def rank(self, entries):
+            return entries
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "RelevanceReranker", FakeReranker)
     monkeypatch.setattr(pipeline, "_unload_model", lambda *_: None)
     monkeypatch.setattr(
         pipeline,
