@@ -68,11 +68,7 @@ class _TraversalBudget:
         size = len(payload)
         plain_bytes = self.plain_bytes + size if content_type == "text/plain" else self.plain_bytes
         html_bytes = self.html_bytes + size if content_type == "text/html" else self.html_bytes
-        if (
-            self.total_bytes + size > MAX_TOTAL_DECODED_BYTES
-            or plain_bytes > MAX_PLAIN_BYTES
-            or html_bytes > MAX_HTML_BYTES
-        ):
+        if self.total_bytes + size > MAX_TOTAL_DECODED_BYTES or plain_bytes > MAX_PLAIN_BYTES or html_bytes > MAX_HTML_BYTES:
             raise EmailExtractionError("email exceeds its extraction size budget", "EMAIL_TOO_LARGE")
         self.total_bytes += size
         self.plain_bytes = plain_bytes
@@ -189,8 +185,13 @@ def _content(plain: list[str], html: list[str]) -> ExtractedEmailContent:
     analysis_text = re.sub(r"\n{3,}", "\n\n", analysis_text).strip()
     if not analysis_text:
         raise EmptyEmailError("email contains no usable text")
+    original_characters = len(analysis_text)
     analysis_text = analysis_text[:MAX_ANALYSIS_CHARS].rstrip()
-    return ExtractedEmailContent(analysis_text=analysis_text, link_candidates=_link_candidates(plain_content, html_content))
+    return ExtractedEmailContent(
+        analysis_text=analysis_text,
+        original_characters=original_characters,
+        link_candidates=_link_candidates(plain_content, html_content),
+    )
 
 
 def _decoded_payload(part: Message) -> bytes:

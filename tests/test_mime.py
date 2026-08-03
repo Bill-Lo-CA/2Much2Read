@@ -16,6 +16,18 @@ def test_extract_mime_returns_plain_text_for_supported_structures(plain: str, ht
     assert extract_mime(message.as_bytes()).analysis_text == plain
 
 
+@pytest.mark.parametrize(("length", "truncated"), [(45_000, False), (45_001, True)])
+def test_extract_mime_preserves_original_length_and_caps_analysis_text(length: int, truncated: bool) -> None:
+    text = "x" * length
+    raw = b"Content-Type: text/plain; charset=utf-8\r\n\r\n" + text.encode()
+
+    content = extract_mime(raw)
+
+    assert len(content.analysis_text) == min(length, 45_000)
+    assert content.original_characters == length
+    assert ((content.original_characters or 0) > 45_000) is truncated
+
+
 def test_extract_mime_keeps_html_link_candidates_when_plain_text_wins() -> None:
     message = EmailMessage()
     message.set_content("plain summary")
@@ -252,11 +264,16 @@ def test_extract_gmail_payload_counts_duplicate_links_toward_limit() -> None:
     assert error.value.code == "EMAIL_TOO_MANY_LINKS"
 
 
-def test_extract_gmail_payload_caps_analysis_text() -> None:
-    text = "x" * 45_001
+@pytest.mark.parametrize(("length", "truncated"), [(45_000, False), (45_001, True)])
+def test_extract_gmail_payload_preserves_original_length_and_caps_analysis_text(length: int, truncated: bool) -> None:
+    text = "x" * length
     payload = {"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(text.encode()).decode()}}
 
-    assert len(extract_gmail_payload(payload).analysis_text) == 45_000
+    content = extract_gmail_payload(payload)
+
+    assert len(content.analysis_text) == min(length, 45_000)
+    assert content.original_characters == length
+    assert ((content.original_characters or 0) > 45_000) is truncated
 
 
 def test_gmail_payload_skips_malformed_part_and_uses_valid_text() -> None:

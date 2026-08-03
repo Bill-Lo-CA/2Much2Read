@@ -19,7 +19,7 @@ from .config import GmailSource, HackerNewsSource, Settings, load_sources
 from .digest import DigestEntry, dedupe_entries, render_digest
 from .gmail import GmailClient, credentials, message_headers
 from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
-from .mime import EmailExtractionError, extract_gmail_payload
+from .mime import MAX_ANALYSIS_CHARS, EmailExtractionError, extract_gmail_payload
 from .ollama import OllamaClient, OllamaSchemaError, close_ollama_client, create_ollama_client
 from .reranker import RelevanceReranker
 from .schemas import DigestItem, ExtractedEmailContent, ResolvedContent
@@ -197,8 +197,11 @@ def _process_source(
             if not dry_run:
                 _sync_processing_label(database, gmail, gmail_id, document_id, "failed")
             continue
-        truncated = len(body) >= 45_000
-        body = body[:45_000] if truncated else body
+        original_characters = content.original_characters
+        if original_characters is None:
+            original_characters = len(body)
+        truncated = original_characters > MAX_ANALYSIS_CHARS
+        body = body[:MAX_ANALYSIS_CHARS] if truncated else body
         document_id = database.discover_gmail_document(
             gmail_id,
             str(message.get("threadId", "")),

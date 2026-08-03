@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import socket
+from threading import Event
+
 import pytest
 
+import two_much_two_read.article_fetcher as article_fetcher
 from two_much_two_read.article_fetcher import (
     ARTICLE_FETCH_DEADLINE_SECONDS,
     MAX_RESPONSE_BYTES,
@@ -46,6 +50,24 @@ def test_article_fetch_deadline_expires_before_first_request() -> None:
 
     with pytest.raises(ArticleFetchError, match="ARTICLE_FETCH_DEADLINE_EXCEEDED"):
         fetcher.fetch("https://example.com/article")
+
+
+def test_article_dns_resolution_respects_fetch_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
+    release = Event()
+
+    def stalled_getaddrinfo(*_: object, **__: object) -> list[object]:
+        release.wait()
+        return []
+
+    monkeypatch.setattr(socket, "getaddrinfo", stalled_getaddrinfo)
+    monkeypatch.setattr(article_fetcher, "ARTICLE_FETCH_DEADLINE_SECONDS", 0.01)
+    try:
+        with pytest.raises(ArticleFetchError, match="ARTICLE_FETCH_DEADLINE_EXCEEDED"):
+            ArticleFetcher(response_provider=lambda _: pytest.fail("request should not be sent")).fetch(
+                "https://example.com/article"
+            )
+    finally:
+        release.set()
 
 
 def test_blocks_unsafe_urls_before_request() -> None:
@@ -225,3 +247,19 @@ def test_metadata_resolution_deadline_maps_internal_article_deadline() -> None:
 
     with pytest.raises(UrlResolutionError, match="URL_RESOLUTION_DEADLINE_EXCEEDED"):
         ArticleFetcher(public_dns, response_provider, clock=clock).resolve_url("https://example.com/article")
+
+
+def test_url_resolution_dns_deadline_maps_to_resolution_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    release = Event()
+
+    def stalled_getaddrinfo(*_: object, **__: object) -> list[object]:
+        release.wait()
+        return []
+
+    monkeypatch.setattr(socket, "getaddrinfo", stalled_getaddrinfo)
+    monkeypatch.setattr(article_fetcher, "URL_RESOLUTION_DEADLINE_SECONDS", 0.01)
+    try:
+        with pytest.raises(UrlResolutionError, match="URL_RESOLUTION_DEADLINE_EXCEEDED"):
+            ArticleFetcher().resolve_url("https://example.com/article")
+    finally:
+        release.set()

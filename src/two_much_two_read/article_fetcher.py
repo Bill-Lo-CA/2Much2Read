@@ -8,6 +8,8 @@ import socket
 import ssl
 import time
 from collections.abc import Callable, Mapping
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from urllib import robotparser
 from urllib.parse import urljoin, urlsplit, urlunsplit
@@ -24,6 +26,7 @@ READ_TIMEOUT_SECONDS = 15
 ARTICLE_FETCH_DEADLINE_SECONDS = 30
 URL_RESOLUTION_DEADLINE_SECONDS = 10
 ROBOTS_DEADLINE_SECONDS = 2
+_DNS_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="article-dns")
 
 logger = logging.getLogger(__name__)
 
@@ -219,7 +222,7 @@ class ArticleFetcher:
             addresses = [str(ipaddress.ip_address(hostname))]
         except ValueError:
             try:
-                addresses = self.resolver(hostname)
+                addresses = self._resolve(hostname, deadline)
             except ArticleFetchError:
                 raise
             except Exception as error:
@@ -250,6 +253,19 @@ class ArticleFetcher:
             addresses[0],
             target,
         )
+
+    def _resolve(self, hostname: str, deadline: float | None) -> list[str]:
+        if deadline is None:
+            return self.resolver(hostname)
+        remaining = self._remaining(deadline)
+        future = _DNS_EXECUTOR.submit(self.resolver, hostname)
+        try:
+            return future.result(timeout=remaining)
+        except FutureTimeoutError as error:
+            if future.done():
+                return future.result()
+            future.cancel()
+            raise ArticleFetchError("ARTICLE_FETCH_DEADLINE_EXCEEDED") from error
 
     def _read(
         self,

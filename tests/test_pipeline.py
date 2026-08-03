@@ -19,7 +19,14 @@ from two_much_two_read.hackernews import HackerNewsCandidate, HackerNewsDiscover
 from two_much_two_read.mime import EmailExtractionError
 from two_much_two_read.ollama import OllamaSchemaError
 from two_much_two_read.pipeline import deliver_digest, run_pipeline
-from two_much_two_read.schemas import ArticleAnalysis, EmailExtraction, NewsletterItemAnalysis, ResolvedContent, SourceDocument
+from two_much_two_read.schemas import (
+    ArticleAnalysis,
+    EmailExtraction,
+    ExtractedEmailContent,
+    NewsletterItemAnalysis,
+    ResolvedContent,
+    SourceDocument,
+)
 from two_much_two_read.storage import Database
 from two_read_runtime.discord import DiscordDeliveryError, DiscordDestination
 
@@ -236,6 +243,56 @@ def test_unknown_source_lists_enabled_ids(tmp_path: Path) -> None:
         match="unknown or disabled source_id 'ai-newspaper'; enabled source IDs: alphasignal",
     ):
         run_pipeline(Settings(sources_config_path=sources_path), source_id="ai-newspaper", dry_run=True)
+
+
+@pytest.mark.parametrize(("length", "truncated"), [(45_000, False), (45_001, True)])
+def test_pipeline_uses_original_analysis_length_for_truncation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, length: int, truncated: bool
+) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    calls: list[tuple[str, bool]] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+        def iter_messages(self, query: str):
+            yield "gmail-1"
+
+        def get_message(self, message_id: str) -> dict[str, object]:
+            return {"internalDate": "0", "threadId": "thread", "payload": {"body": "ignored"}}
+
+        def sync_processing_label(self, message_id: str, state: str) -> None:
+            pass
+
+    class FakeOllamaClient:
+        def extract(self, source_id: str, content: str, was_truncated: bool, max_items: int) -> EmailExtraction:
+            calls.append((content, was_truncated))
+            return EmailExtraction(
+                source_id=source_id, newsletter_title="Test", newsletter_date=None, overview_zh_tw="摘要", items=[]
+            )
+
+    body = "x" * length
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllamaClient())
+    monkeypatch.setattr(
+        pipeline,
+        "extract_gmail_payload",
+        lambda payload: ExtractedEmailContent(analysis_text=body[:45_000], original_characters=length),
+    )
+
+    assert run_pipeline(settings, no_deliver=True).processed == 1
+    assert calls == [(body[:45_000], truncated)]
+    database = Database(settings.database_path)
+    assert database.connection.execute("SELECT content_characters FROM documents").fetchone()[0] == min(length, 45_000)
+    database.close()
 
 
 def test_no_enabled_sources_has_distinct_error(tmp_path: Path) -> None:
