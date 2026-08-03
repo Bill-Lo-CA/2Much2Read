@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import re
+import unicodedata
 from datetime import date, datetime, time, timedelta
+from urllib.parse import urlsplit
 
 from .google_calendar import CalendarEvent
 from .rules import ReminderCandidate
 
-URL = re.compile(r"https?://[^\s<>()>]+")
+URL = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
 
 
 def _when(value: datetime) -> str:
@@ -32,22 +34,67 @@ def render_reminder(candidate: ReminderCandidate) -> str:
 
 
 def _agenda_cell(value: str) -> str:
-    return " ".join(URL.sub("", value).replace("@", "@\u200b").replace("`", "ˋ").split())
+    value = URL.sub("", value).replace("\r\n", "\n").replace("\r", "\n")
+    value = "".join(
+        character
+        for character in value
+        if character in "\n\t"
+        or (ord(character) >= 0x20 and not 0x7F <= ord(character) <= 0x9F and unicodedata.category(character) != "Cf")
+    )
+    return " ".join(value.replace("@", "@\u200b").replace("`", "ˋ").split())
+
+
+def _valid_link(raw_url: str) -> tuple[str, str] | None:
+    url = raw_url.rstrip(".,;:!?)]}")
+    if not url.isprintable():
+        return None
+    try:
+        parsed = urlsplit(url)
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return None
+    if parsed.scheme.lower() not in {"http", "https"} or not hostname:
+        return None
+    if port is not None and not 0 <= port <= 65_535:
+        return None
+    if parsed.username is not None or parsed.password is not None:
+        return None
+    if any(character in hostname for character in "`*_~|[]()<>\\"):
+        return None
+    return url, hostname
+
+
+def _event_links(event: CalendarEvent) -> list[tuple[str, str, str]]:
+    links: list[tuple[str, str, str]] = []
+    seen: set[str] = set()
+    for label, value in (
+        ("Title", event.title),
+        ("Calendar", event.calendar_name or ""),
+        ("Location", event.location),
+    ):
+        for raw_url in URL.findall(value):
+            link = _valid_link(raw_url)
+            if link is None or link[0] in seen:
+                continue
+            seen.add(link[0])
+            links.append((label, *link))
+            if len(links) == 3:
+                return links
+    return links
 
 
 def _with_links(lines: list[str], events: list[CalendarEvent]) -> str:
-    link_lines = []
+    link_lines: list[str] = []
+    seen: set[str] = set()
     for event in events:
-        links: dict[str, str] = {}
-        for label, value in (
-            ("Title", event.title),
-            ("Calendar", event.calendar_name or ""),
-            ("Location", event.location),
-        ):
-            for url in URL.findall(value):
-                links.setdefault(url.rstrip(".,;:!?"), label)
-        if links:
-            link_lines.append(" · ".join(f"[{label}]({url})" for url, label in links.items()))
+        for label, url, hostname in _event_links(event):
+            if url in seen:
+                continue
+            seen.add(url)
+            if len(link_lines) == 20:
+                return "\n".join([*lines, "```", *link_lines])
+            link_lines.append(f"{label} link - {hostname}: <{url}>")
     return "\n".join([*lines, "```", *link_lines])
 
 
@@ -64,6 +111,7 @@ def _agenda_when(day: date, event: CalendarEvent) -> str:
 
 
 def render_agenda(day: date, events: list[CalendarEvent]) -> str:
+    ordered_events = sorted(events, key=lambda item: (item.start, item.calendar_id, item.instance_id))
     lines = [
         "```text",
         f"2busy1miss agenda · {day.isoformat()}",
@@ -72,7 +120,7 @@ def render_agenda(day: date, events: list[CalendarEvent]) -> str:
     ]
     if not events:
         return _with_links([*lines, f"{'':<11} | No events"], events)
-    for event in sorted(events, key=lambda item: (item.start, item.calendar_id, item.instance_id)):
+    for event in ordered_events:
         when = _agenda_when(day, event)
         summary = _agenda_cell(event.title)
         if calendar_name := _agenda_cell(event.calendar_name or ""):
@@ -80,4 +128,4 @@ def render_agenda(day: date, events: list[CalendarEvent]) -> str:
         lines.append(f"{when:<11} | {summary}")
         if location := _agenda_cell(event.location):
             lines.append(f"{'':<11} | {location}")
-    return _with_links(lines, events)
+    return _with_links(lines, ordered_events)

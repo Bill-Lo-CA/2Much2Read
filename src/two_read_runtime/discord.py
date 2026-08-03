@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import time
+import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Literal
@@ -37,6 +39,43 @@ class DiscordDestination:
 
 
 DiscordSender = Callable[[DiscordDestination | str, str, str, list[str] | None, Callable[[list[str]], None] | None], list[str]]
+
+_DISCORD_MENTION = re.compile(r"(?i)@(?:everyone|here)\b|<@!?\d+>|<@&\d+>")
+_DISCORD_URL = re.compile(r"(?i)(?<![\w])(?:https?://|www\.)")
+_DISCORD_MARKDOWN_ESCAPES = str.maketrans(
+    {
+        "\\": "\\\\",
+        "*": "\\*",
+        "_": "\\_",
+        "~": "\\~",
+        "`": "\\`",
+        "|": "\\|",
+        ">": "\\>",
+        "<": "\\<",
+        "#": "\\#",
+        "!": "\\!",
+        "[": "\\[",
+        "]": "\\]",
+        "(": "\\(",
+        ")": "\\)",
+    }
+)
+
+
+def sanitize_discord_text(value: str) -> str:
+    """Make untrusted text inert in Discord while keeping it readable."""
+    value = value.replace("\r\n", "\n").replace("\r", "\n")
+    value = "".join(
+        character
+        for character in value
+        if character in "\n\t"
+        or (ord(character) >= 0x20 and not 0x7F <= ord(character) <= 0x9F and unicodedata.category(character) != "Cf")
+    )
+    value = _DISCORD_MENTION.sub(lambda match: match.group().replace("@", "＠", 1), value)
+    value = _DISCORD_URL.sub(lambda match: "www[.]" if match.group().lower() == "www." else match.group()[:-3] + "[:]//", value)
+    value = re.sub(r"(?m)^([ \t]*)([-+]|\d+[.)])(?=\s|#)", r"\1\\\2", value)
+    value = re.sub(r"(?m)^([ \t]*)(-{3,})[ \t]*$", r"\1\\\2", value)
+    return value.translate(_DISCORD_MARKDOWN_ESCAPES)
 
 
 def configured_destinations(mode: str, webhook_url: str, bot_token: str, bot_channel_id: str) -> list[DiscordDestination]:

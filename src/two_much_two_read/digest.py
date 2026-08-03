@@ -6,6 +6,8 @@ from dataclasses import dataclass, replace
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
+from two_read_runtime.discord import sanitize_discord_text
+
 from .schemas import DigestItem
 
 LABELS = {
@@ -227,6 +229,8 @@ def render_digest(
     language: str = "zh-TW",
 ) -> str:
     labels = _labels(language)
+    safe_topic = sanitize_discord_text(topic)
+    safe_source_names = sanitize_discord_text(source_names)
     entries = [
         item
         if isinstance(item, DigestEntry)
@@ -241,12 +245,12 @@ def render_digest(
     def entry(value: DigestEntry, prefix: str) -> str:
         item = value.item
         lines = [
-            f"{prefix} {item.title}",
-            f"   {labels['summary']}：{item.summary_zh_tw}",
-            f"   {labels['why']}：{item.why_it_matters_zh_tw}",
+            f"{prefix} {sanitize_discord_text(item.title)}",
+            f"   {labels['summary']}：{sanitize_discord_text(item.summary_zh_tw)}",
+            f"   {labels['why']}：{sanitize_discord_text(item.why_it_matters_zh_tw)}",
         ]
         if value.source_name:
-            lines.append(f"   {labels['source']}：{value.source_name}")
+            lines.append(f"   {labels['source']}：{sanitize_discord_text(value.source_name)}")
         if value.hn_item_id:
             if value.hn_score is not None and value.hn_comments is not None:
                 lines.append(f"   {labels['hn']}：{value.hn_score} {labels['points']} · {value.hn_comments} {labels['comments']}")
@@ -263,12 +267,13 @@ def render_digest(
     top = eligible[:top_items]
     rest = eligible[top_items:]
     sections = [
-        f"📰 {topic} 2much2read — {when:%Y-%m-%d}",
+        f"📰 {safe_topic} 2much2read — {when:%Y-%m-%d}",
         labels["top"] + "\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)),
     ]
     if rest:
         sections.append(labels["rest"] + "\n" + "\n\n".join(entry(item, "•") for item in rest))
     sections.append(
-        f"{labels['processed']}\n{labels['topic']}{topic}\n{labels['sources']}{source_names} · {len(eligible)} {labels['valid']}"
+        f"{labels['processed']}\n{labels['topic']}{safe_topic}\n{labels['sources']}{safe_source_names} · "
+        f"{len(eligible)} {labels['valid']}"
     )
-    return "\n\n".join(sections).replace("@", "@\u200b")
+    return "\n\n".join(sections)

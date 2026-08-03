@@ -79,7 +79,9 @@ def test_urls_move_below_the_table_without_metadata_links() -> None:
         links=("https://calendar.example/event",),
     )
     links = (
-        "[Title](https://docs.example/brief) · [Calendar](https://calendar.example/view) · [Location](https://meet.example/join)"
+        "Title link - docs.example: <https://docs.example/brief>\n"
+        "Calendar link - calendar.example: <https://calendar.example/view>\n"
+        "Location link - meet.example: <https://meet.example/join>"
     )
 
     agenda = render_agenda(date(2026, 7, 9), [event])
@@ -141,8 +143,8 @@ def test_render_agenda_keeps_event_text_inside_code_block() -> None:
         calendar_name="Main",
         event_id="event-1",
         instance_id="event-1",
-        title="Deploy ``` now",
-        location="Room\n2",
+        title="API_v2 (room [3]) ```",
+        location="Room\n2 *draft*",
         start=datetime(2026, 7, 9, 7, 0, tzinfo=ZoneInfo("America/Montreal")),
         end=datetime(2026, 7, 9, 8, 0, tzinfo=ZoneInfo("America/Montreal")),
         all_day=False,
@@ -150,6 +152,119 @@ def test_render_agenda_keeps_event_text_inside_code_block() -> None:
 
     rendered = render_agenda(date(2026, 7, 9), [event])
 
-    assert "``` now" not in rendered
-    assert "Deploy ˋˋˋ now" in rendered
-    assert "Room 2" in rendered
+    assert "API_v2 (room [3]) ˋˋˋ" in rendered
+    assert "Room 2 *draft*" in rendered
+    assert "\\_" not in rendered
+
+
+def test_render_agenda_shows_valid_location_hosts_and_rejects_credentials() -> None:
+    event = CalendarEvent(
+        calendar_id="primary",
+        calendar_name="Main",
+        event_id="event-1",
+        instance_id="event-1",
+        title="Review https://calendar.example@evil.example/phish",
+        location=(
+            "Meet https://meet.example/join and https://backup.example/room "
+            "https:///missing-host and https://bad.example:invalid-port/room "
+            "https://user:password@private.example/room"
+        ),
+        start=datetime(2026, 7, 9, 7, 0, tzinfo=ZoneInfo("America/Montreal")),
+        end=datetime(2026, 7, 9, 8, 0, tzinfo=ZoneInfo("America/Montreal")),
+        all_day=False,
+    )
+
+    rendered = render_agenda(date(2026, 7, 9), [event])
+
+    assert "Location link - meet.example: <https://meet.example/join>" in rendered
+    assert "Location link - backup.example: <https://backup.example/room>" in rendered
+    assert "calendar.example" not in rendered
+    assert "evil.example" not in rendered
+    assert "missing-host" not in rendered
+    assert "bad.example" not in rendered
+    assert "private.example" not in rendered
+    assert "https://" not in rendered.split("```", 2)[1]
+
+
+def test_render_agenda_caps_links_and_preserves_first_seen_deduped_order() -> None:
+    event = CalendarEvent(
+        "primary",
+        "https://calendar.example/one https://calendar.example/two",
+        "event-1",
+        "event-1",
+        "https://title.example/one https://title.example/two https://title.example/three https://title.example/four",
+        "https://title.example/one https://location.example/one",
+        datetime(2026, 7, 9, 7, 0, tzinfo=ZoneInfo("America/Montreal")),
+        datetime(2026, 7, 9, 8, 0, tzinfo=ZoneInfo("America/Montreal")),
+        False,
+    )
+
+    rendered = render_agenda(date(2026, 7, 9), [event])
+    link_lines = [line for line in rendered.splitlines() if " link - " in line]
+
+    assert link_lines == [
+        "Title link - title.example: <https://title.example/one>",
+        "Title link - title.example: <https://title.example/two>",
+        "Title link - title.example: <https://title.example/three>",
+    ]
+
+    events = [
+        CalendarEvent(
+            "primary",
+            "Main",
+            f"event-{index}",
+            f"event-{index}",
+            f"Event {index} https://event{index}.example/one https://event{index}.example/two https://event{index}.example/three",
+            "",
+            datetime(2026, 7, 9, index, 0, tzinfo=ZoneInfo("America/Montreal")),
+            datetime(2026, 7, 9, index + 1, 0, tzinfo=ZoneInfo("America/Montreal")),
+            False,
+        )
+        for index in range(20)
+    ]
+
+    capped = render_agenda(date(2026, 7, 9), events)
+
+    assert len([line for line in capped.splitlines() if " link - " in line]) == 20
+    assert "Title link - event19.example" not in capped
+
+
+def test_render_agenda_sanitizes_controls_mentions_and_code_fences() -> None:
+    event = CalendarEvent(
+        "primary",
+        "Main",
+        "event-1",
+        "event-1",
+        "Deploy ``` now @everyone\u202e",
+        "Room\x00 @here",
+        datetime(2026, 7, 9, 7, 0, tzinfo=ZoneInfo("America/Montreal")),
+        datetime(2026, 7, 9, 8, 0, tzinfo=ZoneInfo("America/Montreal")),
+        False,
+    )
+
+    rendered = render_agenda(date(2026, 7, 9), [event])
+
+    assert rendered.count("```") == 2
+    assert "@everyone" not in rendered
+    assert "@here" not in rendered
+    assert "\x00" not in rendered
+    assert "\u202e" not in rendered
+
+
+def test_render_agenda_chunks_at_discord_limit() -> None:
+    event = CalendarEvent(
+        "primary",
+        "Main",
+        "event-1",
+        "event-1",
+        "Long " + "x" * 4000,
+        "",
+        datetime(2026, 7, 9, 7, 0, tzinfo=ZoneInfo("America/Montreal")),
+        datetime(2026, 7, 9, 8, 0, tzinfo=ZoneInfo("America/Montreal")),
+        False,
+    )
+
+    chunks = chunk_text(render_agenda(date(2026, 7, 9), [event]))
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= 2_000 for chunk in chunks)

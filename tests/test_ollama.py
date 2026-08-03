@@ -147,6 +147,7 @@ def test_repairs_invalid_schema_once() -> None:
     request_payload = json.loads(route.calls[0].request.content)
     assert "maxLength" not in json.dumps(request_payload["format"])
     assert "use 0.9, never 9" in request_payload["messages"][0]["content"]
+    assert "no HTTP(S) URLs or Markdown links" in request_payload["messages"][0]["content"]
     repair_payload = json.loads(route.calls[1].request.content)
     assert repair_payload["messages"][-2] == {"role": "assistant", "content": json.dumps(invalid_result)}
     assert "use 0.9, never 9" in repair_payload["messages"][-1]["content"]

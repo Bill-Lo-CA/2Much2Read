@@ -4,7 +4,7 @@ import pytest
 
 from two_much_two_read.digest import DigestEntry, canonical_url, dedupe, render_digest
 from two_much_two_read.schemas import DigestItem
-from two_read_runtime.discord import chunk_text
+from two_read_runtime.discord import chunk_text, sanitize_discord_text
 
 
 def item(title: str, url: str | None, confidence: float = 0.8, importance: int = 8) -> DigestItem:
@@ -38,9 +38,56 @@ def test_renderer_and_chunks_disable_mentions() -> None:
         "AI",
         "AlphaSignal",
     )
-    assert "@\u200beveryone" in text
+    assert "＠everyone" in text
     chunks = chunk_text(text * 100)
     assert all(len(chunk) <= 2000 for chunk in chunks)
+
+
+def test_renderer_sanitizes_untrusted_fields_and_preserves_application_urls() -> None:
+    hostile = "```\n# heading\n||spoiler|| [click](https://evil.example) @everyone"
+    hostile_item = DigestItem.model_construct(
+        title=hostile,
+        category="AI_MODEL",
+        summary_zh_tw=hostile,
+        why_it_matters_zh_tw=hostile,
+        importance=8,
+        confidence=0.8,
+        tags=[hostile],
+        source_url="https://example.com/article",
+    )
+
+    text = render_digest(
+        [DigestEntry(hostile_item, source_name=hostile)],
+        datetime(2026, 6, 22, tzinfo=UTC),
+        hostile,
+        hostile,
+    )
+
+    assert sanitize_discord_text(hostile) in text
+    assert "```" not in text
+    assert "\n# heading" not in text
+    assert "||spoiler||" not in text
+    assert "@everyone" not in text
+    assert "[click](https://evil.example)" not in text
+    assert "文章：<https://example.com/article>" in text
+
+
+def test_renderer_preserves_multilingual_readability_and_code_punctuation() -> None:
+    digest_item = item(
+        "C++ v2.0 API() — équipe 日本語",
+        None,
+    ).model_copy(
+        update={
+            "summary_zh_tw": "Résumé：這是日本語與繁體中文的摘要，呼叫 x()。",
+            "why_it_matters_zh_tw": "L’équipe 可用 C++ v2.0 改善流程。",
+        }
+    )
+
+    text = render_digest([digest_item], datetime(2026, 6, 22, tzinfo=UTC), "AI", "Source")
+
+    assert sanitize_discord_text("C++ v2.0 API() — équipe 日本語") in text
+    assert sanitize_discord_text("Résumé：這是日本語與繁體中文的摘要，呼叫 x()。") in text
+    assert sanitize_discord_text("L’équipe 可用 C++ v2.0 改善流程。") in text
 
 
 def test_renderer_shows_item_source_even_when_extraction_confidence_is_low() -> None:
