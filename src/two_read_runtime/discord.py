@@ -46,13 +46,12 @@ def configured_destinations(mode: str, webhook_url: str, bot_token: str, bot_cha
     if mode in {"webhook", "both"}:
         if not webhook_url:
             raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
+        webhook_key = f"webhook:{hashlib.sha256(webhook_url.encode()).hexdigest()}"
         try:
             webhook_url = validate_discord_webhook(webhook_url)
         except EndpointPolicyError as error:
             raise DiscordDeliveryError(error.code) from None
-        destinations.append(
-            DiscordDestination("webhook", f"webhook:{hashlib.sha256(webhook_url.encode()).hexdigest()}", webhook_url=webhook_url)
-        )
+        destinations.append(DiscordDestination("webhook", webhook_key, webhook_url=webhook_url))
     if mode in {"bot", "both"}:
         if not bot_token or not (bot_channel_id.isascii() and bot_channel_id.isdecimal()):
             raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
@@ -200,11 +199,12 @@ def _destination(value: DiscordDestination | str) -> DiscordDestination:
         return value
     if not value:
         raise DiscordDeliveryError("DISCORD_WEBHOOK_URL is required")
+    webhook_key = f"webhook:{hashlib.sha256(value.encode()).hexdigest()}"
     try:
         webhook_url = validate_discord_webhook(value)
     except EndpointPolicyError as error:
         raise DiscordDeliveryError(error.code) from None
-    return DiscordDestination("webhook", f"webhook:{hashlib.sha256(webhook_url.encode()).hexdigest()}", webhook_url=webhook_url)
+    return DiscordDestination("webhook", webhook_key, webhook_url=webhook_url)
 
 
 def _request(

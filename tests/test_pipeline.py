@@ -4,6 +4,7 @@ import sqlite3
 from base64 import urlsafe_b64encode
 from dataclasses import replace
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -19,7 +20,7 @@ from two_much_two_read.ollama import OllamaSchemaError
 from two_much_two_read.pipeline import deliver_digest, run_pipeline
 from two_much_two_read.schemas import ArticleAnalysis, EmailExtraction, NewsletterItemAnalysis, ResolvedContent, SourceDocument
 from two_much_two_read.storage import Database
-from two_read_runtime.discord import DiscordDeliveryError
+from two_read_runtime.discord import DiscordDeliveryError, DiscordDestination
 
 
 def write_sources(path: Path, *, enabled: bool = True) -> None:
@@ -801,6 +802,40 @@ def test_retry_sends_only_the_failed_destination(tmp_path: Path, monkeypatch: py
         "failed_by_error_code": {},
     }
     assert calls == ["bot"]
+    database.close()
+
+
+def test_retry_preserves_pre_validation_webhook_checkpoint_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    raw_webhook_url = "https://DISCORD.COM/api/webhooks/123456789012345678/test-webhook-token"
+    webhook_key = f"webhook:{sha256(raw_webhook_url.encode()).hexdigest()}"
+    settings = Settings(
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_delivery_mode="both",
+        discord_webhook_url=raw_webhook_url,
+        discord_bot_token="token",
+        discord_bot_channel_id="123",
+    )
+    previous_destinations = [
+        DiscordDestination("webhook", webhook_key, webhook_url=raw_webhook_url),
+        DiscordDestination("bot", "bot:123", bot_token="token", bot_channel_id="123"),
+    ]
+    database = Database(settings.database_path)
+    digest_id = database.save_digest(
+        "daily:validated-webhook", "start", "end", "UTC", "digest", destinations=previous_destinations
+    )
+    assert digest_id is not None
+    webhook, bot = database.digest_deliveries(digest_id, previous_destinations)
+    database.finish_digest_delivery(int(webhook["id"]), ["webhook-message"], previous_destinations)
+    database.fail_digest_delivery(int(bot["id"]), "DISCORD_BOT_FORBIDDEN", previous_destinations)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        pipeline, "deliver", lambda destination, *args, **kwargs: calls.append(destination.transport) or ["bot-message"]
+    )
+
+    assert pipeline.retry_delivery(settings, database).delivered == 1
+    assert calls == ["bot"]
+    assert settings.discord_destinations()[0].key == webhook_key
     database.close()
 
 
