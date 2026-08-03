@@ -2,7 +2,7 @@
 
 Three local-first tools that post only their final output to a private Discord destination:
 
-- `2much2read` reads configured Gmail newsletters, summarizes them with local Ollama, and records digests in SQLite.
+- `2much2read` reads configured Gmail newsletters, extracts candidates with local Ollama, reranks them locally, and records digests in SQLite.
 - `2busy1miss` syncs configured Google Calendar events into SQLite reminder jobs,
   then sends due reminders without repeatedly querying Google.
 - `2bored1made` sends a direct local notification, with optional whitelisted Discord user mentions.
@@ -69,7 +69,8 @@ Requirements: Gmail API desktop OAuth credentials, a Discord webhook or bot, and
 
 ```bash
 uv sync --all-groups
-ollama pull llama3.2:3b
+ollama pull qwen3:4b
+ollama pull qwen3:8b
 sh scripts/install-2much2read-user-service.sh \
   --gmail-client-secret ~/Downloads/gmail-client.json
 
@@ -88,6 +89,13 @@ systemctl --user enable --now 2much2read-runtime.timer
 `DIGEST_SCHEDULE_TIME` and `DIGEST_SCHEDULE_TIMEZONE` control the newsletter timer
 (defaults: `08:00` and `America/Montreal`). After changing either setting, rerun the
 installer to render the systemd timer. Manual CLI runs are unchanged.
+
+Each run uses `OLLAMA_MODEL` to extract candidates, `RERANKER_MODEL` to rank them,
+then `OLLAMA_REVIEW_MODEL` for final selection. The extractor is unloaded before
+reranking and the reviewer is loaded only after reranking, so `qwen3:8b` never shares
+memory with the extractor. `DIGEST_REVIEW_CANDIDATE_LIMIT` bounds reviewer input and
+`DIGEST_MAX_ITEMS` is the final delivered-item limit. Each item includes its newsletter
+source in the Discord digest.
 
 Useful commands:
 

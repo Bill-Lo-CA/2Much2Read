@@ -124,6 +124,10 @@ class DigestEntry:
     hn_comments: int | None = None
     hn_item_id: str | None = None
     content_basis: str | None = None
+    candidate_id: int | None = None
+    source_id: str | None = None
+    source_name: str | None = None
+    review_score: int | None = None
 
 
 def canonical_url(value: str | None) -> str | None:
@@ -163,8 +167,9 @@ def _entry_key(entry: DigestEntry) -> str:
     return normalized_title(entry.item.title)
 
 
-def _entry_rank(entry: DigestEntry) -> tuple[int, float, int, int, float]:
+def _entry_rank(entry: DigestEntry) -> tuple[int, int, float, int, int, float]:
     return (
+        entry.review_score if entry.review_score is not None else -1,
         entry.item.importance,
         entry.item.confidence,
         entry.hn_score if entry.hn_score is not None else -1,
@@ -228,7 +233,7 @@ def render_digest(
         else DigestEntry(item, article_url=str(item.source_url) if item.source_url else None)
         for item in items
     ]
-    eligible = [item for item in dedupe_entries(entries) if item.item.confidence >= 0.45]
+    eligible = dedupe_entries(entries)
     eligible.sort(key=_entry_rank, reverse=True)
     if not eligible:
         return ""
@@ -240,6 +245,8 @@ def render_digest(
             f"   {labels['summary']}：{item.summary_zh_tw}",
             f"   {labels['why']}：{item.why_it_matters_zh_tw}",
         ]
+        if value.source_name:
+            lines.append(f"   {labels['source']}：{value.source_name}")
         if value.hn_item_id:
             if value.hn_score is not None and value.hn_comments is not None:
                 lines.append(f"   {labels['hn']}：{value.hn_score} {labels['points']} · {value.hn_comments} {labels['comments']}")
@@ -250,7 +257,7 @@ def render_digest(
             if value.discussion_url:
                 lines.append(f"   {labels['discussion']}：<{value.discussion_url}>")
         elif item.source_url:
-            lines.append(f"   {labels['source']}：<{item.source_url}>")
+            lines.append(f"   {labels['article']}：<{item.source_url}>")
         return "\n".join(lines)
 
     top = eligible[:top_items]
