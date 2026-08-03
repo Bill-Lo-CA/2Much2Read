@@ -37,9 +37,7 @@ def _email_content(value: ExtractedEmailContent | str) -> ExtractedEmailContent:
     return value if isinstance(value, ExtractedEmailContent) else ExtractedEmailContent(analysis_text=value)
 
 
-def _items(
-    database: Database, document_ids: list[int], maximum: int, source_names: dict[str, str]
-) -> list[DigestEntry]:
+def _items(database: Database, document_ids: list[int], maximum: int, source_names: dict[str, str]) -> list[DigestEntry]:
     result: list[DigestEntry] = []
     for row in database.items_for_documents(document_ids, maximum * 5):
         item = DigestItem.model_validate(
@@ -72,9 +70,7 @@ def _items(
     return result
 
 
-def _ranked_entries(
-    settings: Settings, reranker: RelevanceReranker, entries: list[DigestEntry]
-) -> list[DigestEntry]:
+def _ranked_entries(settings: Settings, reranker: RelevanceReranker, entries: list[DigestEntry]) -> list[DigestEntry]:
     if not entries:
         return []
     return reranker.rank(dedupe_entries(entries))[: settings.digest_review_candidate_limit]

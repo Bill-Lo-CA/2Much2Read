@@ -47,9 +47,7 @@ def test_final_review_selects_scored_items_and_releases_the_reviewer() -> None:
         def review_digest(self, candidates: list[dict[str, object]], maximum: int) -> DigestReview:
             assert maximum == 1
             self.candidates = candidates
-            return DigestReview.model_validate(
-                {"selected": [{"candidate_id": 2, "score": 90, "reason_zh_tw": "具體發布"}]}
-            )
+            return DigestReview.model_validate({"selected": [{"candidate_id": 2, "score": 90, "reason_zh_tw": "具體發布"}]})
 
         def unload(self, model: str) -> None:
             self.unloaded.append(model)

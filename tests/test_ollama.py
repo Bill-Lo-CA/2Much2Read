@@ -79,9 +79,7 @@ def test_reviews_candidates_with_the_dedicated_model() -> None:
             200,
             json={
                 "message": {
-                    "content": json.dumps(
-                        {"selected": [{"candidate_id": 2, "score": 91, "reason_zh_tw": "具體的新模型發布"}]}
-                    )
+                    "content": json.dumps({"selected": [{"candidate_id": 2, "score": 91, "reason_zh_tw": "具體的新模型發布"}]})
                 }
             },
         )

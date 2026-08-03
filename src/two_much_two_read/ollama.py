@@ -327,9 +327,7 @@ class OllamaClient:
                 raise ValueError("review selected invalid candidates")
             return result
         except (ValidationError, ValueError, KeyError, TypeError) as error:
-            raise OllamaSchemaError(
-                f"OLLAMA_REVIEW_INVALID error={str(error)!r} response_preview={_preview(raw)!r}"
-            ) from None
+            raise OllamaSchemaError(f"OLLAMA_REVIEW_INVALID error={str(error)!r} response_preview={_preview(raw)!r}") from None
 
     def unload(self, model: str) -> None:
         try:
