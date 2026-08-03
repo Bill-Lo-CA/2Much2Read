@@ -49,6 +49,7 @@ class LinkCandidate(BaseModel):
 
 class ExtractedEmailContent(BaseModel):
     analysis_text: str = Field(min_length=1)
+    original_characters: int | None = None
     link_candidates: list[LinkCandidate] = Field(default_factory=list)
 
 

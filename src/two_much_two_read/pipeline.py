@@ -19,7 +19,7 @@ from .config import GmailSource, HackerNewsSource, Settings, load_sources
 from .digest import DigestEntry, dedupe_entries, render_digest
 from .gmail import GmailClient, credentials, message_headers
 from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
-from .mime import EmptyEmailError, extract_gmail_payload
+from .mime import MAX_ANALYSIS_CHARS, EmailExtractionError, extract_gmail_payload
 from .ollama import OllamaClient, OllamaSchemaError, close_ollama_client, create_ollama_client
 from .reranker import RelevanceReranker
 from .schemas import DigestItem, ExtractedEmailContent, ResolvedContent
@@ -175,7 +175,8 @@ def _process_source(
         try:
             content = _email_content(extract_gmail_payload(payload))
             body = content.analysis_text
-        except EmptyEmailError:
+        except EmailExtractionError as error:
+            error_code = error.code
             document_id = database.discover_gmail_document(
                 gmail_id,
                 str(message.get("threadId", "")),
@@ -190,14 +191,17 @@ def _process_source(
             if document_id is None:
                 continue
             discovered += 1
-            database.fail_document(document_id, "EMAIL_NO_USABLE_TEXT")
+            database.fail_document(document_id, error_code)
             failed += 1
-            status(f"{source.id}: failed {subject} (EMAIL_NO_USABLE_TEXT)")
+            status(f"{source.id}: failed {subject} ({error_code})")
             if not dry_run:
                 _sync_processing_label(database, gmail, gmail_id, document_id, "failed")
             continue
-        truncated = len(body) > 45_000
-        body = body[:45_000] if truncated else body
+        original_characters = content.original_characters
+        if original_characters is None:
+            original_characters = len(body)
+        truncated = original_characters > MAX_ANALYSIS_CHARS
+        body = body[:MAX_ANALYSIS_CHARS] if truncated else body
         document_id = database.discover_gmail_document(
             gmail_id,
             str(message.get("threadId", "")),

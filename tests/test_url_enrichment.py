@@ -42,7 +42,7 @@ def test_keeps_ambiguous_or_failed_items_without_display_url() -> None:
     )[0]
     failed = enricher.failed_item(
         enricher.match([analysis()], [candidate("link-0001", "Useful article", "https://example.com/article")])[0],
-        "URL_RESOLUTION_TIMEOUT",
+        "URL_RESOLUTION_DEADLINE_EXCEEDED",
     )
 
     assert ambiguous.method == "ambiguous"

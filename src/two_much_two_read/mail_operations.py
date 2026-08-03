@@ -17,7 +17,7 @@ from .command_models import (
 )
 from .config import GmailSource, Settings, load_sources
 from .gmail import FilterStatus, GmailClient, credentials, display_id, message_headers
-from .mime import extract_gmail_payload
+from .mime import MAX_ANALYSIS_CHARS, extract_gmail_payload
 from .ollama import close_ollama_client, create_ollama_client
 from .storage import Database
 from .subscription_operations import configured_candidates
@@ -86,7 +86,11 @@ def inspect_mail(settings: Settings, selector: MailSelector, message_id: str, li
             raise ValueError("email has no Gmail payload")
         content = extract_gmail_payload(payload)
         text = content.analysis_text
-        llm_input = text[:45_000]
+        original_characters = content.original_characters
+        if original_characters is None:
+            original_characters = len(text)
+        truncated = original_characters > MAX_ANALYSIS_CHARS
+        llm_input = text[:MAX_ANALYSIS_CHARS]
         extraction: dict[str, object] | None = None
         if extract:
             source_id = selector.source or selector.subscription or "query"
@@ -99,7 +103,7 @@ def inspect_mail(settings: Settings, selector: MailSelector, message_id: str, li
             max_items = source.max_items_per_email if source else 10
             ollama = create_ollama_client(settings)
             try:
-                extraction = ollama.extract(source_id, llm_input, len(text) > 45_000, max_items).model_dump(mode="json")
+                extraction = ollama.extract(source_id, llm_input, truncated, max_items).model_dump(mode="json")
             finally:
                 close_ollama_client(ollama)
         headers = payload.get("headers", [])
@@ -114,9 +118,9 @@ def inspect_mail(settings: Settings, selector: MailSelector, message_id: str, li
             ),
             parsed=ParsedMail(
                 text=llm_input,
-                original_characters=len(text),
+                original_characters=original_characters,
                 input_characters=len(llm_input),
-                truncated=len(text) > 45_000,
+                truncated=truncated,
             ),
             extraction=extraction,
         )
