@@ -4,6 +4,13 @@ import httpx
 import yaml
 
 from two_read_runtime.discord import DiscordDeliveryError, deliver
+from two_read_runtime.endpoint_policy import (
+    OLLAMA_INSECURE_REMOTE_NOT_ALLOWED,
+    OLLAMA_REMOTE_NOT_ALLOWED,
+    EndpointPolicyError,
+    classify_ollama_endpoint,
+    validate_ollama_endpoint,
+)
 from two_read_runtime.oauth import token_status
 from two_read_runtime.paths import directory_is_creatable
 
@@ -28,23 +35,37 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
         ("https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.settings.basic"),
     )
     checks["database_directory"] = "ok" if directory_is_creatable(settings.database_path.parent) else "not_writable"
+    endpoint_classification = classify_ollama_endpoint(settings.ollama_base_url)
+    checks["ollama_endpoint"] = endpoint_classification
     try:
-        response = httpx.get(f"{settings.ollama_base_url.rstrip('/')}/api/tags", timeout=5)
-        response.raise_for_status()
-        payload = response.json()
-        models = (
-            [model.get("name") for model in payload.get("models", []) if isinstance(model, dict)]
-            if isinstance(payload, dict)
-            else []
-        )
-        available_models = {model_name(str(model)) for model in models}
+        endpoint = validate_ollama_endpoint(settings.ollama_base_url, allow_remote=settings.ollama_allow_remote)
+    except EndpointPolicyError as error:
         checks["ollama"] = (
-            "ok"
-            if all(model_name(model) in available_models for model in (settings.ollama_model, settings.ollama_review_model))
-            else "model_missing"
+            "remote_insecure"
+            if error.code == OLLAMA_INSECURE_REMOTE_NOT_ALLOWED
+            else "remote_not_allowed"
+            if error.code == OLLAMA_REMOTE_NOT_ALLOWED
+            else "invalid"
         )
-    except (httpx.HTTPError, ValueError):
-        checks["ollama"] = "unreachable"
+    else:
+        try:
+            with httpx.Client(timeout=5, trust_env=settings.ollama_trust_env) as client:
+                response = client.get(f"{endpoint.url}/api/tags")
+                response.raise_for_status()
+                payload = response.json()
+            models = (
+                [model.get("name") for model in payload.get("models", []) if isinstance(model, dict)]
+                if isinstance(payload, dict)
+                else []
+            )
+            available_models = {model_name(str(model)) for model in models}
+            checks["ollama"] = (
+                "ok"
+                if all(model_name(model) in available_models for model in (settings.ollama_model, settings.ollama_review_model))
+                else "model_missing"
+            )
+        except (httpx.HTTPError, ValueError):
+            checks["ollama"] = "unreachable"
     try:
         destinations = settings.discord_destinations()
         checks["discord"] = settings.discord_delivery_mode
@@ -63,5 +84,9 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
                     checks[f"discord_test_{destination.transport}"] = "ok"
                 except DiscordDeliveryError:
                     checks[f"discord_test_{destination.transport}"] = "failed"
-    status = "ok" if all(value in {"ok", "webhook", "bot", "both"} for value in checks.values()) else "warning"
+    status = (
+        "ok"
+        if all(value in {"ok", "webhook", "bot", "both", "local", "remote_https"} for value in checks.values())
+        else "warning"
+    )
     return DoctorResult(status=status, checks=checks)

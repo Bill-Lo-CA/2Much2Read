@@ -99,7 +99,7 @@ def test_settings_ignore_repo_dotenv_and_use_private_env_file(
         encoding="utf-8",
     )
     (app_config / ".2busy1miss.env").write_text(
-        "DISCORD_WEBHOOK_URL=https://busy.example/webhook\nDATABASE_PATH=/tmp/2busy1miss.sqlite3\nAGENDA_SCHEDULE_TIME=20:30\n",
+        "DISCORD_WEBHOOK_URL=https://discord.com/api/webhooks/123456789012345678/test-webhook-token\nDATABASE_PATH=/tmp/2busy1miss.sqlite3\nAGENDA_SCHEDULE_TIME=20:30\n",
         encoding="utf-8",
     )
     monkeypatch.chdir(tmp_path)
@@ -108,7 +108,7 @@ def test_settings_ignore_repo_dotenv_and_use_private_env_file(
 
     settings = Settings()
 
-    assert settings.discord_webhook_url == "https://busy.example/webhook"
+    assert settings.discord_webhook_url == "https://discord.com/api/webhooks/123456789012345678/test-webhook-token"
     assert settings.database_path == Path("/tmp/2busy1miss.sqlite3")
     assert settings.agenda_schedule_time == time(20, 30)
 

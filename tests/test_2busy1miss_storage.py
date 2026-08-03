@@ -50,7 +50,9 @@ def test_create_attempts_batches_distinct_candidates(tmp_path: Path) -> None:
 def test_reminder_destinations_retry_independently(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     item = candidate()
-    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+    destinations = configured_destinations(
+        "both", "https://discord.com/api/webhooks/123456789012345678/test-webhook-token", "token", "123"
+    )
     attempt_id = database.create_attempt(item, "message", destinations)
     assert attempt_id is not None
 
@@ -139,7 +141,9 @@ def test_migrating_legacy_reminder_does_not_adopt_unknown_webhook_checkpoint(tmp
     assert attempt_id is not None
     database.record_delivery_progress(attempt_id, ["webhook-message"], "webhook")
     database.fail_delivery(attempt_id)
-    destinations = configured_destinations("both", "https://discord.example/webhook", "token", "123")
+    destinations = configured_destinations(
+        "both", "https://discord.com/api/webhooks/123456789012345678/test-webhook-token", "token", "123"
+    )
 
     database.migrate_legacy_reminder_deliveries(attempt_id, destinations)
 

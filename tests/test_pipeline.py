@@ -4,6 +4,7 @@ import sqlite3
 from base64 import urlsafe_b64encode
 from dataclasses import replace
 from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -19,7 +20,7 @@ from two_much_two_read.ollama import OllamaSchemaError
 from two_much_two_read.pipeline import deliver_digest, run_pipeline
 from two_much_two_read.schemas import ArticleAnalysis, EmailExtraction, NewsletterItemAnalysis, ResolvedContent, SourceDocument
 from two_much_two_read.storage import Database
-from two_read_runtime.discord import DiscordDeliveryError
+from two_read_runtime.discord import DiscordDeliveryError, DiscordDestination
 
 
 def write_sources(path: Path, *, enabled: bool = True) -> None:
@@ -719,7 +720,7 @@ def test_retry_delivery_preserves_corrupt_checkpoint_error(tmp_path: Path, monke
     settings = Settings(
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
     database = Database(settings.database_path)
     corrupt_id = database.save_digest("daily:corrupt", "start", "end", "UTC", "corrupt")
@@ -750,7 +751,7 @@ def test_reset_corrupt_delivery_checkpoint(tmp_path: Path) -> None:
     settings = Settings(
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
     database = Database(settings.database_path)
     destinations = settings.discord_destinations()
@@ -777,7 +778,7 @@ def test_retry_sends_only_the_failed_destination(tmp_path: Path, monkeypatch: py
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
         discord_delivery_mode="both",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
         discord_bot_token="token",
         discord_bot_channel_id="123",
     )
@@ -804,12 +805,46 @@ def test_retry_sends_only_the_failed_destination(tmp_path: Path, monkeypatch: py
     database.close()
 
 
+def test_retry_preserves_pre_validation_webhook_checkpoint_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    raw_webhook_url = "https://DISCORD.COM/api/webhooks/123456789012345678/test-webhook-token"
+    webhook_key = f"webhook:{sha256(raw_webhook_url.encode()).hexdigest()}"
+    settings = Settings(
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_delivery_mode="both",
+        discord_webhook_url=raw_webhook_url,
+        discord_bot_token="token",
+        discord_bot_channel_id="123",
+    )
+    previous_destinations = [
+        DiscordDestination("webhook", webhook_key, webhook_url=raw_webhook_url),
+        DiscordDestination("bot", "bot:123", bot_token="token", bot_channel_id="123"),
+    ]
+    database = Database(settings.database_path)
+    digest_id = database.save_digest(
+        "daily:validated-webhook", "start", "end", "UTC", "digest", destinations=previous_destinations
+    )
+    assert digest_id is not None
+    webhook, bot = database.digest_deliveries(digest_id, previous_destinations)
+    database.finish_digest_delivery(int(webhook["id"]), ["webhook-message"], previous_destinations)
+    database.fail_digest_delivery(int(bot["id"]), "DISCORD_BOT_FORBIDDEN", previous_destinations)
+    calls: list[str] = []
+    monkeypatch.setattr(
+        pipeline, "deliver", lambda destination, *args, **kwargs: calls.append(destination.transport) or ["bot-message"]
+    )
+
+    assert pipeline.retry_delivery(settings, database).delivered == 1
+    assert calls == ["bot"]
+    assert settings.discord_destinations()[0].key == webhook_key
+    database.close()
+
+
 def test_retry_retires_a_removed_failed_destination(tmp_path: Path) -> None:
     both_settings = Settings(
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
         discord_delivery_mode="both",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
         discord_bot_token="token",
         discord_bot_channel_id="123",
     )
@@ -840,12 +875,12 @@ def test_retry_adds_a_new_destination(tmp_path: Path, monkeypatch: pytest.Monkey
     old_settings = Settings(
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
-        discord_webhook_url="https://discord.example/old-webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/old-webhook",
     )
     settings = Settings(
         database_path=old_settings.database_path,
         lock_path=old_settings.lock_path,
-        discord_webhook_url="https://discord.example/new-webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/new-webhook",
     )
     old_destinations = old_settings.discord_destinations()
     destinations = settings.discord_destinations()
@@ -872,7 +907,7 @@ def test_retry_legacy_digest_preserves_bot_checkpoint_in_both_mode(tmp_path: Pat
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
         discord_delivery_mode="both",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
         discord_bot_token="token",
         discord_bot_channel_id="123",
     )
@@ -906,7 +941,7 @@ def test_reset_legacy_corrupt_digest_checkpoint(tmp_path: Path) -> None:
     settings = Settings(
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
     database = Database(settings.database_path)
     digest_id = database.save_digest("daily:legacy-corrupt", "start", "end", "UTC", "digest")
@@ -928,7 +963,7 @@ def test_reset_delivery_does_not_fall_back_to_a_colliding_legacy_digest(tmp_path
     settings = Settings(
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
-        discord_webhook_url="https://discord.example/webhook",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
     destinations = settings.discord_destinations()
     database = Database(settings.database_path)

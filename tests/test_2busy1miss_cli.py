@@ -16,7 +16,7 @@ def test_doctor_reports_a_failed_discord_test(tmp_path: Path, monkeypatch: pytes
     settings = Settings(
         reminders_config_path=reminders_path,
         database_path=tmp_path / "reminders.sqlite3",
-        discord_webhook_url="https://discord.example",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
     )
 
     def offline(*args: object, **kwargs: object) -> None:
@@ -38,7 +38,7 @@ def test_doctor_tests_each_both_destination(tmp_path: Path, monkeypatch: pytest.
         reminders_config_path=reminders_path,
         database_path=tmp_path / "reminders.sqlite3",
         discord_delivery_mode="both",
-        discord_webhook_url="https://discord.example",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
         discord_bot_token="token",
         discord_bot_channel_id="123",
     )

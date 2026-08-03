@@ -8,6 +8,33 @@ from two_read_runtime.discord import DiscordDeliveryError
 from two_read_runtime.paths import directory_is_creatable
 
 
+def mock_ollama(monkeypatch: pytest.MonkeyPatch, models: list[str]) -> list[dict[str, object]]:
+    options: list[dict[str, object]] = []
+
+    class Response:
+        def raise_for_status(self) -> None:
+            pass
+
+        def json(self) -> dict[str, object]:
+            return {"models": [{"name": model} for model in models]}
+
+    class Client:
+        def __init__(self, **kwargs: object) -> None:
+            options.append(kwargs)
+
+        def __enter__(self) -> "Client":
+            return self
+
+        def __exit__(self, *args: object) -> None:
+            pass
+
+        def get(self, *args: object, **kwargs: object) -> Response:
+            return Response()
+
+    monkeypatch.setattr(diagnostics.httpx, "Client", Client)
+    return options
+
+
 @pytest.mark.parametrize(
     ("value", "expected"),
     [
@@ -23,14 +50,7 @@ def test_normalizes_ollama_default_tags(value: str, expected: str) -> None:
 def test_doctor_accepts_default_model_tag_and_creatable_database_directory(
     tmp_path: Path, newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    class Response:
-        def raise_for_status(self) -> None:
-            pass
-
-        def json(self) -> dict[str, object]:
-            return {"models": [{"name": "mistral:latest"}]}
-
-    monkeypatch.setattr(diagnostics.httpx, "get", lambda *args, **kwargs: Response())
+    client_options = mock_ollama(monkeypatch, ["mistral:latest"])
     settings = newsletter_settings.model_copy(
         update={
             "database_path": tmp_path / "new-directory" / "digest.sqlite3",
@@ -40,11 +60,13 @@ def test_doctor_accepts_default_model_tag_and_creatable_database_directory(
     )
 
     assert diagnostics.doctor(settings, send_test=False).checks["ollama"] == "ok"
+    assert diagnostics.doctor(settings, send_test=False).checks["ollama_endpoint"] == "local"
     assert diagnostics.doctor(settings, send_test=False).checks["database_directory"] == "ok"
     tagged_settings = settings.model_copy(update={"ollama_model": "mistral:7b"})
     assert diagnostics.doctor(tagged_settings, send_test=False).checks["ollama"] == "model_missing"
     missing_reviewer = settings.model_copy(update={"ollama_review_model": "qwen3:8b"})
     assert diagnostics.doctor(missing_reviewer, send_test=False).checks["ollama"] == "model_missing"
+    assert all(options == {"timeout": 5, "trust_env": False} for options in client_options)
 
 
 def test_missing_database_directory_is_creatable_under_writable_parent(tmp_path: Path) -> None:
@@ -52,35 +74,26 @@ def test_missing_database_directory_is_creatable_under_writable_parent(tmp_path:
 
 
 def test_doctor_reports_an_unreachable_discord_test(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
-    class Response:
-        def raise_for_status(self) -> None:
-            pass
-
-        def json(self) -> dict[str, object]:
-            return {"models": []}
-
     def offline(*args: object, **kwargs: object) -> None:
         raise DiscordDeliveryError()
 
-    monkeypatch.setattr(diagnostics.httpx, "get", lambda *args, **kwargs: Response())
+    mock_ollama(monkeypatch, [])
     monkeypatch.setattr(diagnostics, "deliver", offline)
 
-    result = diagnostics.doctor(newsletter_settings.model_copy(update={"discord_webhook_url": "https://discord.example"}), True)
+    result = diagnostics.doctor(
+        newsletter_settings.model_copy(
+            update={"discord_webhook_url": "https://discord.com/api/webhooks/123456789012345678/test-webhook-token"}
+        ),
+        True,
+    )
 
     assert result.status == "warning"
     assert result.checks["discord_test_webhook"] == "failed"
 
 
 def test_doctor_tests_each_both_destination(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
-    class Response:
-        def raise_for_status(self) -> None:
-            pass
-
-        def json(self) -> dict[str, object]:
-            return {"models": []}
-
     sent: list[str] = []
-    monkeypatch.setattr(diagnostics.httpx, "get", lambda *args, **kwargs: Response())
+    mock_ollama(monkeypatch, [])
 
     def send(destination: object, *args: object) -> list[str]:
         transport = destination.transport  # type: ignore[attr-defined]
@@ -102,3 +115,13 @@ def test_doctor_tests_each_both_destination(newsletter_settings: Settings, monke
     assert result.checks["discord_test_webhook"] == "ok"
     assert result.checks["discord_test_bot"] == "failed"
     assert sent == ["webhook", "bot"]
+
+
+def test_doctor_reports_remote_endpoint_policy_without_connecting(newsletter_settings: Settings) -> None:
+    result = diagnostics.doctor(
+        newsletter_settings.model_copy(update={"ollama_base_url": "https://ollama.example"}), send_test=False
+    )
+
+    assert result.checks["ollama_endpoint"] == "remote_https"
+    assert result.checks["ollama"] == "remote_not_allowed"
+    assert result.status == "warning"

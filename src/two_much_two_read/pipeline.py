@@ -20,7 +20,7 @@ from .digest import DigestEntry, dedupe_entries, render_digest
 from .gmail import GmailClient, credentials, message_headers
 from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
 from .mime import EmptyEmailError, extract_gmail_payload
-from .ollama import OllamaClient, OllamaSchemaError, create_ollama_client
+from .ollama import OllamaClient, OllamaSchemaError, close_ollama_client, create_ollama_client
 from .reranker import RelevanceReranker
 from .schemas import DigestItem, ExtractedEmailContent, ResolvedContent
 from .storage import Database
@@ -415,6 +415,7 @@ def run_pipeline(
     delivery_failed = 0
     delivery_pending = 0
     hackernews: HackerNewsClient | None = None
+    ollama: OllamaClient | None = None
     try:
         with ProcessLock(settings.lock_path):
             database = Database(Path(":memory:") if dry_run else settings.database_path)
@@ -565,6 +566,8 @@ def run_pipeline(
             database.close()
         if hackernews is not None:
             hackernews.close()
+        if ollama is not None:
+            close_ollama_client(ollama)
 
 
 def retry_delivery(settings: Settings, database: Database | None = None) -> NewsletterRetryResult:
