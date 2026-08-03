@@ -3,10 +3,14 @@ from __future__ import annotations
 import pytest
 
 from two_much_two_read.article_fetcher import (
+    ARTICLE_FETCH_DEADLINE_SECONDS,
     MAX_RESPONSE_BYTES,
+    ROBOTS_DEADLINE_SECONDS,
+    URL_RESOLUTION_DEADLINE_SECONDS,
     ArticleFetcher,
     ArticleFetchError,
     ArticleResponse,
+    UrlResolutionError,
     ValidatedURL,
 )
 
@@ -17,6 +21,31 @@ def public_dns(_: str) -> list[str]:
 
 def article_body() -> bytes:
     return ("<article><p>Useful article content. </p>" * 40 + "</article>").encode()
+
+
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+
+    def __call__(self) -> float:
+        return self.now
+
+    def advance(self, seconds: float) -> None:
+        self.now += seconds
+
+
+def test_article_fetch_deadline_expires_before_first_request() -> None:
+    calls = 0
+
+    def clock() -> float:
+        nonlocal calls
+        calls += 1
+        return 0 if calls == 1 else ARTICLE_FETCH_DEADLINE_SECONDS
+
+    fetcher = ArticleFetcher(public_dns, lambda _: pytest.fail("request should not be sent"), clock=clock)
+
+    with pytest.raises(ArticleFetchError, match="ARTICLE_FETCH_DEADLINE_EXCEEDED"):
+        fetcher.fetch("https://example.com/article")
 
 
 def test_blocks_unsafe_urls_before_request() -> None:
@@ -115,3 +144,84 @@ def test_rejects_canonical_metadata_that_downgrades_https() -> None:
 
     assert resolved.final_url == "https://example.com/article"
     assert resolved.canonical_url is None
+
+
+def test_article_fetch_deadline_expires_during_body_operation() -> None:
+    clock = FakeClock()
+
+    def response_provider(request: ValidatedURL) -> ArticleResponse:
+        if request.target == "/robots.txt":
+            return ArticleResponse(404, {}, b"")
+        clock.advance(ARTICLE_FETCH_DEADLINE_SECONDS)
+        return ArticleResponse(200, {"content-type": "text/html"}, article_body())
+
+    with pytest.raises(ArticleFetchError, match="ARTICLE_FETCH_DEADLINE_EXCEEDED"):
+        ArticleFetcher(public_dns, response_provider, clock=clock).fetch("https://example.com/article")
+
+
+def test_article_fetch_deadline_expires_after_robots() -> None:
+    clock = FakeClock()
+
+    def response_provider(request: ValidatedURL) -> ArticleResponse:
+        if request.target != "/robots.txt":
+            pytest.fail("article request should not be sent")
+        clock.advance(ARTICLE_FETCH_DEADLINE_SECONDS)
+        return ArticleResponse(404, {}, b"")
+
+    with pytest.raises(ArticleFetchError, match="ARTICLE_FETCH_DEADLINE_EXCEEDED"):
+        ArticleFetcher(public_dns, response_provider, clock=clock).fetch("https://example.com/article")
+
+
+def test_expired_robots_subdeadline_remains_permissive() -> None:
+    clock = FakeClock()
+
+    def response_provider(request: ValidatedURL) -> ArticleResponse:
+        if request.target == "/robots.txt":
+            clock.advance(ROBOTS_DEADLINE_SECONDS + 1)
+            return ArticleResponse(503, {}, b"")
+        return ArticleResponse(200, {"content-type": "text/html"}, article_body())
+
+    fetched = ArticleFetcher(public_dns, response_provider, clock=clock).fetch("https://example.com/article")
+
+    assert fetched.body == article_body()
+
+
+def test_explicit_robots_deny_survives_subdeadline() -> None:
+    clock = FakeClock()
+
+    def response_provider(request: ValidatedURL) -> ArticleResponse:
+        if request.target == "/robots.txt":
+            clock.advance(ROBOTS_DEADLINE_SECONDS + 1)
+            return ArticleResponse(200, {}, b"User-agent: *\nDisallow: /")
+        return ArticleResponse(200, {"content-type": "text/html"}, article_body())
+
+    with pytest.raises(ArticleFetchError, match="ARTICLE_ROBOTS_DENIED"):
+        ArticleFetcher(public_dns, response_provider, clock=clock).fetch("https://example.com/article")
+
+
+def test_article_fetch_deadline_expires_during_redirect_validation() -> None:
+    clock = FakeClock()
+
+    def resolver(hostname: str) -> list[str]:
+        if hostname == "other.example":
+            clock.advance(ARTICLE_FETCH_DEADLINE_SECONDS)
+        return public_dns(hostname)
+
+    def response_provider(request: ValidatedURL) -> ArticleResponse:
+        if request.target == "/robots.txt":
+            return ArticleResponse(404, {}, b"")
+        return ArticleResponse(302, {"location": "https://other.example/article"}, b"")
+
+    with pytest.raises(ArticleFetchError, match="ARTICLE_FETCH_DEADLINE_EXCEEDED"):
+        ArticleFetcher(resolver, response_provider, clock=clock).fetch("https://example.com/start")
+
+
+def test_metadata_resolution_deadline_maps_internal_article_deadline() -> None:
+    clock = FakeClock()
+
+    def response_provider(_: ValidatedURL) -> ArticleResponse:
+        clock.advance(URL_RESOLUTION_DEADLINE_SECONDS)
+        return ArticleResponse(200, {"content-type": "text/html"}, b"<html></html>")
+
+    with pytest.raises(UrlResolutionError, match="URL_RESOLUTION_DEADLINE_EXCEEDED"):
+        ArticleFetcher(public_dns, response_provider, clock=clock).resolve_url("https://example.com/article")

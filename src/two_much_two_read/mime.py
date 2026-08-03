@@ -14,6 +14,14 @@ from bs4.element import Tag
 
 from .schemas import HTTP_URL, ExtractedEmailContent, LinkCandidate
 
+MAX_MIME_DEPTH = 20
+MAX_MIME_PARTS = 200
+MAX_TOTAL_DECODED_BYTES = 5 * 1024 * 1024
+MAX_PLAIN_BYTES = 2 * 1024 * 1024
+MAX_HTML_BYTES = 2 * 1024 * 1024
+MAX_ANALYSIS_CHARS = 45_000
+MAX_LINK_CANDIDATES = 200
+
 FOOTER_LINE_PATTERN = re.compile(
     r"^(?:unsubscribe|manage preferences|privacy policy|取消訂閱)(?:\s*[|·/]\s*"
     r"(?:unsubscribe|manage preferences|privacy policy|取消訂閱))*$",
@@ -29,8 +37,46 @@ MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'\]]+")
 
 
-class EmptyEmailError(ValueError):
-    pass
+class EmailExtractionError(ValueError):
+    code: str
+
+    def __init__(self, message: str, code: str | None = None) -> None:
+        if code is None:
+            code = message
+        super().__init__(message)
+        self.code = code
+
+
+class EmptyEmailError(EmailExtractionError):
+    def __init__(self, message: str = "email contains no usable text") -> None:
+        super().__init__(message, "EMAIL_NO_USABLE_TEXT")
+
+
+class _TraversalBudget:
+    def __init__(self) -> None:
+        self.parts = 0
+        self.total_bytes = 0
+        self.plain_bytes = 0
+        self.html_bytes = 0
+
+    def visit(self, depth: int) -> None:
+        if depth > MAX_MIME_DEPTH or self.parts >= MAX_MIME_PARTS:
+            raise EmailExtractionError("email MIME structure is too complex", "EMAIL_STRUCTURE_TOO_COMPLEX")
+        self.parts += 1
+
+    def add_decoded_bytes(self, content_type: str, payload: bytes) -> None:
+        size = len(payload)
+        plain_bytes = self.plain_bytes + size if content_type == "text/plain" else self.plain_bytes
+        html_bytes = self.html_bytes + size if content_type == "text/html" else self.html_bytes
+        if (
+            self.total_bytes + size > MAX_TOTAL_DECODED_BYTES
+            or plain_bytes > MAX_PLAIN_BYTES
+            or html_bytes > MAX_HTML_BYTES
+        ):
+            raise EmailExtractionError("email exceeds its extraction size budget", "EMAIL_TOO_LARGE")
+        self.total_bytes += size
+        self.plain_bytes = plain_bytes
+        self.html_bytes = html_bytes
 
 
 def _safe_url(url: str) -> str | None:
@@ -72,8 +118,13 @@ def _plain_context(text: str, position: int, raw_url: str) -> str:
 def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
     candidates: list[LinkCandidate] = []
     seen: set[str] = set()
+    processed = 0
 
     def add(raw_url: str, anchor_text: str, nearby_text: str, kind: Literal["article", "unknown"] = "article") -> None:
+        nonlocal processed
+        processed += 1
+        if processed > MAX_LINK_CANDIDATES:
+            raise EmailExtractionError("email contains too many link candidates", "EMAIL_TOO_MANY_LINKS")
         safe_url = _safe_url(raw_url)
         if safe_url is None or safe_url in seen:
             return
@@ -95,13 +146,10 @@ def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
             )
         )
 
-    for anchor in _visible_soup(html).find_all("a"):
-        raw_url = _safe_url(str(anchor.get("href", "")))
-        if raw_url is None:
-            continue
+    for anchor in _visible_soup(html).find_all("a", limit=MAX_LINK_CANDIDATES + 1):
         anchor_text = anchor.get_text(" ", strip=True)
         nearby_text = _nearby_text(anchor)
-        add(raw_url, anchor_text, nearby_text, "article" if anchor_text else "unknown")
+        add(str(anchor.get("href", "")), anchor_text, nearby_text, "article" if anchor_text else "unknown")
     for match in MARKDOWN_LINK_PATTERN.finditer(plain):
         raw_url = match.group(2)
         add(raw_url, match.group(1), _plain_context(plain, match.start(), raw_url))
@@ -141,70 +189,108 @@ def _content(plain: list[str], html: list[str]) -> ExtractedEmailContent:
     analysis_text = re.sub(r"\n{3,}", "\n\n", analysis_text).strip()
     if not analysis_text:
         raise EmptyEmailError("email contains no usable text")
+    analysis_text = analysis_text[:MAX_ANALYSIS_CHARS].rstrip()
     return ExtractedEmailContent(analysis_text=analysis_text, link_candidates=_link_candidates(plain_content, html_content))
 
 
-def _decode(part: Message) -> str:
+def _decoded_payload(part: Message) -> bytes:
     payload = part.get_payload(decode=True) or b""
+    return payload if isinstance(payload, bytes) else str(payload).encode()
+
+
+def _decode(part: Message, payload: bytes) -> str:
     charset = part.get_content_charset() or "utf-8"
-    return payload.decode(charset, errors="replace") if isinstance(payload, bytes) else str(payload)
+    return payload.decode(charset, errors="replace")
 
 
 def extract_mime(raw: bytes) -> ExtractedEmailContent:
+    if len(raw) > MAX_TOTAL_DECODED_BYTES:
+        raise EmailExtractionError("raw email exceeds its extraction size budget", "EMAIL_TOO_LARGE")
     message = BytesParser(policy=policy.default).parsebytes(raw)
+    budget = _TraversalBudget()
     plain: list[str] = []
     html: list[str] = []
-    parts = message.walk() if message.is_multipart() else [message]
-    for part in parts:
-        if part.is_multipart() or part.get_content_disposition() == "attachment":
+    budget.visit(0)
+    stack: list[tuple[Message, int]] = [(message, 0)]
+    while stack:
+        part, depth = stack.pop()
+        if part.is_multipart():
+            children = part.get_payload()
+            if isinstance(children, list):
+                if len(children) > MAX_MIME_PARTS - budget.parts:
+                    raise EmailExtractionError("email MIME structure is too complex", "EMAIL_STRUCTURE_TOO_COMPLEX")
+                for child in reversed(children):
+                    if isinstance(child, Message):
+                        budget.visit(depth + 1)
+                        stack.append((child, depth + 1))
             continue
-        if part.get_content_type() == "text/plain":
-            plain.append(_decode(part))
-        elif part.get_content_type() == "text/html":
-            html.append(_decode(part))
+        payload = _decoded_payload(part)
+        content_type = part.get_content_type()
+        budget.add_decoded_bytes(content_type, payload)
+        if part.get_content_disposition() == "attachment":
+            continue
+        if content_type == "text/plain":
+            plain.append(_decode(part, payload))
+        elif content_type == "text/html":
+            html.append(_decode(part, payload))
     return _content(plain, html)
 
 
-def _gmail_parts(node: dict[str, object], wanted: str) -> list[str]:
-    found: list[str] = []
-    body = node.get("body")
-    data = body.get("data") if isinstance(body, dict) else None
-    headers = node.get("headers", [])
-    header_values = headers if isinstance(headers, list) else []
-    disposition = " ".join(
-        str(header.get("value", ""))
-        for header in header_values
-        if isinstance(header, dict) and str(header.get("name", "")).casefold() == "content-disposition"
-    )
-    if (
-        node.get("mimeType") == wanted
-        and not node.get("filename")
-        and "attachment" not in disposition.casefold()
-        and isinstance(data, str)
-    ):
-        try:
-            raw = base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
-        except (ValueError, binascii.Error):
-            raw = None
+def _gmail_payload_bytes(data: str) -> bytes | None:
+    if len(data) > 4 * ((MAX_TOTAL_DECODED_BYTES + 2) // 3):
+        raise EmailExtractionError("email exceeds its extraction size budget", "EMAIL_TOO_LARGE")
+    try:
+        return base64.urlsafe_b64decode(data + "=" * (-len(data) % 4))
+    except (ValueError, binascii.Error):
+        return None
+
+
+def extract_gmail_payload(payload: dict[str, object]) -> ExtractedEmailContent:
+    budget = _TraversalBudget()
+    plain: list[str] = []
+    html: list[str] = []
+    budget.visit(0)
+    stack: list[tuple[dict[str, object], int]] = [(payload, 0)]
+    while stack:
+        node, depth = stack.pop()
+        body = node.get("body")
+        data = body.get("data") if isinstance(body, dict) else None
+        content_type = str(node.get("mimeType", ""))
+        raw = _gmail_payload_bytes(data) if isinstance(data, str) else None
         if raw is not None:
-            content_type = " ".join(
+            budget.add_decoded_bytes(content_type, raw)
+        headers = node.get("headers", [])
+        header_values = headers if isinstance(headers, list) else []
+        disposition = " ".join(
+            str(header.get("value", ""))
+            for header in header_values
+            if isinstance(header, dict) and str(header.get("name", "")).casefold() == "content-disposition"
+        )
+        if (
+            raw is not None
+            and content_type in {"text/plain", "text/html"}
+            and not node.get("filename")
+            and "attachment" not in disposition.casefold()
+        ):
+            charset_header = " ".join(
                 str(header.get("value", ""))
                 for header in header_values
                 if isinstance(header, dict) and str(header.get("name", "")).casefold() == "content-type"
             )
-            match = re.search(r"charset=[\"']?([^;\"']+)", content_type, re.I)
+            match = re.search(r"charset=[\"']?([^;\"']+)", charset_header, re.I)
             charset = match.group(1) if match else "utf-8"
             try:
-                found.append(raw.decode(charset, errors="replace"))
+                text = raw.decode(charset, errors="replace")
             except LookupError:
-                found.append(raw.decode("utf-8", errors="replace"))
-    parts = node.get("parts", [])
-    if isinstance(parts, list):
-        for part in parts:
-            if isinstance(part, dict):
-                found.extend(_gmail_parts(part, wanted))
-    return found
+                text = raw.decode("utf-8", errors="replace")
+            (plain if content_type == "text/plain" else html).append(text)
 
-
-def extract_gmail_payload(payload: dict[str, object]) -> ExtractedEmailContent:
-    return _content(_gmail_parts(payload, "text/plain"), _gmail_parts(payload, "text/html"))
+        parts = node.get("parts", [])
+        if isinstance(parts, list):
+            if len(parts) > MAX_MIME_PARTS - budget.parts:
+                raise EmailExtractionError("email MIME structure is too complex", "EMAIL_STRUCTURE_TOO_COMPLEX")
+            for part in reversed(parts):
+                if isinstance(part, dict):
+                    budget.visit(depth + 1)
+                    stack.append((part, depth + 1))
+    return _content(plain, html)

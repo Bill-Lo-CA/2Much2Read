@@ -16,6 +16,7 @@ from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl
 from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult
 from two_much_two_read.config import HackerNewsSource, Settings
 from two_much_two_read.hackernews import HackerNewsCandidate, HackerNewsDiscovery, ResolvedHackerNewsContent
+from two_much_two_read.mime import EmailExtractionError
 from two_much_two_read.ollama import OllamaSchemaError
 from two_much_two_read.pipeline import deliver_digest, run_pipeline
 from two_much_two_read.schemas import ArticleAnalysis, EmailExtraction, NewsletterItemAnalysis, ResolvedContent, SourceDocument
@@ -492,7 +493,7 @@ def test_hacker_news_force_respects_explicit_command_budget(tmp_path: Path, monk
     run_pipeline(settings, source_id="hn-best", max_messages=1, no_deliver=True, force=True)
 
 
-def test_hackernews_does_not_fallback_to_metadata_by_default(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_hackernews_deadline_failure_does_not_abort_later_story(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     source = HackerNewsSource(id="hn-best", name="Hacker News Best")
     candidate = HackerNewsCandidate(
         SourceDocument(
@@ -511,34 +512,63 @@ def test_hackernews_does_not_fallback_to_metadata_by_default(tmp_path: Path, mon
         "external",
         None,
     )
+    successful_candidate = HackerNewsCandidate(
+        SourceDocument(
+            source_type="hackernews",
+            source_id="hn-best",
+            external_id="124",
+            title="Readable article",
+            published_at=datetime(2026, 7, 24, tzinfo=UTC),
+            source_url="https://example.com/readable",
+            discussion_url="https://news.ycombinator.com/item?id=124",
+        ),
+        "beststories",
+        2,
+        40,
+        5,
+        "external",
+        None,
+    )
 
     class FakeHackerNewsClient:
         def discover(self, *args: object, **kwargs: object) -> HackerNewsDiscovery:
-            return HackerNewsDiscovery([candidate], 0)
+            return HackerNewsDiscovery([candidate, successful_candidate], 0)
 
     class FakeOllamaClient:
         def analyze_article(self, *args: object, **kwargs: object) -> ArticleAnalysis:
-            pytest.fail("metadata analysis must be opt-in")
+            assert args[1] == 124
+            return ArticleAnalysis(
+                title="ignored",
+                category="OTHER",
+                summary_zh_tw="摘要",
+                why_it_matters_zh_tw="原因",
+                importance=7,
+                confidence=0.8,
+            )
 
-    def fail_resolution(*args: object) -> ResolvedHackerNewsContent:
-        raise ArticleFetchError("ARTICLE_NO_USABLE_TEXT")
+    def resolve(current: HackerNewsCandidate, *args: object) -> ResolvedHackerNewsContent:
+        if current.document.external_id == "123":
+            raise ArticleFetchError("ARTICLE_FETCH_DEADLINE_EXCEEDED")
+        return ResolvedHackerNewsContent(
+            ResolvedContent(document=current.document, text="usable", basis="article", truncated=False), None
+        )
 
     database = Database(tmp_path / "digest.sqlite3")
-    monkeypatch.setattr(pipeline, "resolve_hackernews_candidate", fail_resolution)
+    monkeypatch.setattr(pipeline, "resolve_hackernews_candidate", resolve)
 
     result = pipeline._process_hackernews_source(
         database,
         FakeHackerNewsClient(),
         FakeOllamaClient(),
         source,
-        1,
+        2,
         lambda _: None,
         force=False,
         now=datetime(2026, 7, 24, tzinfo=UTC),
     )
 
-    assert result[:4] == (1, 1, 0, 1)
-    assert database.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 0
+    assert result[:4] == (2, 2, 1, 1)
+    assert database.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
     database.close()
 
 
@@ -1208,7 +1238,14 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
     database.close()
 
 
-def test_mime_failure_marks_one_message_failed_and_continues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("error_code", "dry_run"),
+    [(None, False), ("EMAIL_TOO_LARGE", False), ("EMAIL_TOO_LARGE", True)],
+    ids=["empty", "budget", "budget-dry-run"],
+)
+def test_mime_failure_marks_one_message_failed_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error_code: str | None, dry_run: bool
+) -> None:
     sources_path = tmp_path / "sources.yaml"
     write_sources(sources_path)
     settings = Settings(
@@ -1256,8 +1293,17 @@ def test_mime_failure_marks_one_message_failed_and_continues(tmp_path: Path, mon
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: StubOllamaClient(extraction))
+    if error_code is not None:
+        extract_gmail_payload = pipeline.extract_gmail_payload
 
-    assert run_pipeline(settings, no_deliver=True).model_dump() == {
+        def extract(payload: dict[str, object]):
+            if payload is gmail.messages["bad"]["payload"]:
+                raise EmailExtractionError(error_code)
+            return extract_gmail_payload(payload)
+
+        monkeypatch.setattr(pipeline, "extract_gmail_payload", extract)
+
+    assert run_pipeline(settings, no_deliver=True, dry_run=dry_run).model_dump() == {
         "status": "partial",
         "discovered": 2,
         "processed": 1,
@@ -1268,13 +1314,19 @@ def test_mime_failure_marks_one_message_failed_and_continues(tmp_path: Path, mon
         "delivery_pending": 0,
         "reason": None,
     }
-    assert gmail.applied_labels == [("bad", "failed"), ("good", "processed")]
+    assert gmail.applied_labels == ([] if dry_run else [("bad", "failed"), ("good", "processed")])
+    if dry_run:
+        assert not settings.database_path.exists()
+        return
     database = Database(settings.database_path)
     rows = database.connection.execute(
         """SELECT g.gmail_message_id,d.state,d.last_error_code FROM documents d
         JOIN gmail_document_state g ON g.document_id=d.id ORDER BY d.id"""
     ).fetchall()
-    assert [tuple(row) for row in rows] == [("bad", "failed", "EMAIL_NO_USABLE_TEXT"), ("good", "processed", None)]
+    assert [tuple(row) for row in rows] == [
+        ("bad", "failed", error_code or "EMAIL_NO_USABLE_TEXT"),
+        ("good", "processed", None),
+    ]
     database.close()
 
 
