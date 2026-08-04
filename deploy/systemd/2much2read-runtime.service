@@ -5,7 +5,20 @@ After=network-online.target
 [Service]
 Type=oneshot
 EnvironmentFile=%h/.config/2much2read-runtime/.2much2read.env
+Environment=HF_HOME=%h/.local/share/2much2read-runtime/2much2read/huggingface
 ExecStart=__EXECUTABLE__ run
 TimeoutStartSec=30min
 NoNewPrivileges=true
 PrivateTmp=true
+UMask=0077
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.config/2much2read-runtime/2much2read %h/.local/share/2much2read-runtime/2much2read
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

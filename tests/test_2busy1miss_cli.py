@@ -63,6 +63,42 @@ def test_doctor_tests_each_both_destination(tmp_path: Path, monkeypatch: pytest.
     assert sent == ["webhook", "bot"]
 
 
+def test_doctor_redacts_missing_config_path_and_reports_custom_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    secret_path = tmp_path / "calendar-client-secret-must-not-appear.yaml"
+    settings = Settings(
+        reminders_config_path=secret_path,
+        database_path=tmp_path / "custom.sqlite3",
+        lock_path=tmp_path / "custom.lock",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
+    )
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(
+        cli,
+        "runtime_permission_checks",
+        lambda *args, **kwargs: {
+            "config_dir": "ok",
+            "token_dir": "ok",
+            "data_dir": "ok",
+            "env_file": "ok",
+            "config_file": "missing",
+            "client_secret": "missing",
+            "token_file": "missing",
+            "database": "not_created",
+            "lock_file": "not_created",
+            "runtime_paths": "custom",
+        },
+    )
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "warning"
+    assert payload["checks"]["config"] == "missing"
+    assert payload["checks"]["runtime_paths"] == "custom"
+    assert str(secret_path) not in result.stdout
+
+
 @pytest.mark.parametrize(
     ("command", "operation", "delivery_result"),
     [

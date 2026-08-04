@@ -5,6 +5,8 @@ import os
 from pathlib import Path
 from types import TracebackType
 
+from two_read_runtime.permissions import prepare_private_file
+
 
 class ProcessLock:
     def __init__(self, path: Path) -> None:
@@ -12,8 +14,8 @@ class ProcessLock:
         self.fd: int | None = None
 
     def __enter__(self) -> ProcessLock:
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        prepare_private_file(self.path)
+        self.fd = os.open(self.path, os.O_CREAT | os.O_RDWR | getattr(os, "O_NOFOLLOW", 0), 0o600)
         try:
             os.fchmod(self.fd, 0o600)
             fcntl.flock(self.fd, fcntl.LOCK_EX | fcntl.LOCK_NB)

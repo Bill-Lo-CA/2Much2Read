@@ -11,26 +11,51 @@ They are separate commands, OAuth clients, OAuth tokens, YAML files, SQLite data
 
 ## Runtime files
 
-Both tools use one private root, not the repository `.env`:
+The commands use one private root with app-specific token and data directories, not the repository `.env`:
 
 ```text
 ~/.config/2much2read-runtime/
+  .2bored1made.env
   .2much2read.env
   .2busy1miss.env
-  .2bored1made.env
   gmail-client-secret.json
-  gmail-token.json
   calendar-client-secret.json
-  calendar-token.json
   sources.yaml
   reminders.yaml
+  2much2read/
+    gmail-token.json
+  2busy1miss/
+    calendar-token.json
 
 ~/.local/share/2much2read-runtime/
-  2much2read.sqlite3
-  2busy1miss.sqlite3
+  2much2read/
+    2much2read.sqlite3
+    2much2read.lock
+  2busy1miss/
+    2busy1miss.sqlite3
+    2busy1miss.lock
 ```
 
-The environment files may contain duplicate variable names because each command and systemd unit loads only its own file. Do not source them together. The installers set both runtime directories to mode `0700`, set copied environment/YAML files, OAuth credentials/tokens, and lock files to `0600`, and keep SQLite databases inside the protected data directory.
+The environment files may contain duplicate variable names because each command and systemd unit loads only its own file. Do not source them together. The installers set the shared config root and app directories to mode `0700`, repair managed environment/YAML/OAuth/token/database/sidecar/lock files to `0600`, and keep SQLite databases inside the matching protected data directory.
+
+### Migration and custom paths
+
+On the first install after this layout change, each installer checks that its service is inactive, then moves its existing root-level token and SQLite database, `-wal`, `-shm`, `-journal`, and lock into the matching app directory. Environment/YAML/client-secret files remain at the shared config root. It never overwrites a new token or runtime file: if an old and new copy both exist, installation stops with both paths named. Stop the service, resolve the conflict, and rerun the installer. Timer prompts and their disabled-by-default behavior are unchanged.
+
+Until that installer migration runs, manual commands continue using an existing root-level token, database, and lock rather than creating empty state at the new paths. If both layouts exist, startup fails with `RUNTIME_PATH_MIGRATION_CONFLICT` instead of guessing which state is authoritative.
+
+The systemd templates allow writes only to the matching app config and data directories. If an environment-file path override such as `DATABASE_PATH`, `*_TOKEN_PATH`, or `*_CONFIG_PATH` points elsewhere, manual CLI runs may work but the sandboxed service will not; keep overrides under those app directories or add a reviewed user-unit drop-in with the required `ReadWritePaths` exception.
+
+The service sandbox is intentionally compatible with local PyTorch/GPU use: it omits `PrivateDevices` and `MemoryDenyWriteExecute`. Inspect the installed units with:
+
+```bash
+systemd-analyze --user security 2much2read-runtime.service
+systemd-analyze --user security 2busy1miss-runtime.service
+systemd-analyze --user security 2busy1miss-runtime-agenda.service
+systemd-analyze --user verify ~/.config/systemd/user/2much2read-runtime.service
+systemd-analyze --user verify ~/.config/systemd/user/2busy1miss-runtime.service
+systemd-analyze --user verify ~/.config/systemd/user/2busy1miss-runtime-agenda.service
+```
 
 ## Discord delivery
 
@@ -86,7 +111,7 @@ uv run 2much2read run --dry-run
 uv run 2much2read run
 ```
 
-The installer copies the supplied client credential to `gmail-client-secret.json`, copies `config/2much2read.env.example` and `sources.yaml` on first install, then asks whether to enable `2much2read-runtime.timer`. Reply `y` only after configuration and authorization are ready; an empty response keeps it stopped and disabled. You can enable it later:
+The installer copies the supplied client credential to the shared config root, copies `config/2much2read.env.example` and `sources.yaml` on first install, then asks whether to enable `2much2read-runtime.timer`. Reply `y` only after configuration and authorization are ready; an empty response keeps it stopped and disabled. You can enable it later:
 
 ```bash
 systemctl --user enable --now 2much2read-runtime.timer
@@ -146,7 +171,7 @@ uv run 2busy1miss run --dry-run
 uv run 2busy1miss run
 ```
 
-The installer copies the supplied client credential to `calendar-client-secret.json`, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, then asks whether to enable both timers. Reply `y` only after configuration and authorization are ready; an empty response keeps both stopped and disabled. You can enable either timer later:
+The installer copies the supplied client credential to the shared config root, copies `config/2busy1miss.env.example` and `reminders.yaml` on first install, then asks whether to enable both timers. Reply `y` only after configuration and authorization are ready; an empty response keeps both stopped and disabled. You can enable either timer later:
 
 ```bash
 systemctl --user enable --now 2busy1miss-runtime.timer
@@ -246,9 +271,9 @@ a new name, restore the backup at the configured path with mode `0600`, then run
 `doctor` and a dry run before enabling a timer.
 
 ```bash
-sqlite3 ~/.local/share/2much2read-runtime/2much2read.sqlite3 \
+sqlite3 ~/.local/share/2much2read-runtime/2much2read/2much2read.sqlite3 \
   ".backup '/secure-backups/2much2read.sqlite3'"
-sqlite3 ~/.local/share/2much2read-runtime/2busy1miss.sqlite3 \
+sqlite3 ~/.local/share/2much2read-runtime/2busy1miss/2busy1miss.sqlite3 \
   ".backup '/secure-backups/2busy1miss.sqlite3'"
 ```
 

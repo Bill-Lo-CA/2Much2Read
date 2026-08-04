@@ -113,6 +113,41 @@ def test_settings_ignore_repo_dotenv_and_use_private_env_file(
     assert settings.agenda_schedule_time == time(20, 30)
 
 
+def test_default_runtime_paths_are_application_scoped(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("DATABASE_PATH", raising=False)
+
+    settings = Settings()
+
+    assert settings.google_calendar_credentials_path == isolated_home / ".config/2much2read-runtime/calendar-client-secret.json"
+    assert settings.google_calendar_token_path == isolated_home / ".config/2much2read-runtime/2busy1miss/calendar-token.json"
+    assert settings.reminders_config_path == isolated_home / ".config/2much2read-runtime/reminders.yaml"
+    assert settings.database_path == isolated_home / ".local/share/2much2read-runtime/2busy1miss/2busy1miss.sqlite3"
+    assert settings.lock_path == isolated_home / ".local/share/2much2read-runtime/2busy1miss/2busy1miss.lock"
+
+
+def test_default_runtime_paths_keep_legacy_files_until_installer_migration(
+    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config_root = isolated_home / ".config/2much2read-runtime"
+    data_root = isolated_home / ".local/share/2much2read-runtime"
+    config_root.mkdir(parents=True)
+    data_root.mkdir(parents=True)
+    for path in (
+        config_root / "calendar-token.json",
+        data_root / "2busy1miss.sqlite3",
+        data_root / "2busy1miss.lock",
+    ):
+        path.touch()
+    for variable in ("GOOGLE_CALENDAR_TOKEN_PATH", "DATABASE_PATH", "LOCK_PATH"):
+        monkeypatch.delenv(variable, raising=False)
+
+    settings = Settings()
+
+    assert settings.google_calendar_token_path == config_root / "calendar-token.json"
+    assert settings.database_path == data_root / "2busy1miss.sqlite3"
+    assert settings.lock_path == data_root / "2busy1miss.lock"
+
+
 def test_agenda_schedule_time_requires_a_minute_precision_time() -> None:
     assert Settings(agenda_schedule_time="20:30").agenda_schedule_time == time(20, 30)
 

@@ -13,7 +13,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from two_read_runtime.discord import DiscordDestination, configured_destination, configured_destinations
-from two_read_runtime.paths import config_dir, data_dir, env_file
+from two_read_runtime.paths import app_config_file, app_data_file, config_dir, env_file
 
 
 class GmailFilter(BaseModel):
@@ -130,13 +130,13 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     gmail_credentials_path: Path = Field(default_factory=lambda: config_dir() / "gmail-client-secret.json")
-    gmail_token_path: Path = Field(default_factory=lambda: config_dir() / "gmail-token.json")
+    gmail_token_path: Path = Field(default_factory=lambda: app_config_file("2much2read", "gmail-token.json"))
     gmail_max_messages_per_run: int = Field(default=50, ge=1)
     gmail_lookback_days: int = Field(default=7, ge=1, le=30)
     gmail_oauth_callback_port: int = Field(default=8765, ge=1024, le=65535)
     sources_config_path: Path = Field(default_factory=lambda: config_dir() / "sources.yaml")
-    database_path: Path = Field(default_factory=lambda: data_dir() / "2much2read.sqlite3")
-    lock_path: Path = Field(default_factory=lambda: data_dir() / "2much2read.lock")
+    database_path: Path = Field(default_factory=lambda: app_data_file("2much2read", "2much2read.sqlite3"))
+    lock_path: Path = Field(default_factory=lambda: app_data_file("2much2read", "2much2read.lock"))
     ollama_base_url: str = "http://127.0.0.1:11434"
     ollama_allow_remote: bool = False
     ollama_trust_env: bool = False

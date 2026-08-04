@@ -34,3 +34,14 @@ def test_lock_is_released_after_holder_exits_without_cleanup(tmp_path: Path) -> 
 
     with ProcessLock(path):
         pass
+
+
+def test_new_lock_parent_is_private_under_permissive_umask(tmp_path: Path) -> None:
+    path = tmp_path / "runtime" / "runtime.lock"
+    original_umask = os.umask(0)
+    try:
+        with ProcessLock(path):
+            assert path.stat().st_mode & 0o777 == 0o600
+            assert path.parent.stat().st_mode & 0o777 == 0o700
+    finally:
+        os.umask(original_umask)

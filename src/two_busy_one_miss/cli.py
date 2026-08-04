@@ -12,6 +12,7 @@ from two_read_runtime.discord import DiscordDeliveryError, deliver
 from two_read_runtime.locking import ProcessLock
 from two_read_runtime.oauth import token_status
 from two_read_runtime.paths import directory_is_creatable
+from two_read_runtime.permissions import runtime_permission_checks
 from two_read_runtime.progress import run_with_elapsed
 
 from .config import Settings, load_reminders
@@ -36,6 +37,12 @@ rules_app = typer.Typer(no_args_is_help=True)
 app.add_typer(auth_app, name="auth")
 app.add_typer(calendars_app, name="calendars")
 app.add_typer(rules_app, name="rules")
+
+_HEALTHY_CHECKS = {"ok", "not_created", "webhook", "bot", "both"}
+
+
+def _config_error_status(error: Exception) -> str:
+    return "missing" if "not found" in str(error).lower() else "invalid"
 
 
 def _json_default(value: object) -> str:
@@ -88,10 +95,20 @@ def doctor(send_test: Annotated[bool, typer.Option()] = False) -> None:
         load_reminders(settings.reminders_config_path)
         checks["config"] = "ok"
     except (OSError, ValueError) as error:
-        checks["config"] = str(error)
+        checks["config"] = _config_error_status(error)
     checks["google_calendar_token"] = token_status(
         settings.google_calendar_token_path,
         ("https://www.googleapis.com/auth/calendar.readonly",),
+    )
+    checks.update(
+        runtime_permission_checks(
+            "2busy1miss",
+            config_path=settings.reminders_config_path,
+            credentials_path=settings.google_calendar_credentials_path,
+            token_path=settings.google_calendar_token_path,
+            database_path=settings.database_path,
+            lock_path=settings.lock_path,
+        )
     )
     checks["database_directory"] = "ok" if directory_is_creatable(settings.database_path.parent) else "not_writable"
     try:
@@ -112,7 +129,7 @@ def doctor(send_test: Annotated[bool, typer.Option()] = False) -> None:
                     checks[f"discord_test_{destination.transport}"] = "ok"
                 except DiscordDeliveryError:
                     checks[f"discord_test_{destination.transport}"] = "failed"
-    status = "ok" if all(value in {"ok", "webhook", "bot", "both"} for value in checks.values()) else "warning"
+    status = "ok" if all(value in _HEALTHY_CHECKS for value in checks.values()) else "warning"
     emit({"status": status, "checks": checks})
 
 

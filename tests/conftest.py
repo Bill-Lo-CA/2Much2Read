@@ -56,7 +56,7 @@ def calendar_database(calendar_settings: CalendarSettings) -> Iterator[CalendarD
         database.close()
 
 
-@pytest.fixture
+@pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()

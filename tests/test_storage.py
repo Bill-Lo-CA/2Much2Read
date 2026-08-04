@@ -1,4 +1,6 @@
+import os
 import sqlite3
+import stat
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -60,6 +62,44 @@ def test_document_and_digest_idempotency(tmp_path: Path) -> None:
     assert database.pending_digest(digest_id)["rendered_content"] == "digest"
     assert database.save_digest("daily:1", "start", "end", "UTC", "digest") is None
     database.close()
+
+
+def test_database_files_are_private_with_permissive_umask(tmp_path: Path) -> None:
+    path = tmp_path / "runtime" / "test.sqlite3"
+    original_umask = os.umask(0)
+    try:
+        database = Database(path)
+    finally:
+        os.umask(original_umask)
+    database.close()
+
+    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_existing_permissive_database_is_repaired(tmp_path: Path) -> None:
+    path = tmp_path / "test.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.close()
+    os.chmod(path, 0o644)
+
+    database = Database(path)
+    database.close()
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_database_rejects_symlink_without_changing_target(tmp_path: Path) -> None:
+    target = tmp_path / "target.sqlite3"
+    target.write_bytes(b"not a database")
+    link = tmp_path / "test.sqlite3"
+    link.symlink_to(target)
+    original = target.read_bytes()
+
+    with pytest.raises(ValueError, match="RUNTIME_PERMISSION_UNSAFE"):
+        Database(link)
+
+    assert target.read_bytes() == original
 
 
 def test_digest_destinations_retry_independently(tmp_path: Path) -> None:
