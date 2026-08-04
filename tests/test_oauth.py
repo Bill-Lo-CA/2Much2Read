@@ -1,3 +1,5 @@
+import os
+import stat
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -81,6 +83,29 @@ def test_valid_refresh_replaces_token_atomically_with_private_mode(tmp_path: Pat
     assert gmail.credentials(credentials_path, token_path) is credentials
     assert token_path.read_text(encoding="utf-8") == "refreshed"
     assert token_path.stat().st_mode & 0o777 == 0o600
+
+
+def test_existing_permissive_token_is_repaired_before_use(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    credentials_path = tmp_path / "client.json"
+    token_path = tmp_path / "token.json"
+    credentials_path.write_text("{}", encoding="utf-8")
+    token_path.write_text("original", encoding="utf-8")
+    os.chmod(token_path, 0o644)
+    credentials = MagicMock(valid=True, expired=False)
+    credentials.has_scopes.return_value = True
+    monkeypatch.setattr(oauth.Credentials, "from_authorized_user_file", MagicMock(return_value=credentials))
+
+    assert gmail.credentials(credentials_path, token_path) is credentials
+    assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
+
+
+def test_token_status_is_inspection_only_for_permissive_token(tmp_path: Path) -> None:
+    token_path = tmp_path / "token.json"
+    token_path.write_text("{}", encoding="utf-8")
+    os.chmod(token_path, 0o644)
+
+    assert oauth.token_status(token_path, gmail.SCOPES) == "reauth_required"
+    assert stat.S_IMODE(token_path.stat().st_mode) == 0o644
 
 
 def test_gmail_and_calendar_keep_credentials_isolated(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

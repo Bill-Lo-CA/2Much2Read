@@ -13,9 +13,16 @@ from two_read_runtime.endpoint_policy import (
 )
 from two_read_runtime.oauth import token_status
 from two_read_runtime.paths import directory_is_creatable
+from two_read_runtime.permissions import runtime_permission_checks
 
 from .command_models import DoctorResult
 from .config import Settings, load_sources
+
+_HEALTHY_CHECKS = {"ok", "not_created", "webhook", "bot", "both", "local", "remote_https"}
+
+
+def _config_error_status(error: Exception) -> str:
+    return "missing" if "not found" in str(error).lower() else "invalid"
 
 
 def model_name(value: str) -> str:
@@ -29,10 +36,20 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
         load_sources(settings.sources_config_path)
         checks["sources"] = "ok"
     except (OSError, ValueError, yaml.YAMLError) as error:
-        checks["sources"] = str(error)
+        checks["sources"] = _config_error_status(error)
     checks["gmail_token"] = token_status(
         settings.gmail_token_path,
         ("https://www.googleapis.com/auth/gmail.modify", "https://www.googleapis.com/auth/gmail.settings.basic"),
+    )
+    checks.update(
+        runtime_permission_checks(
+            "2much2read",
+            config_path=settings.sources_config_path,
+            credentials_path=settings.gmail_credentials_path,
+            token_path=settings.gmail_token_path,
+            database_path=settings.database_path,
+            lock_path=settings.lock_path,
+        )
     )
     checks["database_directory"] = "ok" if directory_is_creatable(settings.database_path.parent) else "not_writable"
     endpoint_classification = classify_ollama_endpoint(settings.ollama_base_url)
@@ -84,9 +101,5 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
                     checks[f"discord_test_{destination.transport}"] = "ok"
                 except DiscordDeliveryError:
                     checks[f"discord_test_{destination.transport}"] = "failed"
-    status = (
-        "ok"
-        if all(value in {"ok", "webhook", "bot", "both", "local", "remote_https"} for value in checks.values())
-        else "warning"
-    )
+    status = "ok" if all(value in _HEALTHY_CHECKS for value in checks.values()) else "warning"
     return DoctorResult(status=status, checks=checks)

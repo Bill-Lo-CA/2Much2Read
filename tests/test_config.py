@@ -146,6 +146,59 @@ def test_settings_ignore_repo_dotenv_and_use_private_env_file(tmp_path: Path, mo
     assert settings.database_path == Path("/tmp/2much2read.sqlite3")
 
 
+def test_default_runtime_paths_are_application_scoped(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    home.mkdir(exist_ok=True)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("DATABASE_PATH", raising=False)
+
+    settings = Settings()
+
+    assert settings.gmail_credentials_path == home / ".config/2much2read-runtime/gmail-client-secret.json"
+    assert settings.gmail_token_path == home / ".config/2much2read-runtime/2much2read/gmail-token.json"
+    assert settings.sources_config_path == home / ".config/2much2read-runtime/sources.yaml"
+    assert settings.database_path == home / ".local/share/2much2read-runtime/2much2read/2much2read.sqlite3"
+    assert settings.lock_path == home / ".local/share/2much2read-runtime/2much2read/2much2read.lock"
+
+
+def test_default_runtime_paths_keep_legacy_files_until_installer_migration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "home"
+    config_root = home / ".config/2much2read-runtime"
+    data_root = home / ".local/share/2much2read-runtime"
+    config_root.mkdir(parents=True)
+    data_root.mkdir(parents=True)
+    for path in (
+        config_root / "gmail-token.json",
+        data_root / "2much2read.sqlite3",
+        data_root / "2much2read.lock",
+    ):
+        path.touch()
+    monkeypatch.setenv("HOME", str(home))
+    for variable in ("GMAIL_TOKEN_PATH", "DATABASE_PATH", "LOCK_PATH"):
+        monkeypatch.delenv(variable, raising=False)
+
+    settings = Settings()
+
+    assert settings.gmail_token_path == config_root / "gmail-token.json"
+    assert settings.database_path == data_root / "2much2read.sqlite3"
+    assert settings.lock_path == data_root / "2much2read.lock"
+
+
+def test_default_runtime_paths_reject_migration_conflicts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path / "home"
+    config_root = home / ".config/2much2read-runtime"
+    (config_root / "2much2read").mkdir(parents=True)
+    (config_root / "gmail-token.json").touch()
+    (config_root / "2much2read/gmail-token.json").touch()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("GMAIL_TOKEN_PATH", raising=False)
+
+    with pytest.raises(ValueError, match="RUNTIME_PATH_MIGRATION_CONFLICT"):
+        Settings()
+
+
 def test_bot_delivery_settings_require_a_numeric_channel() -> None:
     destination = Settings(
         discord_delivery_mode="bot", discord_bot_token="secret", discord_bot_channel_id="123"

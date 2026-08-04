@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import cast
 
 from two_read_runtime.discord import DiscordDestination
+from two_read_runtime.permissions import prepare_private_file, repair_sqlite_files
 
 from .google_calendar import CalendarEvent
 from .rules import ReminderCandidate
@@ -85,25 +86,32 @@ class Database:
         if read_only:
             self.connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
         else:
-            path.parent.mkdir(parents=True, exist_ok=True)
+            prepare_private_file(path)
+            repair_sqlite_files(path)
             self.connection = sqlite3.connect(path)
-        self.connection.row_factory = sqlite3.Row
-        self.connection.execute("PRAGMA busy_timeout=5000")
-        if not read_only:
-            self.connection.execute("PRAGMA journal_mode=WAL")
-            self.connection.execute("PRAGMA foreign_keys=ON")
-            self.connection.executescript(SCHEMA)
-            columns = {str(row["name"]) for row in self.connection.execute("PRAGMA table_info(reminder_attempts)")}
-            if "discord_destination_key" not in columns:
-                self.connection.execute("ALTER TABLE reminder_attempts ADD COLUMN discord_destination_key TEXT")
-                self.connection.execute(
-                    "UPDATE reminder_attempts SET discord_destination_key='webhook' WHERE discord_message_ids_json IS NOT NULL"
-                )
-                self.connection.commit()
-            delivery_columns = {str(row["name"]) for row in self.connection.execute("PRAGMA table_info(reminder_deliveries)")}
-            if "retired_at" not in delivery_columns:
-                self.connection.execute("ALTER TABLE reminder_deliveries ADD COLUMN retired_at TEXT")
-                self.connection.commit()
+        try:
+            self.connection.row_factory = sqlite3.Row
+            self.connection.execute("PRAGMA busy_timeout=5000")
+            if not read_only:
+                self.connection.execute("PRAGMA journal_mode=WAL")
+                self.connection.execute("PRAGMA foreign_keys=ON")
+                self.connection.executescript(SCHEMA)
+                columns = {str(row["name"]) for row in self.connection.execute("PRAGMA table_info(reminder_attempts)")}
+                if "discord_destination_key" not in columns:
+                    self.connection.execute("ALTER TABLE reminder_attempts ADD COLUMN discord_destination_key TEXT")
+                    self.connection.execute(
+                        "UPDATE reminder_attempts SET discord_destination_key='webhook' "
+                        "WHERE discord_message_ids_json IS NOT NULL"
+                    )
+                    self.connection.commit()
+                delivery_columns = {str(row["name"]) for row in self.connection.execute("PRAGMA table_info(reminder_deliveries)")}
+                if "retired_at" not in delivery_columns:
+                    self.connection.execute("ALTER TABLE reminder_deliveries ADD COLUMN retired_at TEXT")
+                    self.connection.commit()
+                repair_sqlite_files(path)
+        except Exception:
+            self.connection.close()
+            raise
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:

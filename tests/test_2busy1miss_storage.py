@@ -1,3 +1,5 @@
+import os
+import stat
 from datetime import date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -37,6 +39,30 @@ def test_attempt_idempotency_and_delivery_state(tmp_path: Path) -> None:
     database.finish_delivery(attempt_id, ["123"])
     assert database.attempt_state(attempt_id) == "delivered"
     database.close()
+
+
+def test_existing_permissive_database_is_repaired(tmp_path: Path) -> None:
+    path = tmp_path / "test.sqlite3"
+    database = Database(path)
+    database.close()
+    os.chmod(path, 0o644)
+
+    database = Database(path)
+    database.close()
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o600
+
+
+def test_read_only_database_does_not_prepare_or_repair_path(tmp_path: Path) -> None:
+    path = tmp_path / "test.sqlite3"
+    writable = Database(path)
+    writable.close()
+    os.chmod(path, 0o644)
+
+    read_only = Database(path, read_only=True)
+    read_only.close()
+
+    assert stat.S_IMODE(path.stat().st_mode) == 0o644
 
 
 def test_create_attempts_batches_distinct_candidates(tmp_path: Path) -> None:

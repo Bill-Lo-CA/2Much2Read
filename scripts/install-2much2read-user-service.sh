@@ -37,26 +37,101 @@ exe="$repo_dir/.venv/bin/2much2read"
   exit 1
 }
 
-config_dir="$HOME/.config/2much2read-runtime"
-data_dir="$HOME/.local/share/2much2read-runtime"
+config_root="$HOME/.config/2much2read-runtime"
+config_dir="$config_root"
+token_dir="$config_root/2much2read"
+data_root="$HOME/.local/share/2much2read-runtime"
+data_dir="$data_root/2much2read"
 systemd_dir="$HOME/.config/systemd/user"
 env_file="$config_dir/.2much2read.env"
 sources_file="$config_dir/sources.yaml"
+gmail_client_secret_file="$config_root/gmail-client-secret.json"
+gmail_token_file="$token_dir/gmail-token.json"
+database_file="$data_dir/2much2read.sqlite3"
+lock_file="$data_dir/2much2read.lock"
 
-mkdir -p "$config_dir" "$data_dir" "$systemd_dir"
-chmod 700 "$config_dir" "$data_dir"
-if [ -n "$gmail_client_secret" ] && [ ! -f "$config_dir/gmail-client-secret.json" ]; then
-  cp "$gmail_client_secret" "$config_dir/gmail-client-secret.json"
-  chmod 600 "$config_dir/gmail-client-secret.json"
+file_exists() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+reject_symlink() {
+  if [ -L "$1" ]; then
+    printf '%s\n' "refusing symbolic link at managed path: $1" >&2
+    exit 1
+  fi
+}
+
+check_migration() {
+  reject_symlink "$1"
+  reject_symlink "$2"
+  if file_exists "$1" && file_exists "$2"; then
+    printf '%s\n' "cannot migrate $1: old and new files both exist ($2); move one aside and retry" >&2
+    exit 1
+  fi
+}
+
+migrate_file() {
+  if file_exists "$1"; then
+    mv "$1" "$2"
+  fi
+}
+
+repair_file() {
+  reject_symlink "$1"
+  if [ -e "$1" ]; then
+    [ -f "$1" ] || {
+      printf '%s\n' "managed path is not a regular file: $1" >&2
+      exit 1
+    }
+    chmod 600 "$1"
+  fi
+}
+
+if systemctl --user is-active --quiet 2much2read-runtime.service; then
+  printf '%s\n' "stop 2much2read-runtime.service before installing" >&2
+  exit 1
+fi
+systemctl --user disable --now 2much2read-runtime.timer 2>/dev/null || true
+
+for directory in "$config_root" "$token_dir" "$data_root" "$data_dir"; do
+  reject_symlink "$directory"
+done
+mkdir -p "$config_root" "$token_dir" "$data_root" "$data_dir" "$systemd_dir"
+for directory in "$config_root" "$token_dir" "$data_root" "$data_dir"; do
+  chmod 700 "$directory"
+done
+
+for file in "$env_file" "$sources_file" "$gmail_client_secret_file"; do
+  reject_symlink "$file"
+done
+
+check_migration "$config_root/gmail-token.json" "$gmail_token_file"
+check_migration "$data_root/2much2read.sqlite3" "$database_file"
+check_migration "$data_root/2much2read.sqlite3-wal" "$database_file-wal"
+check_migration "$data_root/2much2read.sqlite3-shm" "$database_file-shm"
+check_migration "$data_root/2much2read.sqlite3-journal" "$database_file-journal"
+check_migration "$data_root/2much2read.lock" "$lock_file"
+migrate_file "$config_root/gmail-token.json" "$gmail_token_file"
+migrate_file "$data_root/2much2read.sqlite3" "$database_file"
+migrate_file "$data_root/2much2read.sqlite3-wal" "$database_file-wal"
+migrate_file "$data_root/2much2read.sqlite3-shm" "$database_file-shm"
+migrate_file "$data_root/2much2read.sqlite3-journal" "$database_file-journal"
+migrate_file "$data_root/2much2read.lock" "$lock_file"
+
+if [ -n "$gmail_client_secret" ] && [ ! -f "$gmail_client_secret_file" ]; then
+  cp "$gmail_client_secret" "$gmail_client_secret_file"
 fi
 if [ ! -f "$env_file" ]; then
   cp config/2much2read.env.example "$env_file"
-  chmod 600 "$env_file"
 fi
 if [ ! -f "$sources_file" ]; then
   cp config/sources.example.yaml "$sources_file"
-  chmod 600 "$sources_file"
 fi
+
+for file in "$env_file" "$sources_file" "$gmail_client_secret_file" "$gmail_token_file" \
+  "$database_file" "$database_file-wal" "$database_file-shm" "$database_file-journal" "$lock_file"; do
+  repair_file "$file"
+done
 
 digest_schedule_time=$(sed -n 's/^DIGEST_SCHEDULE_TIME=//p' "$env_file" | tail -n 1)
 digest_schedule_time=${digest_schedule_time:-08:00}
@@ -84,12 +159,9 @@ esac
   exit 1
 }
 
-if systemctl --user is-active --quiet 2much2read-runtime.service; then
-  printf '%s\n' "stop 2much2read-runtime.service before installing" >&2
-  exit 1
-fi
-systemctl --user disable --now 2much2read-runtime.timer 2>/dev/null || true
-
+for unit in "$systemd_dir/2much2read-runtime.service" "$systemd_dir/2much2read-runtime.timer"; do
+  reject_symlink "$unit"
+done
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2much2read-runtime.service > "$systemd_dir/2much2read-runtime.service"
 sed \
   -e "s|__DIGEST_SCHEDULE_TIME__|$digest_schedule_time|" \

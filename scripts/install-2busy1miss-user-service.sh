@@ -37,6 +37,56 @@ exe="$repo_dir/.venv/bin/2busy1miss"
   exit 1
 }
 
+config_root="$HOME/.config/2much2read-runtime"
+config_dir="$config_root"
+token_dir="$config_root/2busy1miss"
+data_root="$HOME/.local/share/2much2read-runtime"
+data_dir="$data_root/2busy1miss"
+systemd_dir="$HOME/.config/systemd/user"
+env_file="$config_dir/.2busy1miss.env"
+reminders_file="$config_dir/reminders.yaml"
+calendar_client_secret_file="$config_root/calendar-client-secret.json"
+calendar_token_file="$token_dir/calendar-token.json"
+database_file="$data_dir/2busy1miss.sqlite3"
+lock_file="$data_dir/2busy1miss.lock"
+
+file_exists() {
+  [ -e "$1" ] || [ -L "$1" ]
+}
+
+reject_symlink() {
+  if [ -L "$1" ]; then
+    printf '%s\n' "refusing symbolic link at managed path: $1" >&2
+    exit 1
+  fi
+}
+
+check_migration() {
+  reject_symlink "$1"
+  reject_symlink "$2"
+  if file_exists "$1" && file_exists "$2"; then
+    printf '%s\n' "cannot migrate $1: old and new files both exist ($2); move one aside and retry" >&2
+    exit 1
+  fi
+}
+
+migrate_file() {
+  if file_exists "$1"; then
+    mv "$1" "$2"
+  fi
+}
+
+repair_file() {
+  reject_symlink "$1"
+  if [ -e "$1" ]; then
+    [ -f "$1" ] || {
+      printf '%s\n' "managed path is not a regular file: $1" >&2
+      exit 1
+    }
+    chmod 600 "$1"
+  fi
+}
+
 systemctl --user disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer 2>/dev/null || true
 for service in 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service; do
   if systemctl --user is-active --quiet "$service"; then
@@ -45,28 +95,47 @@ for service in 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service; do
   fi
 done
 
-config_dir="$HOME/.config/2much2read-runtime"
-data_dir="$HOME/.local/share/2much2read-runtime"
-systemd_dir="$HOME/.config/systemd/user"
-env_file="$config_dir/.2busy1miss.env"
-reminders_file="$config_dir/reminders.yaml"
+for directory in "$config_root" "$token_dir" "$data_root" "$data_dir"; do
+  reject_symlink "$directory"
+done
+mkdir -p "$config_root" "$token_dir" "$data_root" "$data_dir" "$systemd_dir"
+for directory in "$config_root" "$token_dir" "$data_root" "$data_dir"; do
+  chmod 700 "$directory"
+done
 
-mkdir -p "$config_dir" "$data_dir" "$systemd_dir"
-chmod 700 "$config_dir" "$data_dir"
-if [ -n "$calendar_client_secret" ] && [ ! -f "$config_dir/calendar-client-secret.json" ]; then
-  cp "$calendar_client_secret" "$config_dir/calendar-client-secret.json"
-  chmod 600 "$config_dir/calendar-client-secret.json"
+for file in "$env_file" "$reminders_file" "$calendar_client_secret_file"; do
+  reject_symlink "$file"
+done
+
+check_migration "$config_root/calendar-token.json" "$calendar_token_file"
+check_migration "$data_root/2busy1miss.sqlite3" "$database_file"
+check_migration "$data_root/2busy1miss.sqlite3-wal" "$database_file-wal"
+check_migration "$data_root/2busy1miss.sqlite3-shm" "$database_file-shm"
+check_migration "$data_root/2busy1miss.sqlite3-journal" "$database_file-journal"
+check_migration "$data_root/2busy1miss.lock" "$lock_file"
+migrate_file "$config_root/calendar-token.json" "$calendar_token_file"
+migrate_file "$data_root/2busy1miss.sqlite3" "$database_file"
+migrate_file "$data_root/2busy1miss.sqlite3-wal" "$database_file-wal"
+migrate_file "$data_root/2busy1miss.sqlite3-shm" "$database_file-shm"
+migrate_file "$data_root/2busy1miss.sqlite3-journal" "$database_file-journal"
+migrate_file "$data_root/2busy1miss.lock" "$lock_file"
+
+if [ -n "$calendar_client_secret" ] && [ ! -f "$calendar_client_secret_file" ]; then
+  cp "$calendar_client_secret" "$calendar_client_secret_file"
 fi
 
 if [ ! -f "$env_file" ]; then
   cp config/2busy1miss.env.example "$env_file"
-  chmod 600 "$env_file"
 fi
 
 if [ ! -f "$reminders_file" ]; then
   cp config/2busy1miss.reminders.example.yaml "$reminders_file"
-  chmod 600 "$reminders_file"
 fi
+
+for file in "$env_file" "$reminders_file" "$calendar_client_secret_file" "$calendar_token_file" \
+  "$database_file" "$database_file-wal" "$database_file-shm" "$database_file-journal" "$lock_file"; do
+  repair_file "$file"
+done
 
 agenda_schedule_time=$(sed -n 's/^AGENDA_SCHEDULE_TIME=//p' "$env_file" || :)
 agenda_schedule_time=${agenda_schedule_time:-21:00}
@@ -78,6 +147,13 @@ case "$agenda_schedule_time" in
     ;;
 esac
 
+for unit in \
+  "$systemd_dir/2busy1miss-runtime.service" \
+  "$systemd_dir/2busy1miss-runtime.timer" \
+  "$systemd_dir/2busy1miss-runtime-agenda.service" \
+  "$systemd_dir/2busy1miss-runtime-agenda.timer"; do
+  reject_symlink "$unit"
+done
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss-runtime.service > "$systemd_dir/2busy1miss-runtime.service"
 cp deploy/systemd/2busy1miss-runtime.timer "$systemd_dir/2busy1miss-runtime.timer"
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss-runtime-agenda.service > "$systemd_dir/2busy1miss-runtime-agenda.service"

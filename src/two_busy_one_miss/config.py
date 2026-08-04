@@ -11,7 +11,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from two_read_runtime.discord import DiscordDestination, configured_destination, configured_destinations
-from two_read_runtime.paths import config_dir, data_dir, env_file
+from two_read_runtime.paths import app_config_file, app_data_file, config_dir, env_file
 
 MAX_REMINDER_OFFSET = timedelta(days=366)
 
@@ -102,11 +102,11 @@ class Settings(BaseSettings):
     model_config = SettingsConfigDict(extra="ignore")
 
     google_calendar_credentials_path: Path = Field(default_factory=lambda: config_dir() / "calendar-client-secret.json")
-    google_calendar_token_path: Path = Field(default_factory=lambda: config_dir() / "calendar-token.json")
+    google_calendar_token_path: Path = Field(default_factory=lambda: app_config_file("2busy1miss", "calendar-token.json"))
     google_calendar_oauth_callback_port: int = Field(default=8765, ge=1024, le=65535)
     reminders_config_path: Path = Field(default_factory=lambda: config_dir() / "reminders.yaml")
-    database_path: Path = Field(default_factory=lambda: data_dir() / "2busy1miss.sqlite3")
-    lock_path: Path = Field(default_factory=lambda: data_dir() / "2busy1miss.lock")
+    database_path: Path = Field(default_factory=lambda: app_data_file("2busy1miss", "2busy1miss.sqlite3"))
+    lock_path: Path = Field(default_factory=lambda: app_data_file("2busy1miss", "2busy1miss.lock"))
     discord_delivery_mode: Literal["webhook", "bot", "both"] = "webhook"
     discord_webhook_url: str = ""
     discord_username: str = "2busy1miss"

@@ -7,6 +7,48 @@ from two_bored_one_made.config import Settings
 from two_read_runtime.discord import DiscordDestination
 
 
+def test_doctor_validates_env_and_discord_without_sending(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".2bored1made.env"
+    env_path.write_text("DISCORD_WEBHOOK_URL=ignored\n", encoding="utf-8")
+    env_path.chmod(0o600)
+    secret = "test-webhook-token-that-must-not-appear"
+    monkeypatch.setattr(cli, "env_file", lambda _: env_path)
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: Settings(discord_webhook_url=f"https://discord.com/api/webhooks/123456789012345678/{secret}"),
+    )
+    monkeypatch.setattr(cli, "deliver", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("doctor sent")))
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout) == {
+        "status": "ok",
+        "checks": {"env_file": "ok", "discord": "webhook"},
+    }
+    assert secret not in result.stdout
+
+
+def test_doctor_warns_for_unsafe_env_file(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".2bored1made.env"
+    env_path.write_text("DISCORD_WEBHOOK_URL=ignored\n", encoding="utf-8")
+    env_path.chmod(0o644)
+    monkeypatch.setattr(cli, "env_file", lambda _: env_path)
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: Settings(discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token"),
+    )
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "warning"
+    assert payload["checks"] == {"env_file": "unsafe", "discord": "webhook"}
+
+
 def test_send_mentions_only_configured_user_ids(monkeypatch) -> None:
     monkeypatch.setattr(
         cli,

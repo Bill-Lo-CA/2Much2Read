@@ -7,10 +7,13 @@ import typer
 from pydantic import BaseModel
 
 from two_read_runtime.discord import DiscordDeliveryError, deliver, delivery_error_code
+from two_read_runtime.paths import env_file
+from two_read_runtime.permissions import private_file_status
 
 from .config import Settings
 
 app = typer.Typer(no_args_is_help=True)
+_HEALTHY_CHECKS = {"ok", "webhook", "bot", "both", "not_created"}
 
 
 class SendResult(BaseModel):
@@ -24,6 +27,21 @@ class SendResult(BaseModel):
 @app.callback()
 def main() -> None:
     pass
+
+
+@app.command()
+def doctor() -> None:
+    settings = Settings()
+    checks: dict[str, str] = {"env_file": private_file_status(env_file("2bored1made"))}
+    try:
+        settings.discord_destinations()
+        checks["discord"] = settings.discord_delivery_mode
+    except DiscordDeliveryError:
+        checks["discord"] = (
+            "missing" if settings.discord_delivery_mode == "webhook" and not settings.discord_webhook_url else "invalid"
+        )
+    status = "ok" if all(value in _HEALTHY_CHECKS for value in checks.values()) else "warning"
+    typer.echo(json.dumps({"status": status, "checks": checks}))
 
 
 @app.command()

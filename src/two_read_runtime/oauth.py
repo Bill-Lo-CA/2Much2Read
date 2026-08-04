@@ -9,6 +9,8 @@ from google.auth.transport.requests import Request
 from google.oauth2.credentials import Credentials
 from google_auth_oauthlib.flow import InstalledAppFlow  # type: ignore[import-untyped]
 
+from two_read_runtime.permissions import prepare_private_directory, private_file_status, repair_private_file
+
 
 def token_status(token_path: Path, scopes: tuple[str, ...]) -> str:
     if not token_path.is_file():
@@ -25,7 +27,7 @@ def token_status(token_path: Path, scopes: tuple[str, ...]) -> str:
 
 
 def _write_token(token_path: Path, credentials: Credentials) -> None:
-    token_path.parent.mkdir(parents=True, exist_ok=True)
+    prepare_private_directory(token_path.parent)
     descriptor, temporary_name = tempfile.mkstemp(prefix=f".{token_path.name}.", dir=token_path.parent)
     temporary = Path(temporary_name)
     try:
@@ -50,7 +52,8 @@ def load_credentials(
     missing_credentials_code: str,
 ) -> Credentials:
     credentials: Credentials | None = None
-    if token_path.is_file():
+    if private_file_status(token_path, missing_ok=True) != "not_created":
+        repair_private_file(token_path)
         try:
             credentials = Credentials.from_authorized_user_file(str(token_path))  # type: ignore[no-untyped-call]
         except (OSError, ValueError):

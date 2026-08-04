@@ -12,6 +12,7 @@ from typing import cast
 from urllib.parse import urlsplit
 
 from two_read_runtime.discord import DiscordDestination
+from two_read_runtime.permissions import prepare_private_file, repair_sqlite_files
 
 from .digest import canonical_url, normalized_title
 from .schemas import DigestItem, EmailExtraction, ItemAnalysis, ResolvedContent, SourceDocument
@@ -111,37 +112,45 @@ class DatabaseSchemaResetRequiredError(ValueError):
 
 class Database:
     def __init__(self, path: Path) -> None:
-        path.parent.mkdir(parents=True, exist_ok=True)
+        is_memory = str(path) == ":memory:"
+        if not is_memory:
+            prepare_private_file(path)
+            repair_sqlite_files(path)
         self.connection = sqlite3.connect(path)
-        self.connection.row_factory = sqlite3.Row
-        version = self._schema_version()
-        if version == 2:
-            self.connection.executescript(MIGRATE_V2_TO_V3)
-            version = 3
-        if version == 3:
-            self.connection.executescript(MIGRATE_V3_TO_V4)
-            version = 4
-        if version == 4:
-            self._migrate_v4_to_v5()
-            version = 5
-        if version == 5:
-            self._migrate_v5_to_v6()
-            version = 6
-        if version == 6:
-            self._migrate_v6_to_v7()
-            version = 7
-        if version == 7:
-            self._migrate_v7_to_v8()
-            version = 8
-        if version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
+        try:
+            self.connection.row_factory = sqlite3.Row
+            version = self._schema_version()
+            if version == 2:
+                self.connection.executescript(MIGRATE_V2_TO_V3)
+                version = 3
+            if version == 3:
+                self.connection.executescript(MIGRATE_V3_TO_V4)
+                version = 4
+            if version == 4:
+                self._migrate_v4_to_v5()
+                version = 5
+            if version == 5:
+                self._migrate_v5_to_v6()
+                version = 6
+            if version == 6:
+                self._migrate_v6_to_v7()
+                version = 7
+            if version == 7:
+                self._migrate_v7_to_v8()
+                version = 8
+            if version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
+                raise DatabaseSchemaResetRequiredError(
+                    f"DATABASE_SCHEMA_RESET_REQUIRED: back up {path} and remove it before rerunning 2much2read"
+                )
+            self.connection.execute("PRAGMA journal_mode=WAL")
+            self.connection.execute("PRAGMA foreign_keys=ON")
+            self.connection.execute("PRAGMA busy_timeout=5000")
+            self.connection.executescript(SCHEMA)
+            if not is_memory:
+                repair_sqlite_files(path)
+        except Exception:
             self.connection.close()
-            raise DatabaseSchemaResetRequiredError(
-                f"DATABASE_SCHEMA_RESET_REQUIRED: back up {path} and remove it before rerunning 2much2read"
-            )
-        self.connection.execute("PRAGMA journal_mode=WAL")
-        self.connection.execute("PRAGMA foreign_keys=ON")
-        self.connection.execute("PRAGMA busy_timeout=5000")
-        self.connection.executescript(SCHEMA)
+            raise
 
     def _schema_version(self) -> int | None:
         row = self.connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='schema_version'").fetchone()
