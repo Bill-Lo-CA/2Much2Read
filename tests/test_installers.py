@@ -208,8 +208,11 @@ def test_installers_only_start_timers_when_confirmed(
     )
 
     calls = log.read_text(encoding="utf-8")
-    assert f"disable --now {timer}" in calls
-    assert f"is-active --quiet {service}" in calls
+    disable_call = f"disable --now {timer}"
+    active_call = f"is-active --quiet {service}"
+    assert disable_call in calls
+    assert active_call in calls
+    assert calls.index(disable_call) < calls.index(active_call)
     assert "daemon-reload" in calls
     assert ("enable --now" in calls) is starts
     installed_secret = tmp_path / "home" / ".config" / "2much2read-runtime" / secret_name
@@ -420,6 +423,8 @@ def test_runtime_units_use_the_runtime_sandbox(unit: str, app: str) -> None:
 
     assert required <= set(service.splitlines())
     assert f"EnvironmentFile=%h/.config/2much2read-runtime/.{app}.env" in service
+    if app == "2much2read":
+        assert "Environment=HF_HOME=%h/.local/share/2much2read-runtime/2much2read/huggingface" in service
     assert sum(line.startswith("ReadWritePaths=") for line in service.splitlines()) == 1
     assert "PrivateDevices" not in service
     assert "MemoryDenyWriteExecute" not in service

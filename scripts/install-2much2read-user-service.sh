@@ -87,11 +87,11 @@ repair_file() {
   fi
 }
 
+systemctl --user disable --now 2much2read-runtime.timer 2>/dev/null || true
 if systemctl --user is-active --quiet 2much2read-runtime.service; then
   printf '%s\n' "stop 2much2read-runtime.service before installing" >&2
   exit 1
 fi
-systemctl --user disable --now 2much2read-runtime.timer 2>/dev/null || true
 
 for directory in "$config_root" "$token_dir" "$data_root" "$data_dir"; do
   reject_symlink "$directory"
