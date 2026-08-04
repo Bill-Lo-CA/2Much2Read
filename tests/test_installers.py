@@ -60,7 +60,10 @@ def test_installers_refuse_managed_env_symlinks(tmp_path: Path, script: str, env
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     systemctl = fake_bin / "systemctl"
-    systemctl.write_text('#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\nexit 0\n', encoding="utf-8")
+    systemctl.write_text(
+        '#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+        encoding="utf-8",
+    )
     systemctl.chmod(0o755)
 
     result = subprocess.run(
@@ -111,7 +114,10 @@ def test_service_installers_refuse_unit_symlinks(
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     systemctl = fake_bin / "systemctl"
-    systemctl.write_text('#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\nexit 0\n', encoding="utf-8")
+    systemctl.write_text(
+        '#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+        encoding="utf-8",
+    )
     systemctl.chmod(0o755)
 
     result = subprocess.run(
@@ -185,7 +191,8 @@ def test_installers_only_start_timers_when_confirmed(
     log = tmp_path / "systemctl.log"
     systemctl = fake_bin / "systemctl"
     systemctl.write_text(
-        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n[ "$2" = "is-active" ] && exit 3\nexit 0\n',
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n[ "$2" = "is-active" ] && exit 3\n'
+        '[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
         encoding="utf-8",
     )
     systemctl.chmod(0o755)
@@ -209,10 +216,10 @@ def test_installers_only_start_timers_when_confirmed(
 
     calls = log.read_text(encoding="utf-8")
     disable_call = f"disable --now {timer}"
-    active_call = f"is-active --quiet {service}"
+    state_call = f"show --property=ActiveState --value {service}"
     assert disable_call in calls
-    assert active_call in calls
-    assert calls.index(disable_call) < calls.index(active_call)
+    assert state_call in calls
+    assert calls.index(disable_call) < calls.index(state_call)
     assert "daemon-reload" in calls
     assert ("enable --now" in calls) is starts
     installed_secret = tmp_path / "home" / ".config" / "2much2read-runtime" / secret_name
@@ -292,7 +299,10 @@ def test_newsletter_installer_rejects_invalid_schedule(tmp_path: Path, setting: 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     systemctl = fake_bin / "systemctl"
-    systemctl.write_text('#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\nexit 0\n', encoding="utf-8")
+    systemctl.write_text(
+        '#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+        encoding="utf-8",
+    )
     systemctl.chmod(0o755)
     home = tmp_path / "home"
     config_dir = home / ".config" / "2much2read-runtime"
@@ -494,7 +504,10 @@ def test_installers_migrate_legacy_files_and_repair_modes(
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     systemctl = fake_bin / "systemctl"
-    systemctl.write_text('#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\nexit 0\n', encoding="utf-8")
+    systemctl.write_text(
+        '#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+        encoding="utf-8",
+    )
     systemctl.chmod(0o755)
 
     subprocess.run(
@@ -605,7 +618,10 @@ def test_installers_refuse_legacy_new_conflicts(
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     systemctl = fake_bin / "systemctl"
-    systemctl.write_text('#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\nexit 0\n', encoding="utf-8")
+    systemctl.write_text(
+        '#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+        encoding="utf-8",
+    )
     systemctl.chmod(0o755)
 
     result = subprocess.run(
@@ -651,9 +667,11 @@ def test_installers_refuse_legacy_new_conflicts(
 @pytest.mark.parametrize(
     ("systemctl_body", "message"),
     [
-        ('[ "$2" = "is-active" ] && exit 0\nexit 0\n', "stop"),
+        ('[ "$2" = "is-active" ] && exit 0\n[ "$2" = "show" ] && printf "active\\n"\nexit 0\n', "stop"),
+        ('[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "activating\\n"\nexit 0\n', "stop"),
         ('[ "$2" = "is-active" ] && exit 1\nexit 0\n', "cannot determine"),
         ('[ "$2" = "is-active" ] && exit 3\n[ "$2" = "disable" ] && exit 1\nexit 0\n', "failed to stop"),
+        ('[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && exit 1\nexit 0\n', "cannot determine"),
     ],
 )
 def test_installers_do_not_migrate_when_runtime_state_is_unsafe(

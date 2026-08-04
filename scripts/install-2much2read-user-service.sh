@@ -103,16 +103,14 @@ case "$timer_status" in
     ;;
 esac
 
-service_status=0
-systemctl --user is-active --quiet 2much2read-runtime.service || service_status=$?
-case "$service_status" in
-  0)
-    printf '%s\n' "stop 2much2read-runtime.service before installing" >&2
-    exit 1
-    ;;
-  3|4) ;;
+service_state=$(systemctl --user show --property=ActiveState --value 2much2read-runtime.service) || {
+  printf '%s\n' "cannot determine whether 2much2read-runtime.service is active" >&2
+  exit 1
+}
+case "$service_state" in
+  inactive|failed) ;;
   *)
-    printf '%s\n' "cannot determine whether 2much2read-runtime.service is active" >&2
+    printf '%s\n' "stop 2much2read-runtime.service before installing" >&2
     exit 1
     ;;
 esac

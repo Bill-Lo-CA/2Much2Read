@@ -106,16 +106,14 @@ for timer in 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer; do
 done
 
 for service in 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service; do
-  service_status=0
-  systemctl --user is-active --quiet "$service" || service_status=$?
-  case "$service_status" in
-    0)
-      printf '%s\n' "stop $service before installing" >&2
-      exit 1
-      ;;
-    3|4) ;;
+  service_state=$(systemctl --user show --property=ActiveState --value "$service") || {
+    printf '%s\n' "cannot determine whether $service is active" >&2
+    exit 1
+  }
+  case "$service_state" in
+    inactive|failed) ;;
     *)
-      printf '%s\n' "cannot determine whether $service is active" >&2
+      printf '%s\n' "stop $service before installing" >&2
       exit 1
       ;;
   esac
