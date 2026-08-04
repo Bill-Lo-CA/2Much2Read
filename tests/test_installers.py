@@ -219,7 +219,7 @@ def test_installers_only_start_timers_when_confirmed(
     assert installed_secret.read_text(encoding="utf-8") == "client secret"
     assert installed_secret.stat().st_mode & 0o777 == 0o600
     if script == "install-2busy1miss-user-service.sh":
-        assert "disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer" in calls
+        assert "disable --now 2busy1miss-runtime-agenda.timer" in calls
         if starts:
             assert "enable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer" in calls
             assert "Timers enabled." in result.stdout
@@ -648,7 +648,15 @@ def test_installers_refuse_legacy_new_conflicts(
         ),
     ],
 )
-def test_installers_do_not_migrate_while_service_is_active(
+@pytest.mark.parametrize(
+    ("systemctl_body", "message"),
+    [
+        ('[ "$2" = "is-active" ] && exit 0\nexit 0\n', "stop"),
+        ('[ "$2" = "is-active" ] && exit 1\nexit 0\n', "cannot determine"),
+        ('[ "$2" = "is-active" ] && exit 3\n[ "$2" = "disable" ] && exit 1\nexit 0\n', "failed to stop"),
+    ],
+)
+def test_installers_do_not_migrate_when_runtime_state_is_unsafe(
     tmp_path: Path,
     script: str,
     app: str,
@@ -658,6 +666,8 @@ def test_installers_do_not_migrate_while_service_is_active(
     token_name: str,
     sqlite_name: str,
     lock_name: str,
+    systemctl_body: str,
+    message: str,
 ) -> None:
     root = Path(__file__).parents[1]
     home = tmp_path / "home"
@@ -671,7 +681,7 @@ def test_installers_do_not_migrate_while_service_is_active(
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     systemctl = fake_bin / "systemctl"
-    systemctl.write_text('#!/bin/sh\n[ "$2" = "is-active" ] && exit 0\nexit 0\n', encoding="utf-8")
+    systemctl.write_text(f"#!/bin/sh\n{systemctl_body}", encoding="utf-8")
     systemctl.chmod(0o755)
 
     result = subprocess.run(
@@ -684,7 +694,7 @@ def test_installers_do_not_migrate_while_service_is_active(
     )
 
     assert result.returncode == 1
-    assert "stop" in result.stderr
+    assert message in result.stderr
     assert (config_root / token_name).exists()
     assert (data_root / sqlite_name).exists()
     assert not (config_root / app / token_name).exists()

@@ -45,14 +45,11 @@ def _sqlite_paths(database_path: Path) -> list[Path]:
 
 
 def sqlite_files_status(database_path: Path, missing_ok: bool = True) -> PermissionStatus:
-    statuses = [private_file_status(path, missing_ok=missing_ok) for path in _sqlite_paths(database_path)]
-    if "unsafe" in statuses:
+    main_status = private_file_status(database_path, missing_ok=missing_ok)
+    sidecar_statuses = [private_file_status(path, missing_ok=True) for path in _sqlite_paths(database_path)[1:]]
+    if main_status == "unsafe" or "unsafe" in sidecar_statuses:
         return "unsafe"
-    if "not_created" in statuses:
-        return "not_created"
-    if statuses[0] == "missing":
-        return "missing"
-    return "ok"
+    return main_status
 
 
 def path_within(path: Path, root: Path) -> bool:

@@ -61,7 +61,9 @@ def test_private_statuses_and_sqlite_sidecars(tmp_path: Path) -> None:
     database = tmp_path / "runtime.sqlite3"
     assert private_file_status(database) == "missing"
     assert private_file_status(database, missing_ok=True) == "not_created"
+    assert sqlite_files_status(database) == "not_created"
     prepare_private_file(database)
+    assert sqlite_files_status(database) == "ok"
     for suffix in ("-wal", "-shm", "-journal"):
         sidecar = Path(f"{database}{suffix}")
         sidecar.write_bytes(b"")

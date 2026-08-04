@@ -87,12 +87,38 @@ repair_file() {
   fi
 }
 
-systemctl --user disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer 2>/dev/null || true
+for timer in 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer; do
+  timer_status=0
+  systemctl --user is-active --quiet "$timer" || timer_status=$?
+  case "$timer_status" in
+    0|3)
+      systemctl --user disable --now "$timer" || {
+        printf '%s\n' "failed to stop and disable $timer" >&2
+        exit 1
+      }
+      ;;
+    4) ;;
+    *)
+      printf '%s\n' "cannot determine whether $timer is active" >&2
+      exit 1
+      ;;
+  esac
+done
+
 for service in 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service; do
-  if systemctl --user is-active --quiet "$service"; then
-    printf '%s\n' "stop $service before installing" >&2
-    exit 1
-  fi
+  service_status=0
+  systemctl --user is-active --quiet "$service" || service_status=$?
+  case "$service_status" in
+    0)
+      printf '%s\n' "stop $service before installing" >&2
+      exit 1
+      ;;
+    3|4) ;;
+    *)
+      printf '%s\n' "cannot determine whether $service is active" >&2
+      exit 1
+      ;;
+  esac
 done
 
 for directory in "$config_root" "$token_dir" "$data_root" "$data_dir"; do
