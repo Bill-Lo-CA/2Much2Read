@@ -36,6 +36,10 @@ exe="$repo_dir/.venv/bin/2busy1miss"
   printf '%s\n' "2busy1miss executable not found; run uv sync first" >&2
   exit 1
 }
+command -v flock >/dev/null 2>&1 || {
+  printf '%s\n' "flock is required to install 2busy1miss safely" >&2
+  exit 1
+}
 
 config_root="$HOME/.config/2much2read-runtime"
 config_dir="$config_root"
@@ -49,6 +53,7 @@ calendar_client_secret_file="$config_root/calendar-client-secret.json"
 calendar_token_file="$token_dir/calendar-token.json"
 database_file="$data_dir/2busy1miss.sqlite3"
 lock_file="$data_dir/2busy1miss.lock"
+legacy_lock_file="$data_root/2busy1miss.lock"
 
 file_exists() {
   [ -e "$1" ] || [ -L "$1" ]
@@ -74,6 +79,31 @@ migrate_file() {
   if file_exists "$1"; then
     mv "$1" "$2"
   fi
+}
+
+check_sqlite_migration() {
+  old_exists=false
+  new_exists=false
+  for suffix in "" -wal -shm -journal; do
+    reject_symlink "$1$suffix"
+    reject_symlink "$2$suffix"
+    if file_exists "$1$suffix"; then
+      old_exists=true
+    fi
+    if file_exists "$2$suffix"; then
+      new_exists=true
+    fi
+  done
+  if [ "$old_exists" = true ] && [ "$new_exists" = true ]; then
+    printf '%s\n' "cannot migrate $1: old and new files both exist across SQLite database groups ($2); move one group aside and retry" >&2
+    exit 1
+  fi
+}
+
+migrate_sqlite() {
+  for suffix in "" -wal -shm -journal; do
+    migrate_file "$1$suffix" "$2$suffix"
+  done
 }
 
 repair_file() {
@@ -127,22 +157,29 @@ for directory in "$config_root" "$token_dir" "$data_root" "$data_dir"; do
   chmod 700 "$directory"
 done
 
+repair_file "$legacy_lock_file"
+repair_file "$lock_file"
+exec 8>>"$legacy_lock_file"
+chmod 600 "$legacy_lock_file"
+flock -n 8 || {
+  printf '%s\n' "runtime lock is held: $legacy_lock_file" >&2
+  exit 1
+}
+exec 9>>"$lock_file"
+chmod 600 "$lock_file"
+flock -n 9 || {
+  printf '%s\n' "runtime lock is held: $lock_file" >&2
+  exit 1
+}
+
 for file in "$env_file" "$reminders_file" "$calendar_client_secret_file"; do
   reject_symlink "$file"
 done
 
 check_migration "$config_root/calendar-token.json" "$calendar_token_file"
-check_migration "$data_root/2busy1miss.sqlite3" "$database_file"
-check_migration "$data_root/2busy1miss.sqlite3-wal" "$database_file-wal"
-check_migration "$data_root/2busy1miss.sqlite3-shm" "$database_file-shm"
-check_migration "$data_root/2busy1miss.sqlite3-journal" "$database_file-journal"
-check_migration "$data_root/2busy1miss.lock" "$lock_file"
+check_sqlite_migration "$data_root/2busy1miss.sqlite3" "$database_file"
 migrate_file "$config_root/calendar-token.json" "$calendar_token_file"
-migrate_file "$data_root/2busy1miss.sqlite3" "$database_file"
-migrate_file "$data_root/2busy1miss.sqlite3-wal" "$database_file-wal"
-migrate_file "$data_root/2busy1miss.sqlite3-shm" "$database_file-shm"
-migrate_file "$data_root/2busy1miss.sqlite3-journal" "$database_file-journal"
-migrate_file "$data_root/2busy1miss.lock" "$lock_file"
+migrate_sqlite "$data_root/2busy1miss.sqlite3" "$database_file"
 
 if [ -n "$calendar_client_secret" ] && [ ! -f "$calendar_client_secret_file" ]; then
   cp "$calendar_client_secret" "$calendar_client_secret_file"
@@ -184,6 +221,10 @@ sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss-runtime-agenda.service > 
 sed "s|__AGENDA_SCHEDULE_TIME__|$agenda_schedule_time|" deploy/systemd/2busy1miss-runtime-agenda.timer > "$systemd_dir/2busy1miss-runtime-agenda.timer"
 
 systemctl --user daemon-reload
+
+rm -f "$legacy_lock_file"
+exec 9>&-
+exec 8>&-
 
 printf '%s' "Enable reminder and agenda timers now? [y/N] "
 if ! IFS= read -r enable_timers; then

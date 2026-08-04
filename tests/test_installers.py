@@ -1,3 +1,4 @@
+import fcntl
 import os
 import shutil
 import subprocess
@@ -526,7 +527,10 @@ def test_installers_migrate_legacy_files_and_repair_modes(
     assert app_data.stat().st_mode & 0o777 == 0o700
     managed_files: list[Path] = []
     for name, contents in legacy_files.items():
-        if name == token_name:
+        if name == lock_name:
+            target_root = app_data
+            assert not (data_root / name).exists()
+        elif name == token_name:
             target_root = app_config
             assert not (config_root / name).exists()
         elif name in {env_name, yaml_name, secret_name}:
@@ -536,7 +540,8 @@ def test_installers_migrate_legacy_files_and_repair_modes(
             target_root = app_data
             assert not (data_root / name).exists()
         target = target_root / name
-        assert target.read_text(encoding="utf-8") == contents
+        if name != lock_name:
+            assert target.read_text(encoding="utf-8") == contents
         assert target.stat().st_mode & 0o777 == 0o600
         managed_files.append(target)
 
@@ -578,6 +583,14 @@ def test_installers_migrate_legacy_files_and_repair_modes(
             "data",
         ),
         (
+            "install-2much2read-user-service.sh",
+            "2much2read",
+            "2much2read.sqlite3-wal",
+            "2much2read.sqlite3",
+            "data",
+            "data",
+        ),
+        (
             "install-2busy1miss-user-service.sh",
             "2busy1miss",
             "calendar-token.json",
@@ -589,6 +602,14 @@ def test_installers_migrate_legacy_files_and_repair_modes(
             "install-2busy1miss-user-service.sh",
             "2busy1miss",
             "2busy1miss.sqlite3",
+            "2busy1miss.sqlite3",
+            "data",
+            "data",
+        ),
+        (
+            "install-2busy1miss-user-service.sh",
+            "2busy1miss",
+            "2busy1miss.sqlite3-wal",
             "2busy1miss.sqlite3",
             "data",
             "data",
@@ -637,6 +658,58 @@ def test_installers_refuse_legacy_new_conflicts(
     assert "old and new files both exist" in result.stderr
     assert old_file.read_text(encoding="utf-8") == "old"
     assert new_file.read_text(encoding="utf-8") == "new"
+
+
+@pytest.mark.parametrize(
+    ("script", "app", "sqlite_name", "lock_name"),
+    [
+        ("install-2much2read-user-service.sh", "2much2read", "2much2read.sqlite3", "2much2read.lock"),
+        ("install-2busy1miss-user-service.sh", "2busy1miss", "2busy1miss.sqlite3", "2busy1miss.lock"),
+    ],
+)
+@pytest.mark.parametrize("lock_location", ["legacy", "destination"])
+def test_installers_do_not_migrate_while_runtime_lock_is_held(
+    tmp_path: Path,
+    script: str,
+    app: str,
+    sqlite_name: str,
+    lock_name: str,
+    lock_location: str,
+) -> None:
+    root = Path(__file__).parents[1]
+    home = tmp_path / "home"
+    data_root = home / ".local" / "share" / "2much2read-runtime"
+    app_data = data_root / app
+    app_data.mkdir(parents=True)
+    legacy_database = data_root / sqlite_name
+    legacy_database.write_text("legacy database", encoding="utf-8")
+    lock_path = (data_root if lock_location == "legacy" else app_data) / lock_name
+    lock_path.touch()
+
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        '#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+
+    with lock_path.open("a+") as lock:
+        fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        result = subprocess.run(
+            ["sh", f"scripts/{script}"],
+            cwd=root,
+            env=os.environ | {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+            text=True,
+            capture_output=True,
+            input="\n",
+        )
+
+    assert result.returncode == 1
+    assert "runtime lock is held" in result.stderr
+    assert legacy_database.read_text(encoding="utf-8") == "legacy database"
+    assert not (app_data / sqlite_name).exists()
 
 
 @pytest.mark.parametrize(
