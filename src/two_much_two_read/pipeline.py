@@ -447,7 +447,6 @@ def run_pipeline(
             if any(isinstance(source, HackerNewsSource) for source in sources):
                 hackernews = HackerNewsClient()
             ollama = create_ollama_client(settings)
-            reranker = RelevanceReranker(settings.reranker_model)
             gmail_remaining = settings.gmail_max_messages_per_run
             command_remaining = max_messages
             status(f"Starting {len(sources)} source(s)")
@@ -485,16 +484,15 @@ def run_pipeline(
                     processed_document_ids.extend(source_ids)
                     processed_documents.extend(source_documents)
                 source_names_by_id = {source.id: source.name for source in sources}
-                ranked_entries = _ranked_entries(
-                    settings,
-                    reranker,
-                    _items(database, processed_document_ids, settings.digest_review_candidate_limit, source_names_by_id),
-                )
+                entries = _items(database, processed_document_ids, settings.digest_review_candidate_limit, source_names_by_id)
             finally:
-                try:
-                    reranker.close()
-                finally:
-                    _unload_model(ollama, settings.ollama_model)
+                _unload_model(ollama, settings.ollama_model)
+
+            reranker = RelevanceReranker(settings.reranker_model)
+            try:
+                ranked_entries = _ranked_entries(settings, reranker, entries)
+            finally:
+                reranker.close()
 
             reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
             content = render_digest(

@@ -122,9 +122,9 @@ systemctl --user enable --now 2much2read-runtime.timer
 installer to render the systemd timer. Manual CLI runs are unchanged.
 
 Each run uses `OLLAMA_MODEL` to extract candidates, `RERANKER_MODEL` to rank them,
-then `OLLAMA_REVIEW_MODEL` for final selection. The extractor and reranker remain
-loaded through batch ranking, then both are released before the reviewer starts, so
-`qwen3:8b` never shares memory with either model. `DIGEST_REVIEW_CANDIDATE_LIMIT` bounds reviewer input and
+then `OLLAMA_REVIEW_MODEL` for final selection. The extractor is released before
+the reranker loads, and the reranker is released before the reviewer starts, so the
+three models never share memory. `DIGEST_REVIEW_CANDIDATE_LIMIT` bounds reviewer input and
 `DIGEST_MAX_ITEMS` is the final delivered-item limit. Each item includes its newsletter
 source in the Discord digest.
 

@@ -690,6 +690,61 @@ def test_run_pipeline_uses_one_captured_time_for_digest_metadata(tmp_path: Path,
     database.close()
 
 
+def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+    )
+    events: list[str] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    class FakeReranker:
+        def __init__(self, _: str) -> None:
+            events.append("reranker:load")
+
+        def close(self) -> None:
+            events.append("reranker:unload")
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: events.append("extractor:load") or object())
+    monkeypatch.setattr(
+        pipeline,
+        "_process_source",
+        lambda *args, **kwargs: events.append("extractor:run") or (0, 0, 0, 0, [], []),
+    )
+    monkeypatch.setattr(pipeline, "_unload_model", lambda *_: events.append("extractor:unload"))
+    monkeypatch.setattr(pipeline, "RelevanceReranker", FakeReranker)
+    monkeypatch.setattr(
+        pipeline,
+        "_ranked_entries",
+        lambda *args: events.append("reranker:rank") or [],
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_reviewed_entries",
+        lambda *args: events.append("reviewer:run") or [],
+    )
+
+    run_pipeline(settings, no_deliver=True)
+
+    assert events == [
+        "extractor:load",
+        "extractor:run",
+        "extractor:unload",
+        "reranker:load",
+        "reranker:rank",
+        "reranker:unload",
+        "reviewer:run",
+    ]
+
+
 def test_credentials_failure_records_a_failed_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sources_path = tmp_path / "sources.yaml"
     write_sources(sources_path)
