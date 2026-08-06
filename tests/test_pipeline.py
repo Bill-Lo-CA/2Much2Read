@@ -92,6 +92,9 @@ class StubOllamaClient:
 @pytest.fixture(autouse=True)
 def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeReranker:
+        model_name = "test-reranker"
+        prompt_version = "test-prompt-v1"
+
         def __init__(self, _: str) -> None:
             pass
 
@@ -705,6 +708,9 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
             pass
 
     class FakeReranker:
+        model_name = "test-reranker"
+        prompt_version = "test-prompt-v1"
+
         def __init__(self, _: str) -> None:
             events.append("reranker:load")
 
@@ -743,6 +749,104 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
         "reranker:unload",
         "reviewer:run",
     ]
+
+
+def test_pipeline_persists_all_reranked_candidates_and_orders_footer_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n"
+        "  - id: first\n    name: First\n    gmail_query: from:first@example.com\n"
+        "  - id: second\n    name: Second\n    gmail_query: from:second@example.com\n"
+        "  - id: third\n    name: Third\n    gmail_query: from:third@example.com\n",
+        encoding="utf-8",
+    )
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        digest_review_candidate_limit=2,
+        digest_max_items=1,
+    )
+    rendered: list[tuple[object, ...]] = []
+    reviewed_candidate_ids: list[int | None] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    class FakeReranker:
+        model_name = "Qwen/test"
+        prompt_version = "technical-digest-v1"
+
+        def __init__(self, _model_name: str) -> None:
+            pass
+
+        def rank(self, entries):
+            return [replace(entry, reranker_score=index / 10) for index, entry in enumerate(entries, 1)]
+
+        def close(self) -> None:
+            pass
+
+    def process_source(
+        database: Database, _gmail: object, _ollama: object, _settings: Settings, source, *_args: object, **_kwargs: object
+    ) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
+        document_id = discover_gmail_document(database, f"message-{source.id}", source.id)
+        assert document_id is not None
+        database.store_extraction(
+            document_id,
+            EmailExtraction(
+                source_id=source.id,
+                newsletter_title=source.name,
+                newsletter_date=None,
+                overview_zh_tw="摘要",
+                items=[
+                    NewsletterItemAnalysis(
+                        title=f"{source.name} story",
+                        category="OTHER",
+                        summary_zh_tw="摘要",
+                        why_it_matters_zh_tw="原因",
+                        importance=8,
+                        confidence=0.8,
+                    )
+                ],
+            ),
+            finalize=False,
+        )
+        return 1, 1, 1, 0, [document_id], []
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_process_source", process_source)
+    monkeypatch.setattr(pipeline, "RelevanceReranker", FakeReranker)
+    monkeypatch.setattr(
+        pipeline,
+        "_reviewed_entries",
+        lambda current_settings, _ollama, entries: (
+            reviewed_candidate_ids.extend(
+                entry.candidate_id for entry in entries[: current_settings.digest_review_candidate_limit]
+            )
+            or entries[: current_settings.digest_max_items]
+        ),
+    )
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args: rendered.append(args) or "digest")
+
+    assert run_pipeline(settings, no_deliver=True, force=True, now=datetime(2026, 1, 1, tzinfo=UTC)).status == "ok"
+
+    database = Database(settings.database_path)
+    rows = database.connection.execute(
+        "SELECT reranker_score,reranker_model,reranker_prompt_version FROM items ORDER BY id"
+    ).fetchall()
+    database.close()
+    assert [tuple(row) for row in rows] == [
+        (0.1, "Qwen/test", "technical-digest-v1"),
+        (0.2, "Qwen/test", "technical-digest-v1"),
+        (0.3, "Qwen/test", "technical-digest-v1"),
+    ]
+    assert len(reviewed_candidate_ids) == 2
+    assert rendered[0][3] == "First, Second, Third"
 
 
 def test_credentials_failure_records_a_failed_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

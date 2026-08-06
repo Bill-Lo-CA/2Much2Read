@@ -167,6 +167,51 @@ def test_items_for_documents_excludes_prior_runs(tmp_path: Path) -> None:
     database.close()
 
 
+def test_reranker_score_metadata_is_persisted(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    document_id = discover(database, "gmail-1")
+    assert document_id is not None
+    database.store_extraction(document_id, extraction())
+    item_id = int(database.items_for_documents([document_id], 10)[0]["id"])
+
+    reranked_at = datetime(2026, 7, 24, 8, 0, tzinfo=UTC)
+    database.save_reranker_scores([(item_id, 0.8125)], "Qwen/test", "technical-digest-v1", reranked_at)
+    with pytest.raises(ValueError, match="outside 0..1"):
+        database.save_reranker_scores([(item_id, 1.1)], "Qwen/test", "technical-digest-v1")
+
+    row = database.connection.execute(
+        "SELECT reranker_score,reranker_model,reranker_prompt_version,reranked_at FROM items WHERE id=?",
+        (item_id,),
+    ).fetchone()
+    database.close()
+    assert tuple(row) == (0.8125, "Qwen/test", "technical-digest-v1", reranked_at.isoformat())
+
+
+def test_v8_schema_migrates_reranker_columns_without_backfill(tmp_path: Path) -> None:
+    path = tmp_path / "v8.sqlite3"
+    database = Database(path)
+    document_id = discover(database, "gmail-1")
+    assert document_id is not None
+    database.store_extraction(document_id, extraction())
+    for column in ("reranker_score", "reranker_model", "reranker_prompt_version", "reranked_at"):
+        database.connection.execute(f"ALTER TABLE items DROP COLUMN {column}")
+    database.connection.execute("DELETE FROM schema_version")
+    database.connection.execute("INSERT INTO schema_version VALUES(8, 'now')")
+    database.connection.commit()
+    database.close()
+
+    upgraded = Database(path)
+    columns = {row["name"] for row in upgraded.connection.execute("PRAGMA table_info(items)")}
+    row = upgraded.connection.execute(
+        "SELECT reranker_score,reranker_model,reranker_prompt_version,reranked_at FROM items"
+    ).fetchone()
+    version = upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0]
+    upgraded.close()
+    assert {"reranker_score", "reranker_model", "reranker_prompt_version", "reranked_at"} <= columns
+    assert tuple(row) == (None, None, None, None)
+    assert version == 9
+
+
 def test_save_digest_finalizes_staged_documents_atomically(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     document_id = discover(database, "gmail-1")
@@ -227,7 +272,7 @@ def test_v2_schema_upgrades_without_losing_documents(tmp_path: Path) -> None:
 
     upgraded = Database(path)
 
-    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 8
+    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 9
     assert upgraded.connection.execute("SELECT gmail_message_id FROM gmail_document_state").fetchone()[0] == "gmail-1"
     assert upgraded.connection.execute("SELECT 1 FROM sqlite_master WHERE name='hackernews_document_state'").fetchone()[0] == 1
     upgraded.close()
@@ -275,7 +320,7 @@ def test_v3_hackernews_state_upgrades_without_losing_metadata(tmp_path: Path) ->
 
     row = upgraded.connection.execute("SELECT hn_item_id,requested_url,fetch_status FROM hackernews_document_state").fetchone()
     assert tuple(row) == (123, "https://example.com", "not_requested")
-    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8
+    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
     upgraded.close()
 
 
@@ -284,9 +329,19 @@ def test_v6_schema_adds_parent_checkpoint_destination(tmp_path: Path) -> None:
     connection = sqlite3.connect(path)
     connection.executescript(
         """CREATE TABLE schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
-        INSERT INTO schema_version VALUES(6,'now');
-        CREATE TABLE digests(id INTEGER PRIMARY KEY, discord_message_ids_json TEXT);
-        INSERT INTO digests VALUES(1,'[\"message\"]');"""
+            INSERT INTO schema_version VALUES(6,'now');
+            CREATE TABLE digests(id INTEGER PRIMARY KEY, discord_message_ids_json TEXT);
+            INSERT INTO digests VALUES(1,'[\"message\"]');
+            CREATE TABLE items(
+              id INTEGER PRIMARY KEY, document_id INTEGER NOT NULL, normalized_title TEXT NOT NULL,
+              title TEXT NOT NULL, category TEXT NOT NULL, summary_zh_tw TEXT NOT NULL,
+              why_it_matters_zh_tw TEXT NOT NULL, source_url TEXT, canonical_url TEXT,
+              raw_url TEXT, resolved_url TEXT, url_match_status TEXT NOT NULL DEFAULT 'not_applicable',
+              url_match_method TEXT, url_match_confidence REAL,
+              url_resolution_status TEXT NOT NULL DEFAULT 'not_applicable', url_error_code TEXT,
+              url_checked_at TEXT, importance INTEGER NOT NULL, confidence REAL NOT NULL,
+              tags_json TEXT NOT NULL, created_at TEXT NOT NULL
+            );"""
     )
     connection.close()
 
@@ -297,7 +352,7 @@ def test_v6_schema_adds_parent_checkpoint_destination(tmp_path: Path) -> None:
     ).fetchone()
     assert tuple(row) == ('["message"]', "webhook")
     assert "retired_at" in {column["name"] for column in upgraded.connection.execute("PRAGMA table_info(digest_deliveries)")}
-    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8
+    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
     upgraded.close()
 
 

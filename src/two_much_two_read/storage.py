@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,7 +18,7 @@ from two_read_runtime.permissions import prepare_private_file, repair_sqlite_fil
 from .digest import canonical_url, normalized_title
 from .schemas import DigestItem, EmailExtraction, ItemAnalysis, ResolvedContent, SourceDocument
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS documents(
@@ -49,7 +50,9 @@ CREATE TABLE IF NOT EXISTS items(
   raw_url TEXT, resolved_url TEXT,
   url_match_status TEXT NOT NULL DEFAULT 'not_applicable', url_match_method TEXT, url_match_confidence REAL,
   url_resolution_status TEXT NOT NULL DEFAULT 'not_applicable', url_error_code TEXT, url_checked_at TEXT,
-  importance INTEGER NOT NULL, confidence REAL NOT NULL, tags_json TEXT NOT NULL, created_at TEXT NOT NULL
+  importance INTEGER NOT NULL, confidence REAL NOT NULL, tags_json TEXT NOT NULL, created_at TEXT NOT NULL,
+  reranker_score REAL CHECK(reranker_score IS NULL OR reranker_score BETWEEN 0.0 AND 1.0),
+  reranker_model TEXT, reranker_prompt_version TEXT, reranked_at TEXT
 );
 CREATE TABLE IF NOT EXISTS url_resolution_cache(
   raw_url_hash TEXT PRIMARY KEY, raw_url_host TEXT NOT NULL, resolved_url TEXT, canonical_url TEXT,
@@ -138,6 +141,9 @@ class Database:
             if version == 7:
                 self._migrate_v7_to_v8()
                 version = 8
+            if version == 8:
+                self._migrate_v8_to_v9()
+                version = 9
             if version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
                 raise DatabaseSchemaResetRequiredError(
                     f"DATABASE_SCHEMA_RESET_REQUIRED: back up {path} and remove it before rerunning 2much2read"
@@ -226,6 +232,19 @@ class Database:
             if "retired_at" not in columns:
                 connection.execute("ALTER TABLE digest_deliveries ADD COLUMN retired_at TEXT")
             connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(8, datetime('now'))")
+
+    def _migrate_v8_to_v9(self) -> None:
+        with self.transaction() as connection:
+            columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(items)")}
+            for name, definition in (
+                ("reranker_score", "REAL CHECK(reranker_score IS NULL OR reranker_score BETWEEN 0.0 AND 1.0)"),
+                ("reranker_model", "TEXT"),
+                ("reranker_prompt_version", "TEXT"),
+                ("reranked_at", "TEXT"),
+            ):
+                if name not in columns:
+                    connection.execute(f"ALTER TABLE items ADD COLUMN {name} {definition}")
+            connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(9, datetime('now'))")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -591,6 +610,26 @@ class Database:
             (*document_ids, limit),
         ).fetchall()
         return [dict(row) for row in rows]
+
+    def save_reranker_scores(
+        self,
+        scores: Sequence[tuple[int, float]],
+        model: str,
+        prompt_version: str,
+        reranked_at: datetime | None = None,
+    ) -> None:
+        if not scores:
+            return
+        for _, score in scores:
+            if not math.isfinite(score) or not 0.0 <= score <= 1.0:
+                raise ValueError(f"reranker score outside 0..1: {score!r}")
+        timestamp = (reranked_at or datetime.now(UTC)).isoformat()
+        with self.transaction() as connection:
+            connection.executemany(
+                """UPDATE items SET reranker_score=?,reranker_model=?,reranker_prompt_version=?,reranked_at=?
+                WHERE id=?""",
+                [(float(score), model, prompt_version, timestamp, int(item_id)) for item_id, score in scores],
+            )
 
     def save_digest(
         self,

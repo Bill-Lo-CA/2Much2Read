@@ -58,6 +58,7 @@ def _items(database: Database, document_ids: list[int], maximum: int, source_nam
                 candidate_id=int(str(row["id"])),
                 source_id=str(row["source_id"]),
                 source_name=source_names.get(str(row["source_id"]), str(row["source_id"])),
+                reranker_score=float(str(row["reranker_score"])) if row["reranker_score"] is not None else None,
                 published_at=datetime.fromisoformat(str(row["published_at"])),
                 article_url=str(row["source_url"]) if row["source_url"] else None,
                 discussion_url=str(row["discussion_url"]) if row["discussion_url"] else None,
@@ -70,15 +71,16 @@ def _items(database: Database, document_ids: list[int], maximum: int, source_nam
     return result
 
 
-def _ranked_entries(settings: Settings, reranker: RelevanceReranker, entries: list[DigestEntry]) -> list[DigestEntry]:
+def _ranked_entries(reranker: RelevanceReranker, entries: list[DigestEntry]) -> list[DigestEntry]:
     if not entries:
         return []
-    return reranker.rank(dedupe_entries(entries))[: settings.digest_review_candidate_limit]
+    return reranker.rank(dedupe_entries(entries))
 
 
 def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[DigestEntry]) -> list[DigestEntry]:
     if not ranked:
         return []
+    ranked = ranked[: settings.digest_review_candidate_limit]
     candidates: list[dict[str, object]] = []
     for entry in ranked:
         assert entry.candidate_id is not None
@@ -490,16 +492,27 @@ def run_pipeline(
 
             reranker = RelevanceReranker(settings.reranker_model)
             try:
-                ranked_entries = _ranked_entries(settings, reranker, entries)
+                ranked_entries = _ranked_entries(reranker, entries)
+                database.save_reranker_scores(
+                    [
+                        (entry.candidate_id, entry.reranker_score)
+                        for entry in ranked_entries
+                        if entry.candidate_id is not None and entry.reranker_score is not None
+                    ],
+                    reranker.model_name,
+                    reranker.prompt_version,
+                )
             finally:
                 reranker.close()
 
             reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
+            ranked_source_ids = {entry.source_id for entry in ranked_entries if entry.source_id}
+            ordered_source_names = [source.name for source in sources if source.id in ranked_source_ids]
             content = render_digest(
                 reviewed_entries,
                 now,
                 ", ".join(dict.fromkeys(source.category for source in sources)),
-                ", ".join(dict.fromkeys(entry.source_name or entry.source_id or "Unknown" for entry in reviewed_entries)),
+                ", ".join(ordered_source_names),
                 settings.digest_top_items,
                 settings.digest_language,
             )

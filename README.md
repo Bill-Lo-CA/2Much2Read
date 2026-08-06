@@ -126,7 +126,9 @@ then `OLLAMA_REVIEW_MODEL` for final selection. The extractor is released before
 the reranker loads, and the reranker is released before the reviewer starts, so the
 three models never share memory. `DIGEST_REVIEW_CANDIDATE_LIMIT` bounds reviewer input and
 `DIGEST_MAX_ITEMS` is the final delivered-item limit. Each item includes its newsletter
-source in the Discord digest.
+source in the Discord digest. Reranker scores for every deduplicated candidate are
+stored with the model, prompt version, and timestamp for later review; the digest
+footer lists every configured source that contributed a reranker candidate.
 
 Useful commands:
 

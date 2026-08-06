@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import pytest
+
 from two_much_two_read import pipeline
 from two_much_two_read.config import Settings
 from two_much_two_read.digest import DigestEntry
@@ -25,15 +27,57 @@ def entry(candidate_id: int, title: str, source_name: str) -> DigestEntry:
 
 def test_reranker_orders_by_model_score() -> None:
     class FakeModel:
-        def predict(self, pairs: list[tuple[str, str]]) -> list[float]:
+        def predict(self, pairs: list[tuple[str, str]], activation_fn) -> list[float]:
             assert "AlphaSignal" in pairs[0][1]
+            assert activation_fn is not None
             return [0.2, 0.9]
 
     reranker = object.__new__(RelevanceReranker)
     reranker._model = FakeModel()  # type: ignore[attr-defined]
+    reranker._sigmoid = object()  # type: ignore[attr-defined]
 
     ranked = reranker.rank([entry(1, "Trial", "AlphaSignal"), entry(2, "Release", "TLDR AI")])
     assert [value.candidate_id for value in ranked] == [2, 1]
+    assert [value.reranker_score for value in ranked] == [0.9, 0.2]
+
+
+def test_reranker_configures_custom_prompt_and_sigmoid(monkeypatch) -> None:
+    import sentence_transformers
+
+    captured: dict[str, object] = {}
+
+    class FakeModel:
+        def __init__(self, model_name: str, **kwargs: object) -> None:
+            captured["model_name"] = model_name
+            captured.update(kwargs)
+
+        def predict(self, pairs, activation_fn):
+            captured["activation_fn"] = activation_fn
+            return [0.75 for _ in pairs]
+
+    monkeypatch.setattr(sentence_transformers, "CrossEncoder", FakeModel)
+    reranker = RelevanceReranker("Qwen/test")
+    ranked = reranker.rank([entry(1, "Release", "TLDR AI")])
+
+    assert captured["model_name"] == "Qwen/test"
+    assert captured["default_prompt_name"] == "technical_digest"
+    assert captured["prompts"]
+    assert captured["activation_fn"] is not None
+    assert ranked[0].reranker_score == 0.75
+
+
+@pytest.mark.parametrize("score", [float("nan"), -0.1, 1.1])
+def test_reranker_rejects_invalid_normalized_scores(score: float) -> None:
+    class FakeModel:
+        def predict(self, _pairs: list[tuple[str, str]], activation_fn) -> list[float]:
+            return [score]
+
+    reranker = object.__new__(RelevanceReranker)
+    reranker._model = FakeModel()  # type: ignore[attr-defined]
+    reranker._sigmoid = object()  # type: ignore[attr-defined]
+
+    with pytest.raises(ValueError, match="reranker returned"):
+        reranker.rank([entry(1, "Release", "TLDR AI")])
 
 
 def test_final_review_selects_scored_items_and_releases_the_reviewer() -> None:

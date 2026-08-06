@@ -129,6 +129,7 @@ class DigestEntry:
     candidate_id: int | None = None
     source_id: str | None = None
     source_name: str | None = None
+    reranker_score: float | None = None
     review_score: int | None = None
 
 
