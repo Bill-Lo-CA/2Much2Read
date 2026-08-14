@@ -157,6 +157,7 @@ class Settings(BaseSettings):
     digest_max_items: int = Field(default=5, ge=1)
     digest_top_items: int = Field(default=5, ge=0)
     digest_review_candidate_limit: int = Field(default=20, ge=1)
+    digest_rerank_candidate_limit: int = Field(default=100, ge=1)
 
     def __init__(self, **data: Any) -> None:
         super().__init__(_env_file=env_file("2much2read"), **data)

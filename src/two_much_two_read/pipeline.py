@@ -37,9 +37,9 @@ def _email_content(value: ExtractedEmailContent | str) -> ExtractedEmailContent:
     return value if isinstance(value, ExtractedEmailContent) else ExtractedEmailContent(analysis_text=value)
 
 
-def _items(database: Database, document_ids: list[int], maximum: int, source_names: dict[str, str]) -> list[DigestEntry]:
+def _items(database: Database, document_ids: list[int], limit: int, source_names: dict[str, str]) -> list[DigestEntry]:
     result: list[DigestEntry] = []
-    for row in database.items_for_documents(document_ids, maximum * 5):
+    for row in database.items_for_documents(document_ids, limit):
         item = DigestItem.model_validate(
             {
                 "title": row["title"],
@@ -70,15 +70,31 @@ def _items(database: Database, document_ids: list[int], maximum: int, source_nam
     return result
 
 
-def _ranked_entries(settings: Settings, reranker: RelevanceReranker, entries: list[DigestEntry]) -> list[DigestEntry]:
+def _ranked_entries(reranker: RelevanceReranker, entries: list[DigestEntry]) -> list[DigestEntry]:
     if not entries:
         return []
-    return reranker.rank(dedupe_entries(entries))[: settings.digest_review_candidate_limit]
+    return reranker.rank(dedupe_entries(entries))
+
+
+def _save_reranker_scores(
+    database: Database, ranked: list[DigestEntry], reranker: RelevanceReranker, status: StatusReporter
+) -> None:
+    scores = [
+        (entry.candidate_id, entry.reranker_score)
+        for entry in ranked
+        if entry.candidate_id is not None and entry.reranker_score is not None
+    ]
+    if not scores:
+        return
+    saved = database.save_reranker_scores(scores, reranker.model_name, reranker.prompt_version)
+    if saved != len(scores):
+        status(f"Warning: recorded {saved} of {len(scores)} reranker scores")
 
 
 def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[DigestEntry]) -> list[DigestEntry]:
     if not ranked:
         return []
+    ranked = ranked[: settings.digest_review_candidate_limit]
     candidates: list[dict[str, object]] = []
     for entry in ranked:
         assert entry.candidate_id is not None
@@ -100,8 +116,9 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
     return [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]
 
 
-def _unload_model(ollama: OllamaClient, model: str) -> None:
-    ollama.unload(model)
+def _unload_model(ollama: OllamaClient, model: str, status: StatusReporter = _ignore_status) -> None:
+    if not ollama.unload(model):
+        status(f"Warning: {model} did not unload and may still hold memory")
 
 
 def _enabled_sources(settings: Settings, source_id: str | None) -> list[GmailSource | HackerNewsSource]:
@@ -484,13 +501,14 @@ def run_pipeline(
                     processed_document_ids.extend(source_ids)
                     processed_documents.extend(source_documents)
                 source_names_by_id = {source.id: source.name for source in sources}
-                entries = _items(database, processed_document_ids, settings.digest_review_candidate_limit, source_names_by_id)
+                entries = _items(database, processed_document_ids, settings.digest_rerank_candidate_limit, source_names_by_id)
             finally:
-                _unload_model(ollama, settings.ollama_model)
+                _unload_model(ollama, settings.ollama_model, status)
 
             reranker = RelevanceReranker(settings.reranker_model, settings.reranker_device)
             try:
-                ranked_entries = _ranked_entries(settings, reranker, entries)
+                ranked_entries = _ranked_entries(reranker, entries)
+                _save_reranker_scores(database, ranked_entries, reranker, status)
             finally:
                 reranker.close()
 

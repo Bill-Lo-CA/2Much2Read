@@ -126,9 +126,20 @@ then `OLLAMA_REVIEW_MODEL` for final selection. The extractor is released before
 the reranker loads, and the reranker is released before the reviewer starts, so the
 three models never share memory. `RERANKER_DEVICE` defaults to `cpu`, which keeps the
 reranker off the GPU entirely; set it to `cuda` only when the GPU has room to spare
-alongside the reviewer. `DIGEST_REVIEW_CANDIDATE_LIMIT` bounds reviewer input and
-`DIGEST_MAX_ITEMS` is the final delivered-item limit. Each item includes its newsletter
-source in the Discord digest.
+alongside the reviewer. `DIGEST_RERANK_CANDIDATE_LIMIT` bounds how many candidates reach the
+reranker, `DIGEST_REVIEW_CANDIDATE_LIMIT` bounds reviewer input, and `DIGEST_MAX_ITEMS` is the
+final delivered-item limit. Each item includes its newsletter source in the Discord digest.
+
+Every reranked candidate is recorded in the append-only `reranker_scores` table with the model,
+prompt version, and timestamp. Scores are stored exactly as the model produced them rather than
+normalized, and the table carries no foreign key to `items` so the history survives reprocessing,
+which deletes and re-inserts a document's item rows. Because SQLite reuses deleted row ids, join
+audit rows on `scored_at` and `normalized_title` rather than on `item_id` alone.
+
+The reviewer prompt is bounded against `OLLAMA_NUM_CTX` before it is sent. Ollama truncates an
+oversized prompt from the head without erroring, which would silently drop the system prompt while
+keeping the untrusted candidate text, so excess candidates are trimmed from the tail instead and
+the injection guard is repeated after the candidate block.
 
 On an 8 GB GPU the reviewer is the binding constraint: `qwen3:8b` at `OLLAMA_NUM_CTX=16384`
 needs roughly 8 GB for Q4 weights plus an f16 KV cache, so Ollama offloads layers to the

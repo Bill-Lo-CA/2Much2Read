@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import gc
+import hashlib
 from collections.abc import Sequence
+from dataclasses import replace
 
 from .digest import DigestEntry
 
@@ -10,12 +12,17 @@ RERANK_QUERY = (
     "practical impact in AI, cybersecurity, or software engineering. Demote promotions, policy pages, free trials, "
     "events, job posts, generic roundups, and duplicates."
 )
+# Derived from the query text so the recorded version cannot drift from the prompt that produced
+# a score. Editing RERANK_QUERY changes this automatically; a hand-maintained string would not.
+RERANKER_PROMPT_VERSION = hashlib.sha256(RERANK_QUERY.encode()).hexdigest()[:12]
 
 
 class RelevanceReranker:
     def __init__(self, model_name: str, device: str = "cpu") -> None:
         from sentence_transformers import CrossEncoder
 
+        self.model_name = model_name
+        self.prompt_version = RERANKER_PROMPT_VERSION
         self._model = CrossEncoder(model_name, device=device)
 
     def rank(self, entries: Sequence[DigestEntry]) -> list[DigestEntry]:
@@ -34,7 +41,8 @@ class RelevanceReranker:
             for entry in entries
         ]
         scores = self._model.predict(pairs)
-        return [entry for _, entry in sorted(zip(scores, entries, strict=True), key=lambda value: float(value[0]), reverse=True)]
+        scored = [(float(score), entry) for score, entry in zip(scores, entries, strict=True)]
+        return [replace(entry, reranker_score=score) for score, entry in sorted(scored, key=lambda value: value[0], reverse=True)]
 
     def close(self) -> None:
         del self._model
