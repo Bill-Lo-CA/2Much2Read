@@ -34,6 +34,7 @@ def extraction(title: str = "Title") -> EmailExtraction:
         items=[
             NewsletterItemAnalysis(
                 title=title,
+                source_title=title,
                 category="OTHER",
                 summary_zh_tw="摘要",
                 why_it_matters_zh_tw="原因",

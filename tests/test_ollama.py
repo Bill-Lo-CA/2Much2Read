@@ -19,6 +19,7 @@ def valid_result() -> dict[str, object]:
         "items": [
             {
                 "title": "Model release",
+                "source_title": "Model release",
                 "category": "AI_MODEL",
                 "summary_zh_tw": "發布新模型。",
                 "why_it_matters_zh_tw": "可改善工作流程。",

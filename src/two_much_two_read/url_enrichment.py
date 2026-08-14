@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from .article_fetcher import ArticleFetcher, ResolvedUrl, UrlResolutionError
 from .digest import canonical_url
-from .schemas import HTTP_URL, DigestItem, ItemAnalysis, LinkCandidate
+from .schemas import HTTP_URL, DigestItem, ItemAnalysis, LinkCandidate, NewsletterItemAnalysis
 
 MatchMethod: TypeAlias = Literal["exact_anchor", "heading_context", "fuzzy_anchor", "url_slug", "unmatched", "ambiguous"]
 TRACKING_PARAMETERS = {"mc_cid", "mc_eid", "mkt_tok"}
@@ -17,7 +17,7 @@ TRACKING_PARAMETERS = {"mc_cid", "mc_eid", "mkt_tok"}
 
 @dataclass(frozen=True)
 class UrlMatch:
-    item: ItemAnalysis
+    item: NewsletterItemAnalysis
     candidate: LinkCandidate | None
     method: MatchMethod
     confidence: float
@@ -69,12 +69,15 @@ def _tracking_url(value: str) -> bool:
 class UrlEnricher:
     """Matches application-supplied links and turns safe resolutions into digest items."""
 
-    def match(self, items: Sequence[ItemAnalysis], candidates: Sequence[LinkCandidate]) -> list[UrlMatch]:
+    def match(self, items: Sequence[NewsletterItemAnalysis], candidates: Sequence[LinkCandidate]) -> list[UrlMatch]:
         available = [candidate for candidate in candidates if candidate.kind != "non_article"]
         used: set[str] = set()
         matches: list[UrlMatch] = []
         for item in items:
-            scored = [(_score(item.title, candidate), candidate) for candidate in available if candidate.candidate_id not in used]
+            # Score against the newsletter's own wording, not the translated display title.
+            scored = [
+                (_score(item.source_title, candidate), candidate) for candidate in available if candidate.candidate_id not in used
+            ]
             scored = [(score, candidate) for score, candidate in scored if score[1] > 0]
             if not scored:
                 matches.append(UrlMatch(item, None, "unmatched", 0.0))

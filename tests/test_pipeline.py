@@ -154,6 +154,7 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, mon
             items=[
                 NewsletterItemAnalysis(
                     title="Useful article",
+                    source_title="Useful article",
                     category="OTHER",
                     summary_zh_tw="摘要",
                     why_it_matters_zh_tw="原因",
@@ -1298,6 +1299,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
                 items=[
                     {
                         "title": "Good item",
+                        "source_title": "Good item",
                         "category": "AI_MODEL",
                         "summary_zh_tw": "內容",
                         "why_it_matters_zh_tw": "原因",
@@ -1395,6 +1397,7 @@ def test_mime_failure_marks_one_message_failed_and_continues(
         items=[
             {
                 "title": "Good item",
+                "source_title": "Good item",
                 "category": "AI_MODEL",
                 "summary_zh_tw": "內容",
                 "why_it_matters_zh_tw": "原因",
@@ -1463,6 +1466,7 @@ def test_digest_render_failure_leaves_extractions_retryable(tmp_path: Path, monk
         items=[
             {
                 "title": "Item",
+                "source_title": "Item",
                 "category": "AI_MODEL",
                 "summary_zh_tw": "內容",
                 "why_it_matters_zh_tw": "原因",
@@ -1532,6 +1536,7 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
         items=[
             {
                 "title": "Recovered item",
+                "source_title": "Recovered item",
                 "category": "AI_MODEL",
                 "summary_zh_tw": "內容",
                 "why_it_matters_zh_tw": "原因",

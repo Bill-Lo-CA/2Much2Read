@@ -91,7 +91,14 @@ class ItemAnalysis(BaseModel):
 
 
 class NewsletterItemAnalysis(ItemAnalysis):
-    pass
+    # The headline exactly as the newsletter wrote it. `title` is translated into the digest
+    # language, which leaves it with no tokens in common with the English anchor text and URL slugs
+    # the link matcher scores against: of 170 extracted items, every one of the 107 with a
+    # translated title went unmatched while 84% of the untranslated ones matched. This field exists
+    # only to give the matcher the original wording, so it is deliberately absent from ItemAnalysis
+    # and never reaches DigestItem, storage, or the rendered digest. It is copied out of untrusted
+    # newsletter text, so it carries no anti-link validator; nothing renders it.
+    source_title: str = Field(min_length=1, max_length=200)
 
 
 class DigestItem(ItemAnalysis):
