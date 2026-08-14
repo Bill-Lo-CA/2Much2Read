@@ -146,6 +146,7 @@ class Settings(BaseSettings):
     ollama_timeout_seconds: float = 300
     ollama_keep_alive: str = "10m"
     reranker_model: str = "Qwen/Qwen3-Reranker-0.6B"
+    reranker_device: str = "cpu"
     discord_delivery_mode: Literal["webhook", "bot", "both"] = "webhook"
     discord_webhook_url: str = ""
     discord_username: str = "2much2read"

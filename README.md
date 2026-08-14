@@ -100,7 +100,7 @@ Requirements: Gmail API desktop OAuth credentials, a Discord webhook or bot, and
 
 ```bash
 uv sync --all-groups
-ollama pull qwen3:4b
+ollama pull llama3.2:3b
 ollama pull qwen3:8b
 sh scripts/install-2much2read-user-service.sh \
   --gmail-client-secret ~/Downloads/gmail-client.json
@@ -124,9 +124,22 @@ installer to render the systemd timer. Manual CLI runs are unchanged.
 Each run uses `OLLAMA_MODEL` to extract candidates, `RERANKER_MODEL` to rank them,
 then `OLLAMA_REVIEW_MODEL` for final selection. The extractor is released before
 the reranker loads, and the reranker is released before the reviewer starts, so the
-three models never share memory. `DIGEST_REVIEW_CANDIDATE_LIMIT` bounds reviewer input and
+three models never share memory. `RERANKER_DEVICE` defaults to `cpu`, which keeps the
+reranker off the GPU entirely; set it to `cuda` only when the GPU has room to spare
+alongside the reviewer. `DIGEST_REVIEW_CANDIDATE_LIMIT` bounds reviewer input and
 `DIGEST_MAX_ITEMS` is the final delivered-item limit. Each item includes its newsletter
 source in the Discord digest.
+
+On an 8 GB GPU the reviewer is the binding constraint: `qwen3:8b` at `OLLAMA_NUM_CTX=16384`
+needs roughly 8 GB for Q4 weights plus an f16 KV cache, so Ollama offloads layers to the
+CPU. Quantizing the KV cache on the Ollama server halves the cache cost:
+
+```bash
+OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve
+```
+
+KV quantization silently falls back to f16 on unsupported architectures, so confirm the
+reported size with `ollama ps` rather than assuming the setting took effect.
 
 Useful commands:
 

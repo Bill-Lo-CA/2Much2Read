@@ -488,7 +488,7 @@ def run_pipeline(
             finally:
                 _unload_model(ollama, settings.ollama_model)
 
-            reranker = RelevanceReranker(settings.reranker_model)
+            reranker = RelevanceReranker(settings.reranker_model, settings.reranker_device)
             try:
                 ranked_entries = _ranked_entries(settings, reranker, entries)
             finally:

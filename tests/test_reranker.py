@@ -1,5 +1,10 @@
 from __future__ import annotations
 
+import sys
+import types
+
+import pytest
+
 from two_much_two_read import pipeline
 from two_much_two_read.config import Settings
 from two_much_two_read.digest import DigestEntry
@@ -34,6 +39,29 @@ def test_reranker_orders_by_model_score() -> None:
 
     ranked = reranker.rank([entry(1, "Trial", "AlphaSignal"), entry(2, "Release", "TLDR AI")])
     assert [value.candidate_id for value in ranked] == [2, 1]
+
+
+def test_reranker_loads_on_the_configured_device(monkeypatch: pytest.MonkeyPatch) -> None:
+    captured: dict[str, object] = {}
+
+    class FakeCrossEncoder:
+        def __init__(self, model_name_or_path: str, device: str) -> None:
+            captured["model"] = model_name_or_path
+            captured["device"] = device
+
+    module = types.ModuleType("sentence_transformers")
+    module.CrossEncoder = FakeCrossEncoder  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", module)
+
+    RelevanceReranker("Qwen/test")
+    assert captured == {"model": "Qwen/test", "device": "cpu"}
+
+    RelevanceReranker("Qwen/test", "cuda")
+    assert captured["device"] == "cuda"
+
+
+def test_reranker_defaults_to_cpu_so_it_never_competes_with_the_reviewer() -> None:
+    assert Settings().reranker_device == "cpu"
 
 
 def test_final_review_selects_scored_items_and_releases_the_reviewer() -> None:

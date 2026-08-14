@@ -13,10 +13,10 @@ RERANK_QUERY = (
 
 
 class RelevanceReranker:
-    def __init__(self, model_name: str) -> None:
+    def __init__(self, model_name: str, device: str = "cpu") -> None:
         from sentence_transformers import CrossEncoder
 
-        self._model = CrossEncoder(model_name)
+        self._model = CrossEncoder(model_name, device=device)
 
     def rank(self, entries: Sequence[DigestEntry]) -> list[DigestEntry]:
         pairs = [

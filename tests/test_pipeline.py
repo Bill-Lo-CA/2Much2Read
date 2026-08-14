@@ -92,7 +92,7 @@ class StubOllamaClient:
 @pytest.fixture(autouse=True)
 def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeReranker:
-        def __init__(self, _: str) -> None:
+        def __init__(self, _model: str, _device: str) -> None:
             pass
 
         def rank(self, entries):
@@ -705,7 +705,8 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
             pass
 
     class FakeReranker:
-        def __init__(self, _: str) -> None:
+        def __init__(self, _model: str, device: str) -> None:
+            assert device == "cpu"
             events.append("reranker:load")
 
         def close(self) -> None:
