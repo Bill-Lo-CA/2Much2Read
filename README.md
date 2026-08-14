@@ -42,7 +42,9 @@ The environment files may contain duplicate variable names because each command 
 
 On the first install after this layout change, each installer checks that its service is inactive, then moves its existing root-level token and SQLite database, `-wal`, `-shm`, `-journal`, and lock into the matching app directory. Environment/YAML/client-secret files remain at the shared config root. It never overwrites a new token or runtime file: if an old and new copy both exist, installation stops with both paths named. Stop the service, resolve the conflict, and rerun the installer. Timer prompts and their disabled-by-default behavior are unchanged.
 
-Until that installer migration runs, manual commands continue using an existing root-level token, database, and lock rather than creating empty state at the new paths. If both layouts exist, startup fails with `RUNTIME_PATH_MIGRATION_CONFLICT` instead of guessing which state is authoritative.
+The runtime itself only ever resolves the app-scoped paths. A token, database, or lock left at the
+pre-scoping root-level location is ignored, so run the installer to move it before the first run;
+otherwise the app starts against empty state at the new path while the old files sit unused.
 
 The systemd templates allow writes only to the matching app config and data directories. If an environment-file path override such as `DATABASE_PATH`, `*_TOKEN_PATH`, or `*_CONFIG_PATH` points elsewhere, manual CLI runs may work but the sandboxed service will not; keep overrides under those app directories or add a reviewed user-unit drop-in with the required `ReadWritePaths` exception.
 

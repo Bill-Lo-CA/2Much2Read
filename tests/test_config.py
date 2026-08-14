@@ -161,14 +161,13 @@ def test_default_runtime_paths_are_application_scoped(tmp_path: Path, monkeypatc
     assert settings.lock_path == home / ".local/share/2much2read-runtime/2much2read/2much2read.lock"
 
 
-def test_default_runtime_paths_keep_legacy_files_until_installer_migration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_files_at_pre_scoping_locations_are_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     config_root = home / ".config/2much2read-runtime"
     data_root = home / ".local/share/2much2read-runtime"
     config_root.mkdir(parents=True)
     data_root.mkdir(parents=True)
+    # Files at the pre-scoping locations must no longer be picked up.
     for path in (
         config_root / "gmail-token.json",
         data_root / "2much2read.sqlite3",
@@ -181,22 +180,9 @@ def test_default_runtime_paths_keep_legacy_files_until_installer_migration(
 
     settings = Settings()
 
-    assert settings.gmail_token_path == config_root / "gmail-token.json"
-    assert settings.database_path == data_root / "2much2read.sqlite3"
-    assert settings.lock_path == data_root / "2much2read.lock"
-
-
-def test_default_runtime_paths_reject_migration_conflicts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    home = tmp_path / "home"
-    config_root = home / ".config/2much2read-runtime"
-    (config_root / "2much2read").mkdir(parents=True)
-    (config_root / "gmail-token.json").touch()
-    (config_root / "2much2read/gmail-token.json").touch()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("GMAIL_TOKEN_PATH", raising=False)
-
-    with pytest.raises(ValueError, match="RUNTIME_PATH_MIGRATION_CONFLICT"):
-        Settings()
+    assert settings.gmail_token_path == config_root / "2much2read/gmail-token.json"
+    assert settings.database_path == data_root / "2much2read/2much2read.sqlite3"
+    assert settings.lock_path == data_root / "2much2read/2much2read.lock"
 
 
 def test_bot_delivery_settings_require_a_numeric_channel() -> None:
