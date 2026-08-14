@@ -10,7 +10,13 @@ import pytest
 from two_much_two_read import pipeline
 from two_much_two_read.config import Settings
 from two_much_two_read.digest import DigestEntry
-from two_much_two_read.reranker import RERANK_QUERY, RERANKER_PROMPT_VERSION, RelevanceReranker
+from two_much_two_read.reranker import (
+    RERANK_INSTRUCTION,
+    RERANK_QUERY,
+    RERANKER_PROMPT_NAME,
+    RERANKER_PROMPT_VERSION,
+    RelevanceReranker,
+)
 from two_much_two_read.schemas import DigestItem, DigestReview
 
 
@@ -30,33 +36,50 @@ def entry(candidate_id: int, title: str, source_name: str) -> DigestEntry:
     )
 
 
-def test_reranker_orders_by_model_score() -> None:
+def fake_reranker(scores: list[float]) -> RelevanceReranker:
     class FakeModel:
-        def predict(self, pairs: list[tuple[str, str]]) -> list[float]:
-            assert "AlphaSignal" in pairs[0][1]
-            return [0.2, 0.9]
+        def predict(self, pairs: list[tuple[str, str]], activation_fn: object) -> list[float]:
+            assert activation_fn is not None
+            assert pairs[0][0] == RERANK_QUERY
+            return scores
 
     reranker = object.__new__(RelevanceReranker)
     reranker._model = FakeModel()  # type: ignore[attr-defined]
+    reranker._activation_fn = object()  # type: ignore[attr-defined]
+    return reranker
+
+
+def test_reranker_orders_by_model_score() -> None:
+    reranker = fake_reranker([0.2, 0.9])
 
     ranked = reranker.rank([entry(1, "Trial", "AlphaSignal"), entry(2, "Release", "TLDR AI")])
-    assert [value.candidate_id for value in ranked] == [2, 1]
+
+    assert [(value.candidate_id, value.reranker_score) for value in ranked] == [(2, 0.9), (1, 0.2)]
 
 
-def test_reranker_loads_on_the_configured_device(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_reranker_overrides_the_models_generic_search_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Qwen3-Reranker defaults to a generic web-search instruction.
+
+    Leaving it in place puts the ranking criteria in the query slot, which inverts the ranking:
+    an item scores high for containing the very words the criteria demote.
+    """
     captured: dict[str, object] = {}
 
     class FakeCrossEncoder:
-        def __init__(self, model_name_or_path: str, device: str) -> None:
+        def __init__(self, model_name_or_path: str, **kwargs: object) -> None:
             captured["model"] = model_name_or_path
-            captured["device"] = device
+            captured.update(kwargs)
 
     module = types.ModuleType("sentence_transformers")
     module.CrossEncoder = FakeCrossEncoder  # type: ignore[attr-defined]
     monkeypatch.setitem(sys.modules, "sentence_transformers", module)
 
     RelevanceReranker("Qwen/test")
-    assert captured == {"model": "Qwen/test", "device": "cpu"}
+
+    assert captured["model"] == "Qwen/test"
+    assert captured["device"] == "cpu"
+    assert captured["default_prompt_name"] == RERANKER_PROMPT_NAME
+    assert captured["prompts"] == {RERANKER_PROMPT_NAME: RERANK_INSTRUCTION}
 
     RelevanceReranker("Qwen/test", "cuda")
     assert captured["device"] == "cuda"
@@ -66,21 +89,10 @@ def test_reranker_defaults_to_cpu_so_it_never_competes_with_the_reviewer() -> No
     assert Settings().reranker_device == "cpu"
 
 
-def test_reranker_attaches_the_raw_model_score() -> None:
-    class FakeModel:
-        def predict(self, _pairs: list[tuple[str, str]]) -> list[float]:
-            return [0.2, 4.7]
+def test_reranker_prompt_version_covers_both_the_instruction_and_the_query() -> None:
+    expected = hashlib.sha256(f"{RERANK_INSTRUCTION}\n{RERANK_QUERY}".encode()).hexdigest()[:12]
 
-    reranker = object.__new__(RelevanceReranker)
-    reranker._model = FakeModel()  # type: ignore[attr-defined]
-
-    ranked = reranker.rank([entry(1, "Trial", "AlphaSignal"), entry(2, "Release", "TLDR AI")])
-
-    assert [(value.candidate_id, value.reranker_score) for value in ranked] == [(2, 4.7), (1, 0.2)]
-
-
-def test_reranker_prompt_version_is_derived_from_the_query_text() -> None:
-    assert hashlib.sha256(RERANK_QUERY.encode()).hexdigest()[:12] == RERANKER_PROMPT_VERSION
+    assert expected == RERANKER_PROMPT_VERSION
 
 
 def test_ranked_entries_keeps_every_candidate_so_the_audit_covers_them_all() -> None:
