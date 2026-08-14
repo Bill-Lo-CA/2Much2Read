@@ -94,7 +94,12 @@ message to each configured destination.
 
 ## Destructive reset
 
-Existing 2Much2Read, newsletter-digest, and 2busy1miss runtime data is unsupported and is not migrated. Before installing this version, run `sh scripts/legacy_cleanup.sh`; it permanently deletes all listed configuration, OAuth credentials, tokens, and SQLite data. It removes exactly these legacy locations: `~/.config/2Much2Read`, `~/.config/2much2read`, `~/.config/newsletter-digest`, `~/.config/2busy1miss`, their matching `~/.local/share/` directories, the checkout `.env`, and the `newsletter-digest`, `2much2read`, and `2busy1miss` user unit files. The new `2much2read-runtime` roots and `*-runtime` units are not cleanup targets, so the script is safe to run again.
+Runtime state lives entirely under `~/.config/2much2read-runtime` and
+`~/.local/share/2much2read-runtime`. To start clean, stop the timers, then delete the app
+directory under each root; the next run recreates empty state. Deleting a database discards
+digest history but not Gmail processing state, which is tracked by the `NewsletterBot/Processed`
+and `NewsletterBot/Failed` labels in Gmail, so already-processed mail is not re-analyzed unless
+you pass `--force`.
 
 ## 2much2read
 

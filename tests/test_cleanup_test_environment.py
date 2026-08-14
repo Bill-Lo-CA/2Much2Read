@@ -50,7 +50,7 @@ def test_reset_database_replaces_a_legacy_database_with_v2(tmp_path: Path) -> No
 def test_cleanup_keeps_database_when_label_removal_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sources_path = tmp_path / "sources.yaml"
     sources_path.write_text(
-        "sources:\n  - id: source\n    name: Source\n    gmail_query: from:source@example.com\n",
+        "sources:\n  - type: gmail\n    id: source\n    name: Source\n    gmail_query: from:source@example.com\n",
         encoding="utf-8",
     )
     settings = Settings(

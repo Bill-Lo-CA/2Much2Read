@@ -53,7 +53,6 @@ calendar_client_secret_file="$config_root/calendar-client-secret.json"
 calendar_token_file="$token_dir/calendar-token.json"
 database_file="$data_dir/2busy1miss.sqlite3"
 lock_file="$data_dir/2busy1miss.lock"
-legacy_lock_file="$data_root/2busy1miss.lock"
 
 file_exists() {
   [ -e "$1" ] || [ -L "$1" ]
@@ -157,14 +156,7 @@ for directory in "$config_root" "$token_dir" "$data_root" "$data_dir"; do
   chmod 700 "$directory"
 done
 
-repair_file "$legacy_lock_file"
 repair_file "$lock_file"
-exec 8>>"$legacy_lock_file"
-chmod 600 "$legacy_lock_file"
-flock -n 8 || {
-  printf '%s\n' "runtime lock is held: $legacy_lock_file" >&2
-  exit 1
-}
 exec 9>>"$lock_file"
 chmod 600 "$lock_file"
 flock -n 9 || {
@@ -222,9 +214,7 @@ sed "s|__AGENDA_SCHEDULE_TIME__|$agenda_schedule_time|" deploy/systemd/2busy1mis
 
 systemctl --user daemon-reload
 
-rm -f "$legacy_lock_file"
 exec 9>&-
-exec 8>&-
 
 printf '%s' "Enable reminder and agenda timers now? [y/N] "
 if ! IFS= read -r enable_timers; then

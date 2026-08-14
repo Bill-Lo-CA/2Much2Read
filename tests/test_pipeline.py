@@ -33,7 +33,7 @@ from two_read_runtime.discord import DiscordDeliveryError, DiscordDestination
 
 def write_sources(path: Path, *, enabled: bool = True) -> None:
     path.write_text(
-        f"sources:\n  - id: alphasignal\n    name: AlphaSignal\n    enabled: {str(enabled).lower()}\n"
+        f"sources:\n  - type: gmail\n    id: alphasignal\n    name: AlphaSignal\n    enabled: {str(enabled).lower()}\n"
         "    gmail_query: 'from:alphasignal.ai'\n",
         encoding="utf-8",
     )
@@ -480,7 +480,7 @@ def test_hacker_news_force_retries_only_failed_documents(tmp_path: Path, monkeyp
 def test_mixed_gmail_and_hackernews_sources_run_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sources_path = tmp_path / "sources.yaml"
     sources_path.write_text(
-        "sources:\n  - id: alphasignal\n    name: AlphaSignal\n    gmail_query: from:alphasignal.ai\n"
+        "sources:\n  - type: gmail\n    id: alphasignal\n    name: AlphaSignal\n    gmail_query: from:alphasignal.ai\n"
         "  - type: hackernews\n    id: hn-best\n    name: Hacker News Best\n",
         encoding="utf-8",
     )
@@ -1212,8 +1212,8 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
     sources_path = tmp_path / "sources.yaml"
     sources_path.write_text(
         "sources:\n"
-        "  - id: first\n    name: First\n    gmail_query: from:first@example.com\n"
-        "  - id: second\n    name: Second\n    gmail_query: from:second@example.com\n",
+        "  - type: gmail\n    id: first\n    name: First\n    gmail_query: from:first@example.com\n"
+        "  - type: gmail\n    id: second\n    name: Second\n    gmail_query: from:second@example.com\n",
         encoding="utf-8",
     )
     settings = Settings(

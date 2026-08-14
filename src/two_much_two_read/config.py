@@ -89,19 +89,6 @@ class Sources(BaseModel):
 
     sources: list[SourceConfig]
 
-    @model_validator(mode="before")
-    @classmethod
-    def default_legacy_gmail_type(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or not isinstance(value.get("sources"), list):
-            return value
-        sources: list[object] = []
-        for source in value["sources"]:
-            if isinstance(source, dict) and "type" not in source and "gmail_query" in source:
-                sources.append({"type": "gmail", **source})
-            else:
-                sources.append(source)
-        return {**value, "sources": sources}
-
     @model_validator(mode="after")
     def unique_ids(self) -> Sources:
         ids = [source.id for source in self.sources]

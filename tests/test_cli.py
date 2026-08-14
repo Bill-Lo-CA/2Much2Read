@@ -204,7 +204,7 @@ def test_mails_inspect_requires_a_selector() -> None:
 def test_mails_list_uses_configured_source_query(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     sources_path = newsletter_settings.sources_config_path
     sources_path.write_text(
-        "sources:\n  - id: alphasignal\n    name: AlphaSignal\n    enabled: false\n"
+        "sources:\n  - type: gmail\n    id: alphasignal\n    name: AlphaSignal\n    enabled: false\n"
         "    gmail_query: 'label:newsletter-alphasignal'\n",
         encoding="utf-8",
     )
@@ -241,7 +241,7 @@ def test_subscriptions_list_and_sync_apply(newsletter_settings: Settings, monkey
     sources_path = newsletter_settings.sources_config_path
     sources_path.write_text(
         "# keep this comment\nsources:\n"
-        "  - id: existing\n    name: Existing\n    category: AI\n"
+        "  - type: gmail\n    id: existing\n    name: Existing\n    category: AI\n"
         "    gmail_query: 'label:ai-newsPaper from:existing@example.com'\n",
         encoding="utf-8",
     )
@@ -331,7 +331,8 @@ def test_filters_commands_share_one_operation(monkeypatch: pytest.MonkeyPatch) -
 def test_mails_inspect_outputs_parsed_text_and_extraction(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     sources_path = newsletter_settings.sources_config_path
     sources_path.write_text(
-        "sources:\n  - id: alphasignal\n    name: AlphaSignal\n    gmail_query: 'label:newsletter-alphasignal'\n",
+        "sources:\n  - type: gmail\n    id: alphasignal\n    name: AlphaSignal\n"
+        "    gmail_query: 'label:newsletter-alphasignal'\n",
         encoding="utf-8",
     )
     encoded_body = base64.urlsafe_b64encode(b"Parsed newsletter body").decode().rstrip("=")

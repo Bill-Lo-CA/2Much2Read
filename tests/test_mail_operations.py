@@ -18,7 +18,7 @@ def test_inspect_mail_reports_original_and_input_lengths(
 ) -> None:
     sources_path = tmp_path / "sources.yaml"
     sources_path.write_text(
-        "sources:\n  - id: alphasignal\n    name: AlphaSignal\n    gmail_query: 'from:alphasignal.ai'\n",
+        "sources:\n  - type: gmail\n    id: alphasignal\n    name: AlphaSignal\n    gmail_query: 'from:alphasignal.ai'\n",
         encoding="utf-8",
     )
     settings = Settings(sources_config_path=sources_path)
