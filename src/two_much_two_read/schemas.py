@@ -59,7 +59,7 @@ class ItemAnalysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
     model_owned_text: ClassVar[bool] = True
 
-    title: str = Field(min_length=1, max_length=200)
+    title: str = Field(min_length=1, max_length=200, description="Headline translated into the digest language")
     category: DigestCategory
     summary_zh_tw: str = Field(min_length=1, max_length=800)
     why_it_matters_zh_tw: str = Field(min_length=1, max_length=800)
@@ -98,7 +98,9 @@ class NewsletterItemAnalysis(ItemAnalysis):
     # only to give the matcher the original wording, so it is deliberately absent from ItemAnalysis
     # and never reaches DigestItem, storage, or the rendered digest. It is copied out of untrusted
     # newsletter text, so it carries no anti-link validator; nothing renders it.
-    source_title: str = Field(min_length=1, max_length=200)
+    source_title: str = Field(
+        min_length=1, max_length=200, description="Headline copied verbatim from the newsletter, never translated"
+    )
 
 
 class DigestItem(ItemAnalysis):
