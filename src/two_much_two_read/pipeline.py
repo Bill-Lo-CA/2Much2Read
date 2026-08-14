@@ -131,7 +131,12 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
     finally:
         _unload_model(ollama, settings.ollama_review_model)
     scores = {selection.candidate_id: selection.score for selection in review.selected}
-    return [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]
+    selected = [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]
+    # The reviewer only picks the headline items, but the candidates behind them were already
+    # extracted, ranked, and paid for. They carry no review score, so they sort below every
+    # selected item and render as the digest's secondary mentions.
+    unselected = [entry for entry in ranked if entry.candidate_id not in scores]
+    return selected + unselected[: settings.digest_secondary_items]
 
 
 def _unload_model(ollama: OllamaClient, model: str, status: StatusReporter = _ignore_status) -> None:

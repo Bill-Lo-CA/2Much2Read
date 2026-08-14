@@ -210,3 +210,53 @@ def test_hackernews_metadata_fallback_is_visible() -> None:
     )
 
     assert "內容：僅 metadata" in text
+
+
+def test_secondary_mentions_are_one_scannable_line_each() -> None:
+    text = render_digest(
+        [
+            DigestEntry(item("Headline", "https://example.com/a"), review_score=90, source_name="TLDR AI"),
+            DigestEntry(item("Also worth noting", "https://example.com/b"), reranker_score=0.3, source_name="TLDR Sec"),
+        ],
+        datetime(2026, 6, 22, tzinfo=UTC),
+        "AI",
+        "TLDR",
+        top_items=1,
+    )
+
+    assert "🔥 今日重點\n1. Headline" in text
+    assert "🧰 其他值得注意\n• Also worth noting · TLDR Sec · <https://example.com/b>" in text
+    # The summary and the reason belong to the headline items; the mentions stay one line.
+    assert text.count("摘要：") == 1
+    assert text.count("為什麼重要：") == 1
+
+
+def test_secondary_mentions_follow_the_reranker_order() -> None:
+    text = render_digest(
+        [
+            DigestEntry(item("Weaker", None, importance=10), reranker_score=0.1),
+            DigestEntry(item("Stronger", None, importance=1), reranker_score=0.9),
+            DigestEntry(item("Headline", None, importance=1), review_score=50),
+        ],
+        datetime(2026, 6, 22, tzinfo=UTC),
+        "AI",
+        "TLDR",
+        top_items=1,
+    )
+
+    assert text.index("Headline") < text.index("Stronger") < text.index("Weaker")
+
+
+def test_a_mention_without_a_source_or_url_still_renders() -> None:
+    text = render_digest(
+        [
+            DigestEntry(item("Headline", None), review_score=90),
+            DigestEntry(item("Bare mention", None)),
+        ],
+        datetime(2026, 6, 22, tzinfo=UTC),
+        "AI",
+        "TLDR",
+        top_items=1,
+    )
+
+    assert "• Bare mention" in text

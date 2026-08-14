@@ -212,10 +212,43 @@ def test_final_review_selects_scored_items_and_releases_the_reviewer() -> None:
             self.unloaded.append(model)
 
     ollama = FakeOllama()
-    settings = Settings(digest_max_items=1, digest_review_candidate_limit=2, ollama_review_model="qwen3:8b")
+    settings = Settings(
+        digest_max_items=1, digest_review_candidate_limit=2, digest_secondary_items=0, ollama_review_model="qwen3:8b"
+    )
 
     reviewed = pipeline._reviewed_entries(settings, ollama, [entry(2, "Release", "TLDR AI"), entry(1, "Trial", "AlphaSignal")])
 
     assert [(value.candidate_id, value.review_score) for value in reviewed] == [(2, 90)]
     assert ollama.candidates[0]["source"] == "TLDR AI"
     assert ollama.unloaded == ["qwen3:8b"]
+
+
+def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None:
+    class FakeOllama:
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int) -> DigestReview:
+            return DigestReview.model_validate({"selected": [{"candidate_id": 1, "score": 90, "reason_zh_tw": "具體發布"}]})
+
+        def unload(self, _model: str) -> bool:
+            return True
+
+    settings = Settings(digest_max_items=1, digest_review_candidate_limit=5, digest_secondary_items=2)
+    ranked = [entry(index, f"Story {index}", "TLDR AI") for index in range(1, 6)]
+
+    reviewed = pipeline._reviewed_entries(settings, FakeOllama(), ranked)
+
+    # The selection keeps its review score; the next two ranked candidates follow without one.
+    assert [(value.candidate_id, value.review_score) for value in reviewed] == [(1, 90), (2, None), (3, None)]
+
+
+def test_secondary_mentions_can_be_turned_off() -> None:
+    class FakeOllama:
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int) -> DigestReview:
+            return DigestReview.model_validate({"selected": [{"candidate_id": 1, "score": 90, "reason_zh_tw": "具體發布"}]})
+
+        def unload(self, _model: str) -> bool:
+            return True
+
+    settings = Settings(digest_max_items=1, digest_secondary_items=0)
+    ranked = [entry(index, f"Story {index}", "TLDR AI") for index in range(1, 4)]
+
+    assert [value.candidate_id for value in pipeline._reviewed_entries(settings, FakeOllama(), ranked)] == [1]

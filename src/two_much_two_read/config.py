@@ -143,6 +143,7 @@ class Settings(BaseSettings):
     digest_timezone: str = "America/Montreal"
     digest_max_items: int = Field(default=5, ge=1)
     digest_top_items: int = Field(default=5, ge=0)
+    digest_secondary_items: int = Field(default=10, ge=0)
     digest_review_candidate_limit: int = Field(default=20, ge=1)
     digest_rerank_candidate_limit: int = Field(default=100, ge=1)
     digest_security_candidate_slots: int = Field(default=7, ge=0)

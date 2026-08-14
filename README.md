@@ -137,6 +137,13 @@ alongside the reviewer. `DIGEST_RERANK_CANDIDATE_LIMIT` bounds how many candidat
 reranker, `DIGEST_REVIEW_CANDIDATE_LIMIT` bounds reviewer input, and `DIGEST_MAX_ITEMS` is the
 final delivered-item limit. Each item includes its newsletter source in the Discord digest.
 
+The digest has two sections. `DIGEST_MAX_ITEMS` headline items carry the full summary, reason, and
+links, and `DIGEST_SECONDARY_ITEMS` (default 10) candidates the reviewer passed over follow as
+one-line mentions under "其他值得注意", ordered by reranker score. Those candidates were already
+extracted and ranked, so listing them costs nothing beyond the message length; set the value to 0
+for a headline-only digest. `DIGEST_TOP_ITEMS` controls how many entries the renderer puts in the
+headline section, so keep it equal to `DIGEST_MAX_ITEMS` unless you want mentions promoted into it.
+
 Reviewer input is split by category rather than taken as one global top-N.
 `DIGEST_SECURITY_CANDIDATE_SLOTS` (default 7 of the 20) reserves slots for `SECURITY` items; the
 rest go to the remaining categories. The reranker ranks AI releases above vulnerability

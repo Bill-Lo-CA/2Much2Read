@@ -170,9 +170,12 @@ def _entry_key(entry: DigestEntry) -> str:
     return normalized_title(entry.item.title)
 
 
-def _entry_rank(entry: DigestEntry) -> tuple[int, int, float, int, int, float]:
+def _entry_rank(entry: DigestEntry) -> tuple[int, float, int, float, int, int, float]:
     return (
         entry.review_score if entry.review_score is not None else -1,
+        # Only the headline items carry a review score, so the reranker decides the order of the
+        # secondary mentions, which is the order it already ranked them in.
+        entry.reranker_score if entry.reranker_score is not None else -1.0,
         entry.item.importance,
         entry.item.confidence,
         entry.hn_score if entry.hn_score is not None else -1,
@@ -265,6 +268,17 @@ def render_digest(
             lines.append(f"   {labels['article']}：<{item.source_url}>")
         return "\n".join(lines)
 
+    def mention(value: DigestEntry) -> str:
+        """The secondary section is for scanning, so each item is one line without its summary."""
+        item = value.item
+        parts = [f"• {sanitize_discord_text(item.title)}"]
+        if value.source_name:
+            parts.append(sanitize_discord_text(value.source_name))
+        url = value.article_url or (str(item.source_url) if item.source_url else None) or value.discussion_url
+        if url:
+            parts.append(f"<{url}>")
+        return " · ".join(parts)
+
     top = eligible[:top_items]
     rest = eligible[top_items:]
     sections = [
@@ -272,7 +286,7 @@ def render_digest(
         labels["top"] + "\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)),
     ]
     if rest:
-        sections.append(labels["rest"] + "\n" + "\n\n".join(entry(item, "•") for item in rest))
+        sections.append(labels["rest"] + "\n" + "\n".join(mention(item) for item in rest))
     sections.append(
         f"{labels['processed']}\n{labels['topic']}{safe_topic}\n{labels['sources']}{safe_source_names} · "
         f"{len(eligible)} {labels['valid']}"
