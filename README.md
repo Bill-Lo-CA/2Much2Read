@@ -137,6 +137,14 @@ alongside the reviewer. `DIGEST_RERANK_CANDIDATE_LIMIT` bounds how many candidat
 reranker, `DIGEST_REVIEW_CANDIDATE_LIMIT` bounds reviewer input, and `DIGEST_MAX_ITEMS` is the
 final delivered-item limit. Each item includes its newsletter source in the Discord digest.
 
+Reviewer input is split by category rather than taken as one global top-N.
+`DIGEST_SECURITY_CANDIDATE_SLOTS` (default 7 of the 20) reserves slots for `SECURITY` items; the
+rest go to the remaining categories. The reranker ranks AI releases above vulnerability
+disclosures on a single scale — in one 100-candidate run only 3 of 23 SECURITY items reached a
+global top 20, with named CVEs at ranks 35 and 43 — and prompt wording that lifts them demotes AI
+and tooling stories by as much. Splitting the slots keeps both. Either group takes the other's
+unused slots, so a quiet security day costs nothing.
+
 Every reranked candidate is recorded in the append-only `reranker_scores` table with the model,
 prompt version, and timestamp. Scores are stored exactly as the model produced them rather than
 normalized, and the table carries no foreign key to `items` so the history survives reprocessing,

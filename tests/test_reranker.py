@@ -20,11 +20,11 @@ from two_much_two_read.reranker import (
 from two_much_two_read.schemas import DigestItem, DigestReview
 
 
-def entry(candidate_id: int, title: str, source_name: str) -> DigestEntry:
+def entry(candidate_id: int, title: str, source_name: str, category: str = "AI_MODEL") -> DigestEntry:
     return DigestEntry(
         DigestItem(
             title=title,
-            category="AI_MODEL",
+            category=category,
             summary_zh_tw="摘要",
             why_it_matters_zh_tw="重要原因",
             importance=5,
@@ -105,6 +105,62 @@ def test_ranked_entries_keeps_every_candidate_so_the_audit_covers_them_all() -> 
     ranked = pipeline._ranked_entries(FakeReranker(), entries)
 
     assert [value.candidate_id for value in ranked] == [1, 2, 3, 4, 5]
+
+
+def ranked_pair(security: int, general: int) -> list[DigestEntry]:
+    """Every security item ranks below every general item, as the reranker orders them in practice."""
+    entries = [entry(index, f"Release {index}", "TLDR AI") for index in range(general)]
+    return entries + [entry(100 + index, f"CVE {index}", "TLDR Sec", "SECURITY") for index in range(security)]
+
+
+def test_security_candidates_reach_the_reviewer_from_below_the_global_cutoff() -> None:
+    ranked = ranked_pair(security=9, general=30)
+
+    kept = pipeline._review_candidates(ranked, 20, 7)
+
+    assert len(kept) == 20
+    assert [value.candidate_id for value in kept if value.item.category == "SECURITY"] == list(range(100, 107))
+    assert [value.candidate_id for value in kept if value.item.category != "SECURITY"] == list(range(13))
+
+
+def test_unused_security_slots_go_to_the_other_categories() -> None:
+    ranked = ranked_pair(security=2, general=30)
+
+    kept = pipeline._review_candidates(ranked, 20, 7)
+
+    assert len(kept) == 20
+    assert sum(1 for value in kept if value.item.category == "SECURITY") == 2
+
+
+def test_unused_general_slots_go_to_security() -> None:
+    ranked = ranked_pair(security=30, general=5)
+
+    kept = pipeline._review_candidates(ranked, 20, 7)
+
+    assert len(kept) == 20
+    assert sum(1 for value in kept if value.item.category == "SECURITY") == 15
+
+
+def test_the_quota_never_exceeds_the_reviewer_limit() -> None:
+    ranked = ranked_pair(security=30, general=30)
+
+    assert len(pipeline._review_candidates(ranked, 20, 40)) == 20
+
+
+def test_kept_candidates_stay_in_reranker_order() -> None:
+    ranked = [
+        entry(1, "Release", "TLDR AI"),
+        entry(2, "CVE", "TLDR Sec", "SECURITY"),
+        entry(3, "Another release", "TLDR AI"),
+    ]
+
+    assert [value.candidate_id for value in pipeline._review_candidates(ranked, 3, 1)] == [1, 2, 3]
+
+
+def test_security_slots_default_to_seven_of_the_twenty_reviewer_slots() -> None:
+    settings = Settings()
+
+    assert (settings.digest_review_candidate_limit, settings.digest_security_candidate_slots) == (20, 7)
 
 
 def test_unload_failure_is_reported_to_the_status_reporter() -> None:

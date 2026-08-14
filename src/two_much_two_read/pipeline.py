@@ -91,10 +91,28 @@ def _save_reranker_scores(
         status(f"Warning: recorded {saved} of {len(scores)} reranker scores")
 
 
+def _review_candidates(ranked: list[DigestEntry], limit: int, security_slots: int) -> list[DigestEntry]:
+    """Reserve reviewer slots for security so one global ranking can serve two domains.
+
+    The reranker scores every candidate on a single scale and AI releases consistently outscore
+    vulnerability disclosures: across 100 real candidates only 3 of the 23 SECURITY items reached
+    the top 20, leaving named CVEs at ranks 35 and 43. Steering the reranker prompt toward
+    vulnerabilities lifts those but pushes AI and tooling stories out by as much, so the split
+    happens here instead, on the ranking that discriminates best overall. Either group takes the
+    other's unused slots, and the kept entries stay in reranker order.
+    """
+    security = [index for index, entry in enumerate(ranked) if entry.item.category == "SECURITY"]
+    general = [index for index, entry in enumerate(ranked) if entry.item.category != "SECURITY"]
+    security_kept = min(security_slots, limit, len(security))
+    general_kept = min(limit - security_kept, len(general))
+    security_kept = min(len(security), limit - general_kept)
+    return [ranked[index] for index in sorted(security[:security_kept] + general[:general_kept])]
+
+
 def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[DigestEntry]) -> list[DigestEntry]:
     if not ranked:
         return []
-    ranked = ranked[: settings.digest_review_candidate_limit]
+    ranked = _review_candidates(ranked, settings.digest_review_candidate_limit, settings.digest_security_candidate_slots)
     candidates: list[dict[str, object]] = []
     for entry in ranked:
         assert entry.candidate_id is not None
