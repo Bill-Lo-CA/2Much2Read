@@ -229,17 +229,26 @@ STORY_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9.\-]*")
 STORY_MINIMUM_SHARED_TOKENS = 2
 
 
+def _tokens(text: str) -> set[str]:
+    return {token.casefold() for token in STORY_TOKEN.findall(STORY_BOILERPLATE.sub(" ", text)) if len(token) > 1}
+
+
 def story_tokens(entry: DigestEntry) -> set[str]:
-    text = STORY_BOILERPLATE.sub(" ", f"{entry.item.title} {entry.item.summary_zh_tw}")
-    return {token.casefold() for token in STORY_TOKEN.findall(text) if len(token) > 1}
+    return _tokens(f"{entry.item.title} {entry.item.summary_zh_tw}")
 
 
 def story_similarity(left: DigestEntry, right: DigestEntry) -> float:
-    left_tokens, right_tokens = story_tokens(left), story_tokens(right)
-    shared = left_tokens & right_tokens
+    shared = story_tokens(left) & story_tokens(right)
     if len(shared) < STORY_MINIMUM_SHARED_TOKENS:
         return 0.0
-    return len(shared) / len(left_tokens | right_tokens)
+    # A summary routinely names another story to compare against it: one run had Grok 4.6 described
+    # as "matching GPT-5.6 Sol", which shares both of that item's identifying tokens without being
+    # the same story at all. Merging them handed the GPT-5.6 headline the Grok article's link, and
+    # the headline rewrite then restated the whole item from it. A story's own subject is named in
+    # its title, so the titles have to overlap too, not merely the bodies.
+    if not (_tokens(left.item.title) & _tokens(right.item.title)):
+        return 0.0
+    return len(shared) / len(story_tokens(left) | story_tokens(right))
 
 
 def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:

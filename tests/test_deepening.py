@@ -37,15 +37,18 @@ def entry(title: str, url: str | None = None, review_score: int | None = 90) -> 
 
 
 class FakeOllama:
-    def __init__(self, error: Exception | None = None) -> None:
+    def __init__(self, error: Exception | None = None, covers: bool = True) -> None:
         self.calls: list[tuple[str, str, str]] = []
         self.error = error
+        self.covers = covers
 
     def deepen_item(self, title: str, category: str, sources: str, basis: str, content: str) -> ItemDeepening:
         self.calls.append((sources, basis, content))
         if self.error is not None:
             raise self.error
-        return ItemDeepening(summary_zh_tw="重寫後長很多的摘要內容。", why_it_matters_zh_tw="重寫後的實務影響。")
+        return ItemDeepening(
+            covers_the_item=self.covers, summary_zh_tw="重寫後長很多的摘要內容。", why_it_matters_zh_tw="重寫後的實務影響。"
+        )
 
 
 def fake_fetcher(monkeypatch: pytest.MonkeyPatch, body: bytes | None) -> None:
@@ -153,3 +156,16 @@ def test_source_text_that_already_fits_is_untouched() -> None:
 
 def test_no_room_at_all_yields_no_content() -> None:
     assert fitted_deepening_content("anything", 0, DEEPEN_RESERVED_OUTPUT_TOKENS) == ("", True)
+
+
+def test_a_source_about_a_different_story_is_discarded(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run rewrote a GPT-5.6 Sol headline from the Grok 4.6 article a bad merge had handed it."""
+    fake_fetcher(monkeypatch, ARTICLE.encode())
+    messages: list[str] = []
+
+    deepened = pipeline._deepened_entries(
+        Settings(), FakeOllama(covers=False), [entry("Headline", "https://example.com/a")], messages.append
+    )
+
+    assert deepened[0].item.summary_zh_tw == "很短的摘要。"
+    assert any("did not cover" in message for message in messages)

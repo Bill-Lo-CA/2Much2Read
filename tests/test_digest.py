@@ -388,3 +388,25 @@ def test_merged_sources_are_rendered_in_both_sections() -> None:
 
     assert "來源：AlphaSignal, TLDR Dev, TLDR AI" in text
     assert "• Mention · ThursdAI, TLDR AI" in text
+
+
+def test_a_story_merely_named_by_another_is_not_merged_into_it() -> None:
+    """A run merged these, then rewrote the GPT-5.6 headline from the Grok article it borrowed."""
+    headline = merged_entry(
+        "OpenAI預覽GPT-5.6 Sol Ultrafast",
+        "OpenAI預覽GPT-5.6 Sol模式，可每秒生成750個輸出tokens，運行速度達標準的14倍。",
+        "TLDR AI",
+        review_score=90,
+    )
+    other = merged_entry(
+        "Grok 4.6 推出：專注長時間任務處理",
+        "Grok 4.6 針對長時間任務處理進行優化，匹配 GPT-5.6 Sol 的表現。",
+        "TLDR AI",
+        "https://x.ai/news/grok-4-6",
+    )
+
+    headlines, mentions = merge_related_entries([headline], [other], 0.25)
+
+    assert headlines[0].also_from == ()
+    assert headlines[0].article_url is None
+    assert len(mentions) == 1

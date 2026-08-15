@@ -188,6 +188,10 @@ def _deepened_entries(
             status(f"Warning: kept the original summary for {entry.item.title} ({type(error).__name__})")
             deepened.append(entry)
             continue
+        if not rewrite.covers_the_item:
+            status(f"Warning: {basis} source did not cover {entry.item.title}; kept the original summary")
+            deepened.append(entry)
+            continue
         item = entry.item.model_copy(
             update={"summary_zh_tw": rewrite.summary_zh_tw, "why_it_matters_zh_tw": rewrite.why_it_matters_zh_tw}
         )

@@ -142,6 +142,10 @@ class ItemDeepening(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
+    # Decided before the rewrite is written, so the model commits to the judgement first. A link can
+    # be wrong - mismatched by the URL matcher or borrowed from a merge - and rewriting from the
+    # wrong page turns a wrong link into a headline whose body describes a different story.
+    covers_the_item: bool = Field(description="True only if the source text is about this item's own headline")
     summary_zh_tw: str = Field(min_length=1, max_length=800, description="What happened, in the digest language")
     why_it_matters_zh_tw: str = Field(min_length=1, max_length=800, description="Practical significance, in the digest language")
 
