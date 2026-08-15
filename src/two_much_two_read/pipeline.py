@@ -27,6 +27,8 @@ from .storage import Database
 from .url_enrichment import UrlEnricher, resolve_match
 
 StatusReporter = Callable[[str], None]
+# The category whose reviewer slots are reserved by DIGEST_SECURITY_CANDIDATE_SLOTS.
+RESERVED_CATEGORY = "SECURITY"
 
 
 def _ignore_status(_: str) -> None:
@@ -101,8 +103,8 @@ def _review_candidates(ranked: list[DigestEntry], limit: int, security_slots: in
     happens here instead, on the ranking that discriminates best overall. Either group takes the
     other's unused slots, and the kept entries stay in reranker order.
     """
-    security = [index for index, entry in enumerate(ranked) if entry.item.category == "SECURITY"]
-    general = [index for index, entry in enumerate(ranked) if entry.item.category != "SECURITY"]
+    security = [index for index, entry in enumerate(ranked) if entry.item.category == RESERVED_CATEGORY]
+    general = [index for index, entry in enumerate(ranked) if entry.item.category != RESERVED_CATEGORY]
     security_kept = min(security_slots, limit, len(security))
     general_kept = min(limit - security_kept, len(general))
     security_kept = min(len(security), limit - general_kept)
@@ -127,7 +129,10 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
             }
         )
     try:
-        review = ollama.review_digest(candidates, settings.digest_max_items)
+        # The context fitter trims from the tail, where the reserved candidates sit by design.
+        review = ollama.review_digest(
+            candidates, settings.digest_max_items, RESERVED_CATEGORY, settings.digest_security_candidate_slots
+        )
     finally:
         _unload_model(ollama, settings.ollama_review_model)
     scores = {selection.candidate_id: selection.score for selection in review.selected}

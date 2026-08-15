@@ -203,7 +203,7 @@ def test_final_review_selects_scored_items_and_releases_the_reviewer() -> None:
             self.candidates: list[dict[str, object]] = []
             self.unloaded: list[str] = []
 
-        def review_digest(self, candidates: list[dict[str, object]], maximum: int) -> DigestReview:
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
             assert maximum == 1
             self.candidates = candidates
             return DigestReview.model_validate({"selected": [{"candidate_id": 2, "score": 90, "reason_zh_tw": "具體發布"}]})
@@ -225,7 +225,7 @@ def test_final_review_selects_scored_items_and_releases_the_reviewer() -> None:
 
 def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None:
     class FakeOllama:
-        def review_digest(self, candidates: list[dict[str, object]], maximum: int) -> DigestReview:
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
             return DigestReview.model_validate({"selected": [{"candidate_id": 1, "score": 90, "reason_zh_tw": "具體發布"}]})
 
         def unload(self, _model: str) -> bool:
@@ -242,7 +242,7 @@ def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None
 
 def test_secondary_mentions_can_be_turned_off() -> None:
     class FakeOllama:
-        def review_digest(self, candidates: list[dict[str, object]], maximum: int) -> DigestReview:
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
             return DigestReview.model_validate({"selected": [{"candidate_id": 1, "score": 90, "reason_zh_tw": "具體發布"}]})
 
         def unload(self, _model: str) -> bool:

@@ -412,6 +412,7 @@ def test_backup_and_reset(tmp_path: Path) -> None:
         "gmail_document_state": 0,
         "hackernews_document_state": 0,
         "items": 0,
+        "reranker_scores": 0,
         "digest_deliveries": 0,
         "digests": 0,
         "runs": 0,

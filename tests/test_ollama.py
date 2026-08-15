@@ -6,7 +6,13 @@ import respx
 
 from two_much_two_read import ollama
 from two_much_two_read.config import Settings
-from two_much_two_read.ollama import OllamaClient, OllamaSchemaError, create_ollama_client
+from two_much_two_read.ollama import (
+    OllamaClient,
+    OllamaSchemaError,
+    _ollama_schema,
+    create_ollama_client,
+    fitted_review_candidates,
+)
 from two_much_two_read.schemas import DigestReview
 
 
@@ -349,3 +355,49 @@ def test_article_analysis_uses_application_metadata_and_fresh_repair() -> None:
     assert len(repair["messages"]) == 2
     assert json.dumps(invalid_result) not in repair["messages"][1]["content"]
     assert "validation_error=" in repair["messages"][1]["content"]
+
+
+def large_candidate(candidate_id: int, category: str) -> dict[str, object]:
+    return {
+        "candidate_id": candidate_id,
+        "title": "標題" * 40,
+        "category": category,
+        "summary": "摘要" * 120,
+        "why_it_matters": "原因" * 120,
+        "source": "TLDR AI",
+    }
+
+
+def test_trimming_keeps_the_reserved_category_the_quota_put_last() -> None:
+    """Reserved candidates rank late by design, so plain tail trimming would delete them first."""
+    schema = _ollama_schema(DigestReview.model_json_schema())
+    candidates = [large_candidate(index, "AI_MODEL") for index in range(10)]
+    candidates += [large_candidate(100 + index, "SECURITY") for index in range(3)]
+
+    fitted = fitted_review_candidates(candidates, schema, 5, 4096, "SECURITY", 3)
+
+    assert len(fitted) < len(candidates)
+    assert [value["candidate_id"] for value in fitted if value["category"] == "SECURITY"] == [100, 101, 102]
+    assert [value["candidate_id"] for value in fitted if value["category"] != "SECURITY"] == sorted(
+        value["candidate_id"] for value in fitted if value["category"] != "SECURITY"
+    )
+
+
+def test_trimming_falls_back_to_the_reserved_category_once_the_rest_are_gone() -> None:
+    schema = _ollama_schema(DigestReview.model_json_schema())
+    candidates = [large_candidate(100 + index, "SECURITY") for index in range(12)]
+
+    fitted = fitted_review_candidates(candidates, schema, 5, 4096, "SECURITY", 12)
+
+    assert 0 < len(fitted) < len(candidates)
+    assert [value["candidate_id"] for value in fitted] == [100 + index for index in range(len(fitted))]
+
+
+def test_trimming_without_a_reservation_still_drops_the_tail() -> None:
+    schema = _ollama_schema(DigestReview.model_json_schema())
+    candidates = [large_candidate(index, "AI_MODEL") for index in range(13)]
+
+    fitted = fitted_review_candidates(candidates, schema, 5, 4096)
+
+    assert 0 < len(fitted) < len(candidates)
+    assert [value["candidate_id"] for value in fitted] == list(range(len(fitted)))

@@ -865,6 +865,7 @@ class Database:
                 "gmail_document_state",
                 "hackernews_document_state",
                 "items",
+                "reranker_scores",
                 "digest_deliveries",
                 "digests",
                 "runs",
@@ -885,6 +886,10 @@ class Database:
         with self.transaction() as connection:
             for table in (
                 "url_resolution_cache",
+                # No foreign key keeps the audit rows through reprocessing, but a reset must still
+                # clear them: SQLite reuses deleted rowids, so surviving rows would attach an old
+                # score to whichever item later takes its item_id.
+                "reranker_scores",
                 "items",
                 "gmail_document_state",
                 "hackernews_document_state",

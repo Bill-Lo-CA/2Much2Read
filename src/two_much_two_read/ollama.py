@@ -108,22 +108,42 @@ def _review_prompt(candidates: list[dict[str, object]], schema: Any, maximum: in
 
 
 def fitted_review_candidates(
-    candidates: list[dict[str, object]], schema: Any, maximum: int, num_ctx: int
+    candidates: list[dict[str, object]],
+    schema: Any,
+    maximum: int,
+    num_ctx: int,
+    reserved_category: str = "",
+    reserved: int = 0,
 ) -> list[dict[str, object]]:
     """Drop the least relevant candidates until the prompt fits num_ctx.
 
     Ollama truncates an oversized prompt from the head without erroring, which would silently
     evict the system prompt while keeping the untrusted candidate text, so bound it here instead.
     Candidates arrive in reranked order, so trimming the tail drops the weakest ones.
+
+    A reserved category is exempt from that until the other candidates run out. Its candidates hold
+    their slots precisely because they rank late, so trimming the tail alone would delete the
+    reservation first and defeat the quota on exactly the prompts large enough to need trimming.
     """
     budget = num_ctx - maximum * REVIEW_RESERVED_TOKENS_PER_SELECTION - REVIEW_RESERVED_OUTPUT_TOKENS
     used = _estimated_tokens(REVIEW_SYSTEM_PROMPT) + _estimated_tokens(_review_prompt([], schema, maximum))
-    fitted: list[dict[str, object]] = []
-    for candidate in candidates:
-        used += _estimated_tokens(json.dumps(candidate, ensure_ascii=False)) + REVIEW_TOKENS_PER_CANDIDATE_SEPARATOR
-        if used > budget:
+    costs = [
+        _estimated_tokens(json.dumps(candidate, ensure_ascii=False)) + REVIEW_TOKENS_PER_CANDIDATE_SEPARATOR
+        for candidate in candidates
+    ]
+    protected: set[int] = set()
+    if reserved_category and reserved:
+        for index, candidate in enumerate(candidates):
+            if len(protected) < reserved and candidate.get("category") == reserved_category:
+                protected.add(index)
+    kept = set(range(len(candidates)))
+    total = used + sum(costs)
+    for index in sorted(kept - protected, reverse=True) + sorted(protected, reverse=True):
+        if total <= budget:
             break
-        fitted.append(candidate)
+        kept.discard(index)
+        total -= costs[index]
+    fitted = [candidates[index] for index in sorted(kept)]
     if len(fitted) != len(candidates):
         logger.warning(
             "review prompt exceeds num_ctx=%d; reviewing %d of %d candidates",
@@ -387,9 +407,11 @@ class OllamaClient:
                 f"OLLAMA_CLASSIFICATION_INVALID subscription={name!r} error={str(error)!r} response_preview={_preview(raw)!r}"
             ) from None
 
-    def review_digest(self, candidates: list[dict[str, object]], maximum: int) -> DigestReview:
+    def review_digest(
+        self, candidates: list[dict[str, object]], maximum: int, reserved_category: str = "", reserved: int = 0
+    ) -> DigestReview:
         schema = _ollama_schema(DigestReview.model_json_schema())
-        candidates = fitted_review_candidates(candidates, schema, maximum, self.num_ctx)
+        candidates = fitted_review_candidates(candidates, schema, maximum, self.num_ctx, reserved_category, reserved)
         prompt = _review_prompt(candidates, schema, maximum)
         response = self._client.post(
             f"{self.base_url}/api/chat",

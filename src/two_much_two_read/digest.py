@@ -279,8 +279,12 @@ def render_digest(
             parts.append(f"<{url}>")
         return " · ".join(parts)
 
-    top = eligible[:top_items]
-    rest = eligible[top_items:]
+    # Only what the reviewer selected may hold a headline slot. Entries without a review score are
+    # the candidates it passed over, so filling spare headline slots from them would republish
+    # exactly what the final quality filter rejected. Rendering a plain item list keeps every slot.
+    scored = [value for value in eligible if value.review_score is not None]
+    top = (scored or eligible)[:top_items]
+    rest = eligible[len(top) :]
     sections = [
         f"📰 {safe_topic} 2much2read — {when:%Y-%m-%d}",
         labels["top"] + "\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)),

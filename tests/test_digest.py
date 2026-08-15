@@ -260,3 +260,30 @@ def test_a_mention_without_a_source_or_url_still_renders() -> None:
     )
 
     assert "• Bare mention" in text
+
+
+def test_spare_headline_slots_are_not_filled_with_items_the_reviewer_rejected() -> None:
+    """The reviewer selecting fewer than top_items must not promote what it passed over."""
+    text = render_digest(
+        [
+            DigestEntry(item("Selected", None), review_score=90, source_name="TLDR AI"),
+            DigestEntry(item("Passed over", None), reranker_score=0.4, source_name="TLDR AI"),
+            DigestEntry(item("Also passed over", None), reranker_score=0.3, source_name="TLDR AI"),
+        ],
+        datetime(2026, 6, 22, tzinfo=UTC),
+        "AI",
+        "TLDR",
+        top_items=5,
+    )
+
+    assert "1. Selected" in text
+    assert "2. Passed over" not in text
+    assert "• Passed over" in text and "• Also passed over" in text
+
+
+def test_an_unreviewed_item_list_still_fills_the_headline_section() -> None:
+    """Rendering plain items has no review scores, and every one of them is a headline."""
+    text = render_digest([item("First", None), item("Second", None)], datetime(2026, 6, 22, tzinfo=UTC), "AI", "TLDR")
+
+    assert "1. First" in text and "2. Second" in text
+    assert "🧰" not in text
