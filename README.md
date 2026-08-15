@@ -144,6 +144,25 @@ extracted and ranked, so listing them costs nothing beyond the message length; s
 for a headline-only digest. `DIGEST_TOP_ITEMS` controls how many entries the renderer puts in the
 headline section, so keep it equal to `DIGEST_MAX_ITEMS` unless you want mentions promoted into it.
 
+Several newsletters cover the same story, and the reviewer drops the copies from its own selection,
+which used to land them in the secondary section under the headline they duplicate. Repeat coverage
+is now folded into the entry it duplicates: the strongest one keeps its place, the other newsletters
+are listed alongside it, and a link is borrowed from a merged entry when the headline's own
+newsletter carried none. Stories are matched on the Latin tokens in their title and summary, since
+each newsletter translates a headline differently and links to a different page for one event.
+`DIGEST_MERGE_SIMILARITY` sets the threshold, and two distinct shared tokens are required regardless:
+measured over a day of real items, pairs covering one story shared two to five tokens while every
+other pair shared at most one, always a bare vendor word like "openai" or "deepseek".
+
+Headline items are then rewritten from fuller text than the extractor ever saw. The extractor splits
+one email into up to ten items, so each is written from a few lines and lands around 60 characters,
+which is thin for the items leading the digest. `DIGEST_DEEPEN_HEADLINES` (default on) fetches each
+headline's article and rewrites its summary and significance on the review model, falling back to the
+merged newsletter coverage when there is no link or the fetch fails. Email bodies are never persisted
+- only their hash and length - so the article is the only route back to fuller text. A failed rewrite
+keeps the original summary. This adds roughly one article fetch and one generation per headline, and
+the review model stays resident across them rather than reloading per item.
+
 Reviewer input is split by category rather than taken as one global top-N.
 `DIGEST_SECURITY_CANDIDATE_SLOTS` (default 7 of the 20) reserves slots for `SECURITY` items; the
 rest go to the remaining categories. The reranker ranks AI releases above vulnerability

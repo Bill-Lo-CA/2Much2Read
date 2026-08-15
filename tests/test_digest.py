@@ -1,8 +1,15 @@
+from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
 
-from two_much_two_read.digest import DigestEntry, canonical_url, dedupe, render_digest
+from two_much_two_read.digest import (
+    DigestEntry,
+    canonical_url,
+    dedupe,
+    merge_related_entries,
+    render_digest,
+)
 from two_much_two_read.schemas import DigestItem
 from two_read_runtime.discord import chunk_text, sanitize_discord_text
 
@@ -287,3 +294,97 @@ def test_an_unreviewed_item_list_still_fills_the_headline_section() -> None:
 
     assert "1. First" in text and "2. Second" in text
     assert "🧰" not in text
+
+
+def merged_entry(title: str, summary: str, source: str, url: str | None = None, review_score: int | None = None) -> DigestEntry:
+    return (
+        DigestEntry(
+            item(title, url),
+            source_name=source,
+            article_url=url,
+            review_score=review_score,
+            reranker_score=0.5,
+        )
+        if not summary
+        else DigestEntry(
+            DigestItem(
+                title=title,
+                category="AI_MODEL",
+                summary_zh_tw=summary,
+                why_it_matters_zh_tw="重要原因",
+                source_url=url,
+                importance=8,
+                confidence=0.8,
+            ),
+            source_name=source,
+            article_url=url,
+            review_score=review_score,
+            reranker_score=0.5,
+        )
+    )
+
+
+def test_repeat_coverage_of_a_headline_is_folded_into_it() -> None:
+    """The reviewer drops duplicates from its own picks, so they land in the mention list."""
+    headline = merged_entry(
+        "OpenAI 推出 GPT-5.6 Sol 超快版本", "OpenAI 以 Cerebras 硬體推出 GPT-5.6 Sol。", "AlphaSignal", review_score=90
+    )
+    mention = merged_entry(
+        "使用 Cerebras 加速 GPT-5.6 Sol 超快版本",
+        "Cerebras 硬體讓 GPT-5.6 Sol 達到 750 tokens/second。",
+        "TLDR Dev",
+        "https://cerebras.ai/blog/gpt-5-6-sol",
+    )
+
+    headlines, mentions = merge_related_entries([headline], [mention], 0.25)
+
+    assert mentions == []
+    assert headlines[0].also_from == ("TLDR Dev",)
+    # The headline's own newsletter carried no link; the merged one did.
+    assert headlines[0].article_url == "https://cerebras.ai/blog/gpt-5-6-sol"
+    assert len(headlines[0].merged_summaries) == 2
+
+
+def test_two_launches_from_the_same_section_are_not_merged() -> None:
+    """Section markers dominate token overlap, which is why they are stripped before comparing."""
+    left = merged_entry("CORMA (PRODUCT LAUNCH)", "Corma 是網路安全防禦的 AI 基礎模型。", "TLDR InfoSec", review_score=90)
+    right = merged_entry("MINDGARD (PRODUCT LAUNCH)", "Mindgard 提供 AI 紅隊測試平台。", "TLDR InfoSec")
+
+    headlines, mentions = merge_related_entries([left], [right], 0.25)
+
+    assert headlines[0].also_from == ()
+    assert len(mentions) == 1
+
+
+def test_the_same_vendor_covering_two_stories_is_not_merged() -> None:
+    left = merged_entry("DeepSeek 釋出 V4-Pro 智慧代理", "DeepSeek V4-Pro 推出，支援離峰價格。", "AlphaSignal", review_score=90)
+    right = merged_entry("DeepSeek Harness 開發者預覽", "DeepSeek Harness 提供模組化插件系統。", "TLDR Dev")
+
+    headlines, mentions = merge_related_entries([left], [right], 0.25)
+
+    assert headlines[0].also_from == ()
+    assert len(mentions) == 1
+
+
+def test_mentions_are_deduped_against_each_other_too() -> None:
+    first = merged_entry("Gemini 3.7 Flash：Google 高速模型", "Google 推出 Gemini 3.7 Flash。", "ThursdAI")
+    second = merged_entry("Google 推出 Gemini 3.7 Flash 模型", "Gemini 3.7 Flash 價格減半。", "TLDR AI")
+
+    headlines, mentions = merge_related_entries([], [first, second], 0.25)
+
+    assert headlines == []
+    assert len(mentions) == 1
+    assert mentions[0].also_from == ("TLDR AI",)
+
+
+def test_merged_sources_are_rendered_in_both_sections() -> None:
+    headline = replace(
+        merged_entry("Headline", "摘要內容", "AlphaSignal", review_score=90),
+        also_from=("TLDR Dev", "TLDR AI"),
+    )
+    mention = replace(merged_entry("Mention", "另一則摘要", "ThursdAI"), also_from=("TLDR AI",))
+
+    text = render_digest([headline, mention], datetime(2026, 6, 22, tzinfo=UTC), "AI", "TLDR", top_items=1)
+
+    assert "來源：AlphaSignal, TLDR Dev, TLDR AI" in text
+    assert "• Mention · ThursdAI, TLDR AI" in text

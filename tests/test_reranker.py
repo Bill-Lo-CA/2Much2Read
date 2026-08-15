@@ -195,7 +195,7 @@ def test_unwritten_reranker_scores_are_reported() -> None:
     assert messages == ["Warning: recorded 1 of 2 reranker scores"]
 
 
-def test_final_review_selects_scored_items_and_releases_the_reviewer() -> None:
+def test_final_review_selects_scored_items_and_leaves_the_reviewer_loaded() -> None:
     class FakeOllama:
         review_model = "qwen3:8b"
 
@@ -220,7 +220,8 @@ def test_final_review_selects_scored_items_and_releases_the_reviewer() -> None:
 
     assert [(value.candidate_id, value.review_score) for value in reviewed] == [(2, 90)]
     assert ollama.candidates[0]["source"] == "TLDR AI"
-    assert ollama.unloaded == ["qwen3:8b"]
+    # The headline rewrite runs on the same model, so run_pipeline releases it, not this step.
+    assert ollama.unloaded == []
 
 
 def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None:

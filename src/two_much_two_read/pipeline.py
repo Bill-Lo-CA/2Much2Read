@@ -12,11 +12,11 @@ import httpx
 from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code, legacy_destination
 from two_read_runtime.locking import ProcessLock
 
-from .article_extractor import ArticleExtractionError
+from .article_extractor import ArticleExtractionError, extract_article
 from .article_fetcher import ArticleFetcher, ArticleFetchError, ResolvedUrl, UrlResolutionError
 from .command_models import DeliveryCheckpointResetResult, NewsletterRetryResult, NewsletterRunResult
 from .config import GmailSource, HackerNewsSource, Settings, load_sources
-from .digest import DigestEntry, dedupe_entries, render_digest
+from .digest import DigestEntry, dedupe_entries, merge_related_entries, render_digest
 from .gmail import GmailClient, credentials, message_headers
 from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
 from .mime import MAX_ANALYSIS_CHARS, EmailExtractionError, extract_gmail_payload
@@ -128,13 +128,11 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
                 "source": entry.source_name,
             }
         )
-    try:
-        # The context fitter trims from the tail, where the reserved candidates sit by design.
-        review = ollama.review_digest(
-            candidates, settings.digest_max_items, RESERVED_CATEGORY, settings.digest_security_candidate_slots
-        )
-    finally:
-        _unload_model(ollama, settings.ollama_review_model)
+    # The context fitter trims from the tail, where the reserved candidates sit by design.
+    # The reviewer is released by the caller, once the headline rewrite has also finished with it.
+    review = ollama.review_digest(
+        candidates, settings.digest_max_items, RESERVED_CATEGORY, settings.digest_security_candidate_slots
+    )
     scores = {selection.candidate_id: selection.score for selection in review.selected}
     selected = [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]
     # The reviewer only picks the headline items, but the candidates behind them were already
@@ -142,6 +140,59 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
     # selected item and render as the digest's secondary mentions.
     unselected = [entry for entry in ranked if entry.candidate_id not in scores]
     return selected + unselected[: settings.digest_secondary_items]
+
+
+def _merged_entries(entries: list[DigestEntry], threshold: float) -> list[DigestEntry]:
+    headlines = [entry for entry in entries if entry.review_score is not None]
+    mentions = [entry for entry in entries if entry.review_score is None]
+    headlines, mentions = merge_related_entries(headlines, mentions, threshold)
+    return headlines + mentions
+
+
+def _headline_source(entry: DigestEntry, fetcher: ArticleFetcher) -> tuple[str, str]:
+    """The fullest text available for a headline: the article itself, or the newsletters on it.
+
+    The extractor's own summary is the floor, not the goal - it was written from a few lines of one
+    email. Email bodies are never persisted, so the article is the only route to more text, and the
+    merged newsletter coverage is the fallback when there is no link or the fetch fails.
+    """
+    url = entry.article_url or (str(entry.item.source_url) if entry.item.source_url else None)
+    if url:
+        try:
+            fetched = fetcher.fetch(url)
+            return extract_article(fetched.content_type, fetched.body).text, "article"
+        except (ArticleFetchError, ArticleExtractionError, UrlResolutionError):
+            pass
+    summaries = entry.merged_summaries or (entry.item.summary_zh_tw,)
+    return "\n\n".join((*summaries, entry.item.why_it_matters_zh_tw)), "newsletters"
+
+
+def _deepened_entries(
+    settings: Settings, ollama: OllamaClient, entries: list[DigestEntry], status: StatusReporter
+) -> list[DigestEntry]:
+    if not settings.digest_deepen_headlines:
+        return entries
+    fetcher = ArticleFetcher()
+    deepened: list[DigestEntry] = []
+    for entry in entries:
+        if entry.review_score is None:
+            deepened.append(entry)
+            continue
+        status(f"Expanding {entry.item.title}")
+        content, basis = _headline_source(entry, fetcher)
+        sources = ", ".join((entry.source_name or entry.source_id or "Unknown", *entry.also_from))
+        try:
+            rewrite = ollama.deepen_item(entry.item.title, entry.item.category, sources, basis, content)
+        except (OllamaSchemaError, httpx.HTTPError) as error:
+            # A headline with its original short summary still beats losing the digest.
+            status(f"Warning: kept the original summary for {entry.item.title} ({type(error).__name__})")
+            deepened.append(entry)
+            continue
+        item = entry.item.model_copy(
+            update={"summary_zh_tw": rewrite.summary_zh_tw, "why_it_matters_zh_tw": rewrite.why_it_matters_zh_tw}
+        )
+        deepened.append(replace(entry, item=item))
+    return deepened
 
 
 def _unload_model(ollama: OllamaClient, model: str, status: StatusReporter = _ignore_status) -> None:
@@ -540,7 +591,12 @@ def run_pipeline(
             finally:
                 reranker.close()
 
-            reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
+            try:
+                reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
+                reviewed_entries = _merged_entries(reviewed_entries, settings.digest_merge_similarity)
+                reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status)
+            finally:
+                _unload_model(ollama, settings.ollama_review_model, status)
             content = render_digest(
                 reviewed_entries,
                 now,

@@ -132,6 +132,29 @@ class ArticleAnalysis(ItemAnalysis):
     pass
 
 
+class ItemDeepening(BaseModel):
+    """A headline item rewritten from fuller source text than the extractor ever saw.
+
+    The extractor splits one email into up to ten items, so each gets a few lines of input and
+    returns a summary around 60 characters. A headline deserves more, and the field bounds have
+    always allowed it, so this rewrite runs over the article body or the merged newsletter coverage.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    summary_zh_tw: str = Field(min_length=1, max_length=800, description="What happened, in the digest language")
+    why_it_matters_zh_tw: str = Field(min_length=1, max_length=800, description="Practical significance, in the digest language")
+
+    @field_validator("summary_zh_tw", "why_it_matters_zh_tw")
+    @classmethod
+    def reject_model_links(cls, value: str) -> str:
+        # Written from untrusted article text, so it is held to the same rule as every other
+        # model-owned field: the renderer owns links, the model never supplies them.
+        if MODEL_TEXT_INJECTION.search(value):
+            raise ValueError("model-owned text must not contain URLs or Markdown links")
+        return value
+
+
 class EmailExtraction(BaseModel):
     source_id: str
     newsletter_title: str

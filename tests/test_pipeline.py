@@ -110,6 +110,7 @@ def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
             replace(entry, review_score=100 - index) for index, entry in enumerate(entries[: settings.digest_max_items])
         ],
     )
+    monkeypatch.setattr(pipeline, "_deepened_entries", lambda _settings, _ollama, entries, _status: entries)
 
 
 def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -721,7 +722,7 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
         "_process_source",
         lambda *args, **kwargs: events.append("extractor:run") or (0, 0, 0, 0, [], []),
     )
-    monkeypatch.setattr(pipeline, "_unload_model", lambda *_: events.append("extractor:unload"))
+    monkeypatch.setattr(pipeline, "_unload_model", lambda _ollama, model, *_: events.append(f"unload:{model}"))
     monkeypatch.setattr(pipeline, "RelevanceReranker", FakeReranker)
     monkeypatch.setattr(
         pipeline,
@@ -733,17 +734,26 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
         "_reviewed_entries",
         lambda *args: events.append("reviewer:run") or [],
     )
+    monkeypatch.setattr(
+        pipeline,
+        "_deepened_entries",
+        lambda _settings, _ollama, entries, _status: events.append("reviewer:deepen") or entries,
+    )
 
     run_pipeline(settings, no_deliver=True)
 
+    # The reviewer stays resident across the headline rewrite and is released only afterwards,
+    # so the three models still never hold memory at the same time.
     assert events == [
         "extractor:load",
         "extractor:run",
-        "extractor:unload",
+        "unload:llama3.2:3b",
         "reranker:load",
         "reranker:rank",
         "reranker:unload",
         "reviewer:run",
+        "reviewer:deepen",
+        "unload:qwen3:8b",
     ]
 
 

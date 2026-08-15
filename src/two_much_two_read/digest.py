@@ -131,6 +131,9 @@ class DigestEntry:
     source_name: str | None = None
     reranker_score: float | None = None
     review_score: int | None = None
+    # Filled by merge_related_entries when other newsletters covered the same story.
+    also_from: tuple[str, ...] = ()
+    merged_summaries: tuple[str, ...] = ()
 
 
 def canonical_url(value: str | None) -> str | None:
@@ -211,6 +214,82 @@ def dedupe_entries(items: list[DigestEntry]) -> list[DigestEntry]:
     return list(winners.values())
 
 
+# Newsletters translate a headline differently and link to different pages for the same event, so
+# neither the canonical URL nor the rendered title identifies a story across sources. Product and
+# vendor names survive translation in Latin script, so they carry the identity instead. TLDR's
+# section markers are stripped first: two unrelated product launches otherwise share most of their
+# tokens, which was the single worst false match when this was measured against a day of real items.
+STORY_BOILERPLATE = re.compile(r"\((?:product launch|sponsor|\d+\s*minute read)\)", re.IGNORECASE)
+STORY_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9.\-]*")
+# Measured over a day of real items: every pair covering the same story shared between two and five
+# tokens, and every pair that did not shared at most one, always a bare vendor or topic word such as
+# "openai", "deepseek", or "ai". Items carry between 1 and 15 tokens, so a ratio alone is fragile -
+# on a short item a single shared vendor name already clears any useful threshold. Requiring two
+# distinct shared tokens is what actually separates them; the ratio then guards the long items.
+STORY_MINIMUM_SHARED_TOKENS = 2
+
+
+def story_tokens(entry: DigestEntry) -> set[str]:
+    text = STORY_BOILERPLATE.sub(" ", f"{entry.item.title} {entry.item.summary_zh_tw}")
+    return {token.casefold() for token in STORY_TOKEN.findall(text) if len(token) > 1}
+
+
+def story_similarity(left: DigestEntry, right: DigestEntry) -> float:
+    left_tokens, right_tokens = story_tokens(left), story_tokens(right)
+    shared = left_tokens & right_tokens
+    if len(shared) < STORY_MINIMUM_SHARED_TOKENS:
+        return 0.0
+    return len(shared) / len(left_tokens | right_tokens)
+
+
+def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:
+    names = list(primary.also_from)
+    for name in (other.source_name, *other.also_from):
+        if name and name != primary.source_name and name not in names:
+            names.append(name)
+    summaries = list(primary.merged_summaries) or [primary.item.summary_zh_tw]
+    for summary in (other.item.summary_zh_tw, *other.merged_summaries):
+        if summary not in summaries:
+            summaries.append(summary)
+    return replace(
+        primary,
+        also_from=tuple(names),
+        merged_summaries=tuple(summaries),
+        # A newsletter that only names a story often carries no link while another one does.
+        article_url=primary.article_url or other.article_url,
+    )
+
+
+def merge_related_entries(
+    headlines: list[DigestEntry], mentions: list[DigestEntry], threshold: float
+) -> tuple[list[DigestEntry], list[DigestEntry]]:
+    """Fold repeat coverage of a headline story into that headline, then dedupe the mentions.
+
+    The reviewer already drops duplicates from its own selection, so the copies it rejected land in
+    the mention list and reappear under the headline they duplicate. Merging keeps the strongest
+    entry and records the other sources, which is worth showing: several newsletters carrying one
+    story is itself a signal.
+    """
+    merged = list(headlines)
+    remaining: list[DigestEntry] = []
+    for mention in mentions:
+        scores = [(story_similarity(mention, headline), index) for index, headline in enumerate(merged)]
+        best, index = max(scores, default=(0.0, -1))
+        if best >= threshold and index >= 0:
+            merged[index] = _absorbed(merged[index], mention)
+            continue
+        remaining.append(mention)
+    deduped: list[DigestEntry] = []
+    for mention in remaining:
+        scores = [(story_similarity(mention, kept), index) for index, kept in enumerate(deduped)]
+        best, index = max(scores, default=(0.0, -1))
+        if best >= threshold and index >= 0:
+            deduped[index] = _absorbed(deduped[index], mention)
+            continue
+        deduped.append(mention)
+    return merged, deduped
+
+
 def _labels(language: str) -> dict[str, str]:
     normalized = language.casefold().replace("_", "-")
     aliases = {
@@ -254,7 +333,8 @@ def render_digest(
             f"   {labels['why']}：{sanitize_discord_text(item.why_it_matters_zh_tw)}",
         ]
         if value.source_name:
-            lines.append(f"   {labels['source']}：{sanitize_discord_text(value.source_name)}")
+            names = ", ".join((value.source_name, *value.also_from))
+            lines.append(f"   {labels['source']}：{sanitize_discord_text(names)}")
         if value.hn_item_id:
             if value.hn_score is not None and value.hn_comments is not None:
                 lines.append(f"   {labels['hn']}：{value.hn_score} {labels['points']} · {value.hn_comments} {labels['comments']}")
@@ -264,8 +344,9 @@ def render_digest(
                 lines.append(f"   {labels['article']}：<{value.article_url}>")
             if value.discussion_url:
                 lines.append(f"   {labels['discussion']}：<{value.discussion_url}>")
-        elif item.source_url:
-            lines.append(f"   {labels['article']}：<{item.source_url}>")
+        elif url := (value.article_url or (str(item.source_url) if item.source_url else None)):
+            # article_url may have been borrowed from a merged entry whose newsletter linked the story.
+            lines.append(f"   {labels['article']}：<{url}>")
         return "\n".join(lines)
 
     def mention(value: DigestEntry) -> str:
@@ -273,7 +354,7 @@ def render_digest(
         item = value.item
         parts = [f"• {sanitize_discord_text(item.title)}"]
         if value.source_name:
-            parts.append(sanitize_discord_text(value.source_name))
+            parts.append(sanitize_discord_text(", ".join((value.source_name, *value.also_from))))
         url = value.article_url or (str(item.source_url) if item.source_url else None) or value.discussion_url
         if url:
             parts.append(f"<{url}>")
