@@ -410,3 +410,62 @@ def test_a_story_merely_named_by_another_is_not_merged_into_it() -> None:
     assert headlines[0].also_from == ()
     assert headlines[0].article_url is None
     assert len(mentions) == 1
+
+
+def test_ordinary_vocabulary_never_identifies_a_story() -> None:
+    """With DIGEST_LANGUAGE=en the summaries are English, so every item shares common words."""
+    left = merged_entry(
+        "OpenAI launches new AI model for coding",
+        "OpenAI released a new model aimed at software development tasks.",
+        "TLDR AI",
+        review_score=90,
+    )
+    right = merged_entry(
+        "Google launches new AI model for search",
+        "Google released a new model aimed at search ranking tasks.",
+        "TLDR AI",
+    )
+
+    headlines, mentions = merge_related_entries([left], [right], 0.25)
+
+    assert headlines[0].also_from == ()
+    assert len(mentions) == 1
+
+
+def test_an_english_digest_still_merges_on_product_names() -> None:
+    left = merged_entry(
+        "OpenAI previews GPT-5.6 Sol Ultrafast",
+        "OpenAI previewed a mode generating 750 tokens per second.",
+        "TLDR AI",
+        review_score=90,
+    )
+    right = merged_entry(
+        "Cerebras accelerates GPT-5.6 Sol Ultrafast",
+        "Cerebras hardware drives GPT-5.6 Sol to 750 tokens per second.",
+        "TLDR Dev",
+        "https://cerebras.ai/blog/sol",
+    )
+
+    headlines, mentions = merge_related_entries([left], [right], 0.25)
+
+    assert headlines[0].also_from == ("TLDR Dev",)
+    assert mentions == []
+
+
+def test_absorbing_a_hacker_news_entry_keeps_its_discussion() -> None:
+    """The absorbed entry stops being rendered, so its HN attribution would vanish with it."""
+    headline = merged_entry(
+        "Docker CopyEscape 漏洞", "Docker cp 的競爭條件漏洞 CVE-2026-17106。", "TLDR InfoSec", review_score=90
+    )
+    hacker_news = replace(
+        merged_entry("Docker CopyEscape vulnerability", "Docker cp race condition CVE-2026-17106 overwrites host files.", "HN"),
+        discussion_url="https://news.ycombinator.com/item?id=456",
+        hn_item_id="456",
+        hn_score=210,
+        hn_comments=64,
+    )
+
+    headlines, _ = merge_related_entries([headline], [hacker_news], 0.25)
+
+    assert headlines[0].discussion_url == "https://news.ycombinator.com/item?id=456"
+    assert (headlines[0].hn_item_id, headlines[0].hn_score, headlines[0].hn_comments) == ("456", 210, 64)

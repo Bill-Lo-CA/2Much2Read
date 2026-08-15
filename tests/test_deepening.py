@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from dataclasses import replace
 
 import httpx
@@ -9,7 +10,12 @@ from two_much_two_read import pipeline
 from two_much_two_read.article_fetcher import ArticleFetchError, FetchedArticle
 from two_much_two_read.config import Settings
 from two_much_two_read.digest import DigestEntry
-from two_much_two_read.ollama import DEEPEN_RESERVED_OUTPUT_TOKENS, OllamaSchemaError, fitted_deepening_content
+from two_much_two_read.ollama import (
+    DEEPEN_RESERVED_OUTPUT_TOKENS,
+    OllamaSchemaError,
+    create_ollama_client,
+    fitted_deepening_content,
+)
 from two_much_two_read.schemas import DigestItem, ItemDeepening
 
 ARTICLE = (
@@ -169,3 +175,21 @@ def test_a_source_about_a_different_story_is_discarded(monkeypatch: pytest.Monke
 
     assert deepened[0].item.summary_zh_tw == "很短的摘要。"
     assert any("did not cover" in message for message in messages)
+
+
+def test_a_rewrite_in_the_wrong_language_is_rejected(monkeypatch: pytest.MonkeyPatch) -> None:
+    """It replaces prose the extractor already language-checked, so it is held to the same guard."""
+    import respx
+
+    settings = Settings(digest_language="zh-TW", ollama_review_model="qwen3:8b")
+    english = {
+        "covers_the_item": True,
+        "summary_zh_tw": "OpenAI previewed a mode generating seven hundred and fifty tokens per second.",
+        "why_it_matters_zh_tw": "It suits real time applications that need very low latency responses.",
+    }
+    with respx.mock(base_url=settings.ollama_base_url) as mock:
+        mock.post("/api/chat").respond(json={"message": {"content": json.dumps(english)}})
+        client = create_ollama_client(settings)
+        with pytest.raises(OllamaSchemaError, match="OLLAMA_DEEPEN_INVALID"):
+            client.deepen_item("標題", "AI_MODEL", "TLDR AI", "article", "some article text")
+        client.close()

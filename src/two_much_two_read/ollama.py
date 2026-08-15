@@ -512,7 +512,13 @@ class OllamaClient:
             raw = response.json()["message"]["content"]
             if not isinstance(raw, str):
                 raise TypeError
-            return ItemDeepening.model_validate_json(raw)
+            result = ItemDeepening.model_validate_json(raw)
+            if result.covers_the_item:
+                # An English article rewritten for a zh-TW digest is the likeliest way for the model
+                # to answer in the source's language, and this replaces prose the extractor already
+                # had checked, so it is held to the same guard as extraction and article analysis.
+                _validate_digest_language(self.digest_language, [result.summary_zh_tw, result.why_it_matters_zh_tw])
+            return result
         except (ValidationError, ValueError, KeyError, TypeError) as error:
             raise OllamaSchemaError(
                 f"OLLAMA_DEEPEN_INVALID title={title!r} error={str(error)!r} response_preview={_preview(raw)!r}"

@@ -137,16 +137,17 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
     selected = [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]
     # The reviewer only picks the headline items, but the candidates behind them were already
     # extracted, ranked, and paid for. They carry no review score, so they sort below every
-    # selected item and render as the digest's secondary mentions.
+    # selected item and render as the digest's secondary mentions. The secondary limit is applied
+    # after merging, so a mention absorbed into a headline frees its slot for the next candidate.
     unselected = [entry for entry in ranked if entry.candidate_id not in scores]
-    return selected + unselected[: settings.digest_secondary_items]
+    return selected + unselected
 
 
-def _merged_entries(entries: list[DigestEntry], threshold: float) -> list[DigestEntry]:
+def _merged_entries(entries: list[DigestEntry], threshold: float, secondary_items: int) -> list[DigestEntry]:
     headlines = [entry for entry in entries if entry.review_score is not None]
     mentions = [entry for entry in entries if entry.review_score is None]
     headlines, mentions = merge_related_entries(headlines, mentions, threshold)
-    return headlines + mentions
+    return headlines + mentions[:secondary_items]
 
 
 def _headline_source(entry: DigestEntry, fetcher: ArticleFetcher) -> tuple[str, str]:
@@ -597,7 +598,9 @@ def run_pipeline(
 
             try:
                 reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
-                reviewed_entries = _merged_entries(reviewed_entries, settings.digest_merge_similarity)
+                reviewed_entries = _merged_entries(
+                    reviewed_entries, settings.digest_merge_similarity, settings.digest_secondary_items
+                )
                 reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status)
             finally:
                 _unload_model(ollama, settings.ollama_review_model, status)

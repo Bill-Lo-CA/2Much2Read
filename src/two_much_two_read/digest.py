@@ -227,10 +227,20 @@ STORY_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9.\-]*")
 # on a short item a single shared vendor name already clears any useful threshold. Requiring two
 # distinct shared tokens is what actually separates them; the ratio then guards the long items.
 STORY_MINIMUM_SHARED_TOKENS = 2
+# Only tokens shaped like an identity count: capitalised in the source, or carrying a version
+# number. A zh-TW digest leaves nothing but proper nouns in Latin script, so any Latin token was
+# identifying; a digest in a Latin-script language does not, and "OpenAI launches new AI model for
+# coding" then shares launches, new, ai, model and for with the same sentence about Google. Filtering
+# by document frequency was tried first and does not work: no cutoff both keeps gpt-5.6 and drops
+# model, because fifteen items are far too few to infer a stopword list. Shape separates them at
+# once - on the measured zh-TW items and on an English set, this takes every true pair and no false
+# one. Products that are lowercase in their own name are the known cost of that.
+STORY_IDENTITY_TOKEN = re.compile(r"^(?:[A-Z].*|.*\d.*)$")
 
 
 def _tokens(text: str) -> set[str]:
-    return {token.casefold() for token in STORY_TOKEN.findall(STORY_BOILERPLATE.sub(" ", text)) if len(token) > 1}
+    found = STORY_TOKEN.findall(STORY_BOILERPLATE.sub(" ", text))
+    return {token.casefold() for token in found if len(token) > 1 and STORY_IDENTITY_TOKEN.match(token)}
 
 
 def story_tokens(entry: DigestEntry) -> set[str]:
@@ -261,7 +271,9 @@ def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:
         if summary not in summaries:
             summaries.append(summary)
     return replace(
-        primary,
+        # The absorbed entry stops being rendered, so its Hacker News discussion, score, and comment
+        # count would be lost with it, exactly as exact-URL dedupe already avoids.
+        _preserve_hn_attribution(primary, other),
         also_from=tuple(names),
         merged_summaries=tuple(summaries),
         # A newsletter that only names a story often carries no link while another one does.

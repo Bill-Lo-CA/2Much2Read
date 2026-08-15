@@ -147,21 +147,36 @@ headline section, so keep it equal to `DIGEST_MAX_ITEMS` unless you want mention
 Several newsletters cover the same story, and the reviewer drops the copies from its own selection,
 which used to land them in the secondary section under the headline they duplicate. Repeat coverage
 is now folded into the entry it duplicates: the strongest one keeps its place, the other newsletters
-are listed alongside it, and a link is borrowed from a merged entry when the headline's own
-newsletter carried none. Stories are matched on the Latin tokens in their title and summary, since
-each newsletter translates a headline differently and links to a different page for one event.
-`DIGEST_MERGE_SIMILARITY` sets the threshold, and two distinct shared tokens are required regardless:
-measured over a day of real items, pairs covering one story shared two to five tokens while every
-other pair shared at most one, always a bare vendor word like "openai" or "deepseek".
+are listed alongside it, a link is borrowed from a merged entry when the headline's own newsletter
+carried none, and a merged Hacker News entry keeps its discussion link, score, and comment count.
+The secondary limit is applied after merging, so an absorbed mention frees its slot for the next
+candidate instead of shrinking the section.
+
+Neither the canonical URL nor the title identifies a story across newsletters: each translates a
+headline differently and links to a different page for one event. Matching therefore runs on the
+tokens shaped like an identity — capitalised in the source, or carrying a version number — in the
+title and summary. `DIGEST_MERGE_SIMILARITY` sets the threshold, and two conditions hold regardless:
+two distinct shared tokens, and at least one of them shared by the two titles. Every condition was
+added because the previous one let something through. Pairs covering one story shared two to five
+tokens while every other pair shared at most one, always a bare vendor word like "openai". A summary
+routinely names another story to compare against it, so body overlap alone merged an item about Grok
+into one about GPT-5.6 Sol. And ordinary vocabulary only looks identifying in a language whose prose
+is Latin script: with `DIGEST_LANGUAGE=en`, "OpenAI launches new AI model for coding" shares five
+tokens with the same sentence about Google. Filtering by document frequency does not fix that — no
+cutoff both keeps `gpt-5.6` and drops `model`, because a batch of fifteen items is far too small to
+infer a stopword list — whereas shape separates them in both languages. Products written lowercase
+in their own name are the known cost.
 
 Headline items are then rewritten from fuller text than the extractor ever saw. The extractor splits
 one email into up to ten items, so each is written from a few lines and lands around 60 characters,
 which is thin for the items leading the digest. `DIGEST_DEEPEN_HEADLINES` (default on) fetches each
 headline's article and rewrites its summary and significance on the review model, falling back to the
 merged newsletter coverage when there is no link or the fetch fails. Email bodies are never persisted
-- only their hash and length - so the article is the only route back to fuller text. A failed rewrite
-keeps the original summary. This adds roughly one article fetch and one generation per headline, and
-the review model stays resident across them rather than reloading per item.
+- only their hash and length - so the article is the only route back to fuller text. The rewrite is
+discarded, keeping the original summary, when the fetch or the model fails, when the model reports
+that the source text is not about this item, or when it answers in the wrong language. This adds
+roughly one article fetch and one generation per headline, and the review model stays resident across
+them rather than reloading per item.
 
 Reviewer input is split by category rather than taken as one global top-N.
 `DIGEST_SECURITY_CANDIDATE_SLOTS` (default 7 of the 20) reserves slots for `SECURITY` items; the
