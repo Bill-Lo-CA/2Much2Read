@@ -8,6 +8,9 @@ from pydantic import BaseModel, ConfigDict, Field, HttpUrl, TypeAdapter, field_v
 
 HTTP_URL = TypeAdapter(HttpUrl)
 MODEL_TEXT_INJECTION = re.compile(r"https?://|\[[^\]\r\n]*\]\([^)]*\)", re.IGNORECASE)
+# Plain-text newsletters render a link as "Headline [ https://... ]" or "( https://... )".
+SOURCE_TITLE_URL = re.compile(r"[\[(]?\s*https?://\S+\s*[\])]?", re.IGNORECASE)
+SOURCE_TITLE_MAX_CHARACTERS = 200
 
 DigestCategory = Literal[
     "AI_MODEL",
@@ -98,9 +101,24 @@ class NewsletterItemAnalysis(ItemAnalysis):
     # only to give the matcher the original wording, so it is deliberately absent from ItemAnalysis
     # and never reaches DigestItem, storage, or the rendered digest. It is copied out of untrusted
     # newsletter text, so it carries no anti-link validator; nothing renders it.
-    source_title: str = Field(
-        min_length=1, max_length=200, description="Headline copied verbatim from the newsletter, never translated"
-    )
+    source_title: str = Field(min_length=1, description="Headline copied verbatim from the newsletter, never translated")
+
+    @field_validator("source_title")
+    @classmethod
+    def bound_without_rejecting(cls, value: str) -> str:
+        """Trim rather than reject, because rejecting costs the whole email.
+
+        Newsletters that write in prose inline their links in the plain-text part, so copying the
+        headline verbatim drags the URL and the sentences around it along with it. A 200-character
+        bound then failed the entire extraction: four of seven failures in one run were this, each
+        losing about ten items, and the repair round-trip failed the same way because the newsletter
+        is shaped that way every time. Nothing renders this field - it only feeds the link matcher,
+        which tolerates extra words - so the length is bounded here instead. URLs are dropped first:
+        they never appear in anchor text and only add tokens that produce false matches.
+        """
+        without_urls = SOURCE_TITLE_URL.sub(" ", value)
+        collapsed = " ".join(without_urls.split())
+        return collapsed[:SOURCE_TITLE_MAX_CHARACTERS] or value[:SOURCE_TITLE_MAX_CHARACTERS]
 
 
 class DigestItem(ItemAnalysis):
