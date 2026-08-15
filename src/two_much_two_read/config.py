@@ -89,19 +89,6 @@ class Sources(BaseModel):
 
     sources: list[SourceConfig]
 
-    @model_validator(mode="before")
-    @classmethod
-    def default_legacy_gmail_type(cls, value: Any) -> Any:
-        if not isinstance(value, dict) or not isinstance(value.get("sources"), list):
-            return value
-        sources: list[object] = []
-        for source in value["sources"]:
-            if isinstance(source, dict) and "type" not in source and "gmail_query" in source:
-                sources.append({"type": "gmail", **source})
-            else:
-                sources.append(source)
-        return {**value, "sources": sources}
-
     @model_validator(mode="after")
     def unique_ids(self) -> Sources:
         ids = [source.id for source in self.sources]
@@ -146,6 +133,7 @@ class Settings(BaseSettings):
     ollama_timeout_seconds: float = 300
     ollama_keep_alive: str = "10m"
     reranker_model: str = "Qwen/Qwen3-Reranker-0.6B"
+    reranker_device: str = "cpu"
     discord_delivery_mode: Literal["webhook", "bot", "both"] = "webhook"
     discord_webhook_url: str = ""
     discord_username: str = "2much2read"
@@ -155,7 +143,10 @@ class Settings(BaseSettings):
     digest_timezone: str = "America/Montreal"
     digest_max_items: int = Field(default=5, ge=1)
     digest_top_items: int = Field(default=5, ge=0)
+    digest_secondary_items: int = Field(default=10, ge=0)
     digest_review_candidate_limit: int = Field(default=20, ge=1)
+    digest_rerank_candidate_limit: int = Field(default=100, ge=1)
+    digest_security_candidate_slots: int = Field(default=7, ge=0)
 
     def __init__(self, **data: Any) -> None:
         super().__init__(_env_file=env_file("2much2read"), **data)

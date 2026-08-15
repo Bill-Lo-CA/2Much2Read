@@ -27,6 +27,8 @@ from .storage import Database
 from .url_enrichment import UrlEnricher, resolve_match
 
 StatusReporter = Callable[[str], None]
+# The category whose reviewer slots are reserved by DIGEST_SECURITY_CANDIDATE_SLOTS.
+RESERVED_CATEGORY = "SECURITY"
 
 
 def _ignore_status(_: str) -> None:
@@ -37,9 +39,9 @@ def _email_content(value: ExtractedEmailContent | str) -> ExtractedEmailContent:
     return value if isinstance(value, ExtractedEmailContent) else ExtractedEmailContent(analysis_text=value)
 
 
-def _items(database: Database, document_ids: list[int], maximum: int, source_names: dict[str, str]) -> list[DigestEntry]:
+def _items(database: Database, document_ids: list[int], limit: int, source_names: dict[str, str]) -> list[DigestEntry]:
     result: list[DigestEntry] = []
-    for row in database.items_for_documents(document_ids, maximum * 5):
+    for row in database.items_for_documents(document_ids, limit):
         item = DigestItem.model_validate(
             {
                 "title": row["title"],
@@ -70,15 +72,49 @@ def _items(database: Database, document_ids: list[int], maximum: int, source_nam
     return result
 
 
-def _ranked_entries(settings: Settings, reranker: RelevanceReranker, entries: list[DigestEntry]) -> list[DigestEntry]:
+def _ranked_entries(reranker: RelevanceReranker, entries: list[DigestEntry]) -> list[DigestEntry]:
     if not entries:
         return []
-    return reranker.rank(dedupe_entries(entries))[: settings.digest_review_candidate_limit]
+    return reranker.rank(dedupe_entries(entries))
+
+
+def _save_reranker_scores(
+    database: Database, ranked: list[DigestEntry], reranker: RelevanceReranker, status: StatusReporter
+) -> None:
+    scores = [
+        (entry.candidate_id, entry.reranker_score)
+        for entry in ranked
+        if entry.candidate_id is not None and entry.reranker_score is not None
+    ]
+    if not scores:
+        return
+    saved = database.save_reranker_scores(scores, reranker.model_name, reranker.prompt_version)
+    if saved != len(scores):
+        status(f"Warning: recorded {saved} of {len(scores)} reranker scores")
+
+
+def _review_candidates(ranked: list[DigestEntry], limit: int, security_slots: int) -> list[DigestEntry]:
+    """Reserve reviewer slots for security so one global ranking can serve two domains.
+
+    The reranker scores every candidate on a single scale and AI releases consistently outscore
+    vulnerability disclosures: across 100 real candidates only 3 of the 23 SECURITY items reached
+    the top 20, leaving named CVEs at ranks 35 and 43. Steering the reranker prompt toward
+    vulnerabilities lifts those but pushes AI and tooling stories out by as much, so the split
+    happens here instead, on the ranking that discriminates best overall. Either group takes the
+    other's unused slots, and the kept entries stay in reranker order.
+    """
+    security = [index for index, entry in enumerate(ranked) if entry.item.category == RESERVED_CATEGORY]
+    general = [index for index, entry in enumerate(ranked) if entry.item.category != RESERVED_CATEGORY]
+    security_kept = min(security_slots, limit, len(security))
+    general_kept = min(limit - security_kept, len(general))
+    security_kept = min(len(security), limit - general_kept)
+    return [ranked[index] for index in sorted(security[:security_kept] + general[:general_kept])]
 
 
 def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[DigestEntry]) -> list[DigestEntry]:
     if not ranked:
         return []
+    ranked = _review_candidates(ranked, settings.digest_review_candidate_limit, settings.digest_security_candidate_slots)
     candidates: list[dict[str, object]] = []
     for entry in ranked:
         assert entry.candidate_id is not None
@@ -93,15 +129,24 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
             }
         )
     try:
-        review = ollama.review_digest(candidates, settings.digest_max_items)
+        # The context fitter trims from the tail, where the reserved candidates sit by design.
+        review = ollama.review_digest(
+            candidates, settings.digest_max_items, RESERVED_CATEGORY, settings.digest_security_candidate_slots
+        )
     finally:
         _unload_model(ollama, settings.ollama_review_model)
     scores = {selection.candidate_id: selection.score for selection in review.selected}
-    return [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]
+    selected = [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]
+    # The reviewer only picks the headline items, but the candidates behind them were already
+    # extracted, ranked, and paid for. They carry no review score, so they sort below every
+    # selected item and render as the digest's secondary mentions.
+    unselected = [entry for entry in ranked if entry.candidate_id not in scores]
+    return selected + unselected[: settings.digest_secondary_items]
 
 
-def _unload_model(ollama: OllamaClient, model: str) -> None:
-    ollama.unload(model)
+def _unload_model(ollama: OllamaClient, model: str, status: StatusReporter = _ignore_status) -> None:
+    if not ollama.unload(model):
+        status(f"Warning: {model} did not unload and may still hold memory")
 
 
 def _enabled_sources(settings: Settings, source_id: str | None) -> list[GmailSource | HackerNewsSource]:
@@ -484,13 +529,14 @@ def run_pipeline(
                     processed_document_ids.extend(source_ids)
                     processed_documents.extend(source_documents)
                 source_names_by_id = {source.id: source.name for source in sources}
-                entries = _items(database, processed_document_ids, settings.digest_review_candidate_limit, source_names_by_id)
+                entries = _items(database, processed_document_ids, settings.digest_rerank_candidate_limit, source_names_by_id)
             finally:
-                _unload_model(ollama, settings.ollama_model)
+                _unload_model(ollama, settings.ollama_model, status)
 
-            reranker = RelevanceReranker(settings.reranker_model)
+            reranker = RelevanceReranker(settings.reranker_model, settings.reranker_device)
             try:
-                ranked_entries = _ranked_entries(settings, reranker, entries)
+                ranked_entries = _ranked_entries(reranker, entries)
+                _save_reranker_scores(database, ranked_entries, reranker, status)
             finally:
                 reranker.close()
 

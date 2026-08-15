@@ -1,11 +1,12 @@
 from two_much_two_read.article_fetcher import ResolvedUrl
-from two_much_two_read.schemas import ArticleAnalysis, LinkCandidate, NewsletterItemAnalysis
+from two_much_two_read.schemas import LinkCandidate, NewsletterItemAnalysis
 from two_much_two_read.url_enrichment import UrlEnricher
 
 
-def analysis(title: str = "Useful article") -> NewsletterItemAnalysis:
+def analysis(title: str = "Useful article", source_title: str | None = None) -> NewsletterItemAnalysis:
     return NewsletterItemAnalysis(
         title=title,
+        source_title=source_title if source_title is not None else title,
         category="OTHER",
         summary_zh_tw="摘要",
         why_it_matters_zh_tw="原因",
@@ -76,19 +77,22 @@ def test_does_not_assign_a_longer_anchor_to_a_shorter_title() -> None:
     assert [match.method for match in matches] == ["unmatched", "exact_anchor"]
 
 
-def test_accepts_analysis_from_another_source_type() -> None:
-    item = ArticleAnalysis(
-        title="Article from another source",
-        category="OTHER",
-        summary_zh_tw="摘要",
-        why_it_matters_zh_tw="原因",
-        importance=5,
-        confidence=0.8,
-    )
+def test_a_translated_title_still_matches_through_the_verbatim_headline() -> None:
+    """The digest title is translated, so only the newsletter's own wording can match the anchor."""
+    item = analysis(title="有用的文章", source_title="Useful article")
 
-    match = UrlEnricher().match([item], [candidate("link-0001", item.title, "https://example.com/article")])[0]
+    match = UrlEnricher().match([item], [candidate("link-0001", "Useful article", "https://example.com/article")])[0]
 
-    assert match.method == "exact_anchor"
+    assert (match.method, match.confidence) == ("exact_anchor", 1.0)
+
+
+def test_a_translated_title_alone_matches_nothing() -> None:
+    """Why the verbatim headline exists: a translated title shares no tokens with the anchor."""
+    item = analysis(title="有用的文章", source_title="有用的文章")
+
+    match = UrlEnricher().match([item], [candidate("link-0001", "Useful article", "https://example.com/article")])[0]
+
+    assert match.method == "unmatched"
 
 
 def test_does_not_display_an_unresolved_tracking_url() -> None:

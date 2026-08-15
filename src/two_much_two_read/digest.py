@@ -129,6 +129,7 @@ class DigestEntry:
     candidate_id: int | None = None
     source_id: str | None = None
     source_name: str | None = None
+    reranker_score: float | None = None
     review_score: int | None = None
 
 
@@ -169,9 +170,12 @@ def _entry_key(entry: DigestEntry) -> str:
     return normalized_title(entry.item.title)
 
 
-def _entry_rank(entry: DigestEntry) -> tuple[int, int, float, int, int, float]:
+def _entry_rank(entry: DigestEntry) -> tuple[int, float, int, float, int, int, float]:
     return (
         entry.review_score if entry.review_score is not None else -1,
+        # Only the headline items carry a review score, so the reranker decides the order of the
+        # secondary mentions, which is the order it already ranked them in.
+        entry.reranker_score if entry.reranker_score is not None else -1.0,
         entry.item.importance,
         entry.item.confidence,
         entry.hn_score if entry.hn_score is not None else -1,
@@ -264,14 +268,29 @@ def render_digest(
             lines.append(f"   {labels['article']}：<{item.source_url}>")
         return "\n".join(lines)
 
-    top = eligible[:top_items]
-    rest = eligible[top_items:]
+    def mention(value: DigestEntry) -> str:
+        """The secondary section is for scanning, so each item is one line without its summary."""
+        item = value.item
+        parts = [f"• {sanitize_discord_text(item.title)}"]
+        if value.source_name:
+            parts.append(sanitize_discord_text(value.source_name))
+        url = value.article_url or (str(item.source_url) if item.source_url else None) or value.discussion_url
+        if url:
+            parts.append(f"<{url}>")
+        return " · ".join(parts)
+
+    # Only what the reviewer selected may hold a headline slot. Entries without a review score are
+    # the candidates it passed over, so filling spare headline slots from them would republish
+    # exactly what the final quality filter rejected. Rendering a plain item list keeps every slot.
+    scored = [value for value in eligible if value.review_score is not None]
+    top = (scored or eligible)[:top_items]
+    rest = eligible[len(top) :]
     sections = [
         f"📰 {safe_topic} 2much2read — {when:%Y-%m-%d}",
         labels["top"] + "\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)),
     ]
     if rest:
-        sections.append(labels["rest"] + "\n" + "\n\n".join(entry(item, "•") for item in rest))
+        sections.append(labels["rest"] + "\n" + "\n".join(mention(item) for item in rest))
     sections.append(
         f"{labels['processed']}\n{labels['topic']}{safe_topic}\n{labels['sources']}{safe_source_names} · "
         f"{len(eligible)} {labels['valid']}"

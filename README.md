@@ -42,7 +42,9 @@ The environment files may contain duplicate variable names because each command 
 
 On the first install after this layout change, each installer checks that its service is inactive, then moves its existing root-level token and SQLite database, `-wal`, `-shm`, `-journal`, and lock into the matching app directory. Environment/YAML/client-secret files remain at the shared config root. It never overwrites a new token or runtime file: if an old and new copy both exist, installation stops with both paths named. Stop the service, resolve the conflict, and rerun the installer. Timer prompts and their disabled-by-default behavior are unchanged.
 
-Until that installer migration runs, manual commands continue using an existing root-level token, database, and lock rather than creating empty state at the new paths. If both layouts exist, startup fails with `RUNTIME_PATH_MIGRATION_CONFLICT` instead of guessing which state is authoritative.
+The runtime itself only ever resolves the app-scoped paths. A token, database, or lock left at the
+pre-scoping root-level location is ignored, so run the installer to move it before the first run;
+otherwise the app starts against empty state at the new path while the old files sit unused.
 
 The systemd templates allow writes only to the matching app config and data directories. If an environment-file path override such as `DATABASE_PATH`, `*_TOKEN_PATH`, or `*_CONFIG_PATH` points elsewhere, manual CLI runs may work but the sandboxed service will not; keep overrides under those app directories or add a reviewed user-unit drop-in with the required `ReadWritePaths` exception.
 
@@ -92,7 +94,12 @@ message to each configured destination.
 
 ## Destructive reset
 
-Existing 2Much2Read, newsletter-digest, and 2busy1miss runtime data is unsupported and is not migrated. Before installing this version, run `sh scripts/legacy_cleanup.sh`; it permanently deletes all listed configuration, OAuth credentials, tokens, and SQLite data. It removes exactly these legacy locations: `~/.config/2Much2Read`, `~/.config/2much2read`, `~/.config/newsletter-digest`, `~/.config/2busy1miss`, their matching `~/.local/share/` directories, the checkout `.env`, and the `newsletter-digest`, `2much2read`, and `2busy1miss` user unit files. The new `2much2read-runtime` roots and `*-runtime` units are not cleanup targets, so the script is safe to run again.
+Runtime state lives entirely under `~/.config/2much2read-runtime` and
+`~/.local/share/2much2read-runtime`. To start clean, stop the timers, then delete the app
+directory under each root; the next run recreates empty state. Deleting a database discards
+digest history but not Gmail processing state, which is tracked by the `NewsletterBot/Processed`
+and `NewsletterBot/Failed` labels in Gmail, so already-processed mail is not re-analyzed unless
+you pass `--force`.
 
 ## 2much2read
 
@@ -100,7 +107,7 @@ Requirements: Gmail API desktop OAuth credentials, a Discord webhook or bot, and
 
 ```bash
 uv sync --all-groups
-ollama pull qwen3:4b
+ollama pull llama3.2:3b
 ollama pull qwen3:8b
 sh scripts/install-2much2read-user-service.sh \
   --gmail-client-secret ~/Downloads/gmail-client.json
@@ -124,9 +131,48 @@ installer to render the systemd timer. Manual CLI runs are unchanged.
 Each run uses `OLLAMA_MODEL` to extract candidates, `RERANKER_MODEL` to rank them,
 then `OLLAMA_REVIEW_MODEL` for final selection. The extractor is released before
 the reranker loads, and the reranker is released before the reviewer starts, so the
-three models never share memory. `DIGEST_REVIEW_CANDIDATE_LIMIT` bounds reviewer input and
-`DIGEST_MAX_ITEMS` is the final delivered-item limit. Each item includes its newsletter
-source in the Discord digest.
+three models never share memory. `RERANKER_DEVICE` defaults to `cpu`, which keeps the
+reranker off the GPU entirely; set it to `cuda` only when the GPU has room to spare
+alongside the reviewer. `DIGEST_RERANK_CANDIDATE_LIMIT` bounds how many candidates reach the
+reranker, `DIGEST_REVIEW_CANDIDATE_LIMIT` bounds reviewer input, and `DIGEST_MAX_ITEMS` is the
+final delivered-item limit. Each item includes its newsletter source in the Discord digest.
+
+The digest has two sections. `DIGEST_MAX_ITEMS` headline items carry the full summary, reason, and
+links, and `DIGEST_SECONDARY_ITEMS` (default 10) candidates the reviewer passed over follow as
+one-line mentions under "其他值得注意", ordered by reranker score. Those candidates were already
+extracted and ranked, so listing them costs nothing beyond the message length; set the value to 0
+for a headline-only digest. `DIGEST_TOP_ITEMS` controls how many entries the renderer puts in the
+headline section, so keep it equal to `DIGEST_MAX_ITEMS` unless you want mentions promoted into it.
+
+Reviewer input is split by category rather than taken as one global top-N.
+`DIGEST_SECURITY_CANDIDATE_SLOTS` (default 7 of the 20) reserves slots for `SECURITY` items; the
+rest go to the remaining categories. The reranker ranks AI releases above vulnerability
+disclosures on a single scale — in one 100-candidate run only 3 of 23 SECURITY items reached a
+global top 20, with named CVEs at ranks 35 and 43 — and prompt wording that lifts them demotes AI
+and tooling stories by as much. Splitting the slots keeps both. Either group takes the other's
+unused slots, so a quiet security day costs nothing.
+
+Every reranked candidate is recorded in the append-only `reranker_scores` table with the model,
+prompt version, and timestamp. Scores are stored exactly as the model produced them rather than
+normalized, and the table carries no foreign key to `items` so the history survives reprocessing,
+which deletes and re-inserts a document's item rows. Because SQLite reuses deleted row ids, join
+audit rows on `scored_at` and `normalized_title` rather than on `item_id` alone.
+
+The reviewer prompt is bounded against `OLLAMA_NUM_CTX` before it is sent. Ollama truncates an
+oversized prompt from the head without erroring, which would silently drop the system prompt while
+keeping the untrusted candidate text, so excess candidates are trimmed from the tail instead and
+the injection guard is repeated after the candidate block.
+
+On an 8 GB GPU the reviewer is the binding constraint: `qwen3:8b` at `OLLAMA_NUM_CTX=16384`
+needs roughly 8 GB for Q4 weights plus an f16 KV cache, so Ollama offloads layers to the
+CPU. Quantizing the KV cache on the Ollama server halves the cache cost:
+
+```bash
+OLLAMA_FLASH_ATTENTION=1 OLLAMA_KV_CACHE_TYPE=q8_0 ollama serve
+```
+
+KV quantization silently falls back to f16 on unsupported architectures, so confirm the
+reported size with `ollama ps` rather than assuming the setting took effect.
 
 Useful commands:
 

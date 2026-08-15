@@ -33,7 +33,7 @@ from two_read_runtime.discord import DiscordDeliveryError, DiscordDestination
 
 def write_sources(path: Path, *, enabled: bool = True) -> None:
     path.write_text(
-        f"sources:\n  - id: alphasignal\n    name: AlphaSignal\n    enabled: {str(enabled).lower()}\n"
+        f"sources:\n  - type: gmail\n    id: alphasignal\n    name: AlphaSignal\n    enabled: {str(enabled).lower()}\n"
         "    gmail_query: 'from:alphasignal.ai'\n",
         encoding="utf-8",
     )
@@ -92,7 +92,7 @@ class StubOllamaClient:
 @pytest.fixture(autouse=True)
 def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
     class FakeReranker:
-        def __init__(self, _: str) -> None:
+        def __init__(self, _model: str, _device: str) -> None:
             pass
 
         def rank(self, entries):
@@ -154,6 +154,7 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, mon
             items=[
                 NewsletterItemAnalysis(
                     title="Useful article",
+                    source_title="Useful article",
                     category="OTHER",
                     summary_zh_tw="摘要",
                     why_it_matters_zh_tw="原因",
@@ -480,7 +481,7 @@ def test_hacker_news_force_retries_only_failed_documents(tmp_path: Path, monkeyp
 def test_mixed_gmail_and_hackernews_sources_run_together(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sources_path = tmp_path / "sources.yaml"
     sources_path.write_text(
-        "sources:\n  - id: alphasignal\n    name: AlphaSignal\n    gmail_query: from:alphasignal.ai\n"
+        "sources:\n  - type: gmail\n    id: alphasignal\n    name: AlphaSignal\n    gmail_query: from:alphasignal.ai\n"
         "  - type: hackernews\n    id: hn-best\n    name: Hacker News Best\n",
         encoding="utf-8",
     )
@@ -705,7 +706,8 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
             pass
 
     class FakeReranker:
-        def __init__(self, _: str) -> None:
+        def __init__(self, _model: str, device: str) -> None:
+            assert device == "cpu"
             events.append("reranker:load")
 
         def close(self) -> None:
@@ -1211,8 +1213,8 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
     sources_path = tmp_path / "sources.yaml"
     sources_path.write_text(
         "sources:\n"
-        "  - id: first\n    name: First\n    gmail_query: from:first@example.com\n"
-        "  - id: second\n    name: Second\n    gmail_query: from:second@example.com\n",
+        "  - type: gmail\n    id: first\n    name: First\n    gmail_query: from:first@example.com\n"
+        "  - type: gmail\n    id: second\n    name: Second\n    gmail_query: from:second@example.com\n",
         encoding="utf-8",
     )
     settings = Settings(
@@ -1297,6 +1299,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
                 items=[
                     {
                         "title": "Good item",
+                        "source_title": "Good item",
                         "category": "AI_MODEL",
                         "summary_zh_tw": "內容",
                         "why_it_matters_zh_tw": "原因",
@@ -1394,6 +1397,7 @@ def test_mime_failure_marks_one_message_failed_and_continues(
         items=[
             {
                 "title": "Good item",
+                "source_title": "Good item",
                 "category": "AI_MODEL",
                 "summary_zh_tw": "內容",
                 "why_it_matters_zh_tw": "原因",
@@ -1462,6 +1466,7 @@ def test_digest_render_failure_leaves_extractions_retryable(tmp_path: Path, monk
         items=[
             {
                 "title": "Item",
+                "source_title": "Item",
                 "category": "AI_MODEL",
                 "summary_zh_tw": "內容",
                 "why_it_matters_zh_tw": "原因",
@@ -1531,6 +1536,7 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
         items=[
             {
                 "title": "Recovered item",
+                "source_title": "Recovered item",
                 "category": "AI_MODEL",
                 "summary_zh_tw": "內容",
                 "why_it_matters_zh_tw": "原因",

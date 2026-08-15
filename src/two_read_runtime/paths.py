@@ -20,22 +20,12 @@ def app_data_dir(application: str) -> Path:
     return data_dir() / application
 
 
-def _app_file(root: Path, application: str, name: str) -> Path:
-    legacy = root / name
-    scoped = root / application / name
-    if os.path.lexists(legacy):
-        if os.path.lexists(scoped):
-            raise ValueError("RUNTIME_PATH_MIGRATION_CONFLICT")
-        return legacy
-    return scoped
-
-
 def app_config_file(application: str, name: str) -> Path:
-    return _app_file(config_dir(), application, name)
+    return app_config_dir(application) / name
 
 
 def app_data_file(application: str, name: str) -> Path:
-    return _app_file(data_dir(), application, name)
+    return app_data_dir(application) / name
 
 
 def env_file(application: str) -> Path:

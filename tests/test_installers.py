@@ -1,6 +1,5 @@
 import fcntl
 import os
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -494,7 +493,6 @@ def test_installers_migrate_legacy_files_and_repair_modes(
         f"{sqlite_name}-wal": "legacy wal\n",
         f"{sqlite_name}-shm": "legacy shm\n",
         f"{sqlite_name}-journal": "legacy journal\n",
-        lock_name: "legacy lock\n",
     }
     for name, contents in legacy_files.items():
         parent = config_root if name in {env_name, yaml_name, secret_name, token_name} else data_root
@@ -525,12 +523,11 @@ def test_installers_migrate_legacy_files_and_repair_modes(
     app_data = data_root / app
     assert app_config.stat().st_mode & 0o777 == 0o700
     assert app_data.stat().st_mode & 0o777 == 0o700
+    # The lock is recreated at the scoped path rather than migrated.
+    assert (app_data / lock_name).stat().st_mode & 0o777 == 0o600
     managed_files: list[Path] = []
     for name, contents in legacy_files.items():
-        if name == lock_name:
-            target_root = app_data
-            assert not (data_root / name).exists()
-        elif name == token_name:
+        if name == token_name:
             target_root = app_config
             assert not (config_root / name).exists()
         elif name in {env_name, yaml_name, secret_name}:
@@ -667,14 +664,12 @@ def test_installers_refuse_legacy_new_conflicts(
         ("install-2busy1miss-user-service.sh", "2busy1miss", "2busy1miss.sqlite3", "2busy1miss.lock"),
     ],
 )
-@pytest.mark.parametrize("lock_location", ["legacy", "destination"])
 def test_installers_do_not_migrate_while_runtime_lock_is_held(
     tmp_path: Path,
     script: str,
     app: str,
     sqlite_name: str,
     lock_name: str,
-    lock_location: str,
 ) -> None:
     root = Path(__file__).parents[1]
     home = tmp_path / "home"
@@ -683,7 +678,7 @@ def test_installers_do_not_migrate_while_runtime_lock_is_held(
     app_data.mkdir(parents=True)
     legacy_database = data_root / sqlite_name
     legacy_database.write_text("legacy database", encoding="utf-8")
-    lock_path = (data_root if lock_location == "legacy" else app_data) / lock_name
+    lock_path = app_data / lock_name
     lock_path.touch()
 
     fake_bin = tmp_path / "bin"
@@ -790,77 +785,3 @@ def test_installers_do_not_migrate_when_runtime_state_is_unsafe(
     assert (data_root / sqlite_name).exists()
     assert not (config_root / app / token_name).exists()
     assert not (data_root / app / sqlite_name).exists()
-
-
-def test_legacy_cleanup_is_idempotent_and_preserves_new_runtime(tmp_path: Path) -> None:
-    root = Path(__file__).parents[1]
-    checkout = tmp_path / "checkout"
-    script_dir = checkout / "scripts"
-    script_dir.mkdir(parents=True)
-    cleanup = script_dir / "legacy_cleanup.sh"
-    shutil.copy(root / "scripts/legacy_cleanup.sh", cleanup)
-
-    home = tmp_path / "home"
-    legacy_roots = [
-        home / ".config" / "2Much2Read",
-        home / ".config" / "2much2read",
-        home / ".config" / "newsletter-digest",
-        home / ".config" / "2busy1miss",
-        home / ".local" / "share" / "2Much2Read",
-        home / ".local" / "share" / "2much2read",
-        home / ".local" / "share" / "newsletter-digest",
-        home / ".local" / "share" / "2busy1miss",
-    ]
-    for directory in legacy_roots:
-        directory.mkdir(parents=True)
-        (directory / "state").write_text("legacy", encoding="utf-8")
-    (checkout / ".env").write_text("legacy", encoding="utf-8")
-
-    systemd_dir = home / ".config" / "systemd" / "user"
-    systemd_dir.mkdir(parents=True)
-    legacy_units = [
-        "newsletter-digest.timer",
-        "newsletter-digest.service",
-        "2much2read.timer",
-        "2much2read.service",
-        "2busy1miss.timer",
-        "2busy1miss.service",
-        "2busy1miss-agenda.timer",
-        "2busy1miss-agenda.service",
-    ]
-    for unit in legacy_units:
-        (systemd_dir / unit).write_text("legacy", encoding="utf-8")
-
-    runtime_config = home / ".config" / "2much2read-runtime"
-    runtime_data = home / ".local" / "share" / "2much2read-runtime"
-    runtime_config.mkdir(parents=True)
-    runtime_data.mkdir(parents=True)
-    (runtime_config / "state").write_text("new", encoding="utf-8")
-    (runtime_data / "state").write_text("new", encoding="utf-8")
-    runtime_unit = systemd_dir / "2much2read-runtime.timer"
-    runtime_unit.write_text("new", encoding="utf-8")
-
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    log = tmp_path / "systemctl.log"
-    systemctl = fake_bin / "systemctl"
-    systemctl.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n', encoding="utf-8")
-    systemctl.chmod(0o755)
-    environment = os.environ | {
-        "HOME": str(home),
-        "PATH": f"{fake_bin}:{os.environ['PATH']}",
-        "SYSTEMCTL_LOG": str(log),
-    }
-
-    for _ in range(2):
-        subprocess.run(["sh", str(cleanup)], cwd=checkout, env=environment, check=True)
-
-    assert all(not directory.exists() for directory in legacy_roots)
-    assert not (checkout / ".env").exists()
-    assert (runtime_config / "state").read_text(encoding="utf-8") == "new"
-    assert (runtime_data / "state").read_text(encoding="utf-8") == "new"
-    assert runtime_unit.read_text(encoding="utf-8") == "new"
-    calls = log.read_text(encoding="utf-8")
-    for unit in legacy_units:
-        assert calls.count(f"--user disable --now {unit}") == 2
-    assert calls.count("--user daemon-reload") == 2

@@ -14,11 +14,12 @@ from two_much_two_read.config import (
 )
 
 
-def test_source_variants_preserve_legacy_gmail_entries(tmp_path: Path) -> None:
+def test_source_variants_are_discriminated_by_type(tmp_path: Path) -> None:
     path = tmp_path / "sources.yaml"
     path.write_text(
         """sources:
-  - id: newsletter
+  - type: gmail
+    id: newsletter
     name: Newsletter
     gmail_query: from:newsletter@example.com
   - type: hackernews
@@ -57,7 +58,8 @@ def test_rejects_mixed_or_invalid_source_variants(tmp_path: Path, source: str) -
 def test_rejects_duplicate_source_ids(tmp_path: Path) -> None:
     config = tmp_path / "sources.yaml"
     config.write_text(
-        "sources:\n  - {id: news, name: One, gmail_query: one}\n  - {id: news, name: Two, gmail_query: two}\n",
+        "sources:\n  - {type: gmail, id: news, name: One, gmail_query: one}\n"
+        "  - {type: gmail, id: news, name: Two, gmail_query: two}\n",
         encoding="utf-8",
     )
     with pytest.raises(ValueError, match="unique"):
@@ -67,7 +69,7 @@ def test_rejects_duplicate_source_ids(tmp_path: Path) -> None:
 def test_rejects_reserved_list_source_id(tmp_path: Path) -> None:
     config = tmp_path / "sources.yaml"
     config.write_text(
-        "sources:\n  - {id: list, name: Reserved, gmail_query: 'label:reserved'}\n",
+        "sources:\n  - {type: gmail, id: list, name: Reserved, gmail_query: 'label:reserved'}\n",
         encoding="utf-8",
     )
 
@@ -79,7 +81,8 @@ def test_accepts_gmail_filter_criteria_dict(tmp_path: Path) -> None:
     config = tmp_path / "sources.yaml"
     config.write_text(
         """sources:
-  - id: news
+  - type: gmail
+    id: news
     name: News
     gmail_query: 'label:"Newsletters/News"'
     gmail_filter:
@@ -98,7 +101,8 @@ def test_rejects_unknown_gmail_filter_criteria(tmp_path: Path) -> None:
     config = tmp_path / "sources.yaml"
     config.write_text(
         """sources:
-  - id: news
+  - type: gmail
+    id: news
     name: News
     gmail_query: news
     gmail_filter:
@@ -115,7 +119,7 @@ def test_rejects_unknown_gmail_filter_criteria(tmp_path: Path) -> None:
 def test_rejects_unknown_source_fields(tmp_path: Path) -> None:
     config = tmp_path / "sources.yaml"
     config.write_text(
-        "sources:\n  - {id: news, name: News, gmail_query: news, typo: true}\n",
+        "sources:\n  - {type: gmail, id: news, name: News, gmail_query: news, typo: true}\n",
         encoding="utf-8",
     )
 
@@ -161,14 +165,13 @@ def test_default_runtime_paths_are_application_scoped(tmp_path: Path, monkeypatc
     assert settings.lock_path == home / ".local/share/2much2read-runtime/2much2read/2much2read.lock"
 
 
-def test_default_runtime_paths_keep_legacy_files_until_installer_migration(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_files_at_pre_scoping_locations_are_ignored(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     home = tmp_path / "home"
     config_root = home / ".config/2much2read-runtime"
     data_root = home / ".local/share/2much2read-runtime"
     config_root.mkdir(parents=True)
     data_root.mkdir(parents=True)
+    # Files at the pre-scoping locations must no longer be picked up.
     for path in (
         config_root / "gmail-token.json",
         data_root / "2much2read.sqlite3",
@@ -181,22 +184,9 @@ def test_default_runtime_paths_keep_legacy_files_until_installer_migration(
 
     settings = Settings()
 
-    assert settings.gmail_token_path == config_root / "gmail-token.json"
-    assert settings.database_path == data_root / "2much2read.sqlite3"
-    assert settings.lock_path == data_root / "2much2read.lock"
-
-
-def test_default_runtime_paths_reject_migration_conflicts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    home = tmp_path / "home"
-    config_root = home / ".config/2much2read-runtime"
-    (config_root / "2much2read").mkdir(parents=True)
-    (config_root / "gmail-token.json").touch()
-    (config_root / "2much2read/gmail-token.json").touch()
-    monkeypatch.setenv("HOME", str(home))
-    monkeypatch.delenv("GMAIL_TOKEN_PATH", raising=False)
-
-    with pytest.raises(ValueError, match="RUNTIME_PATH_MIGRATION_CONFLICT"):
-        Settings()
+    assert settings.gmail_token_path == config_root / "2much2read/gmail-token.json"
+    assert settings.database_path == data_root / "2much2read/2much2read.sqlite3"
+    assert settings.lock_path == data_root / "2much2read/2much2read.lock"
 
 
 def test_bot_delivery_settings_require_a_numeric_channel() -> None:
@@ -214,7 +204,9 @@ def test_subscription_file_update_restores_both_files_when_second_replace_fails(
 ) -> None:
     sources_path = tmp_path / "sources.yaml"
     excluded_path = tmp_path / "excluded-subscriptions.yaml"
-    original_sources = "sources:\n  - id: existing\n    name: Existing\n    gmail_query: from:existing@example.com\n"
+    original_sources = (
+        "sources:\n  - type: gmail\n    id: existing\n    name: Existing\n    gmail_query: from:existing@example.com\n"
+    )
     original_excluded = (
         "excluded_subscriptions:\n  - key: existing\n    id: existing\n    name: Existing\n    sender: existing@example.com\n"
     )

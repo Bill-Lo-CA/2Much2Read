@@ -34,6 +34,7 @@ def extraction(title: str = "Title") -> EmailExtraction:
         items=[
             NewsletterItemAnalysis(
                 title=title,
+                source_title=title,
                 category="OTHER",
                 summary_zh_tw="摘要",
                 why_it_matters_zh_tw="原因",
@@ -43,6 +44,58 @@ def extraction(title: str = "Title") -> EmailExtraction:
             )
         ],
     )
+
+
+def stored_item_id(database: Database, gmail_id: str, title: str = "Title") -> tuple[int, int]:
+    document_id = discover(database, gmail_id)
+    assert document_id is not None
+    database.store_extraction(document_id, extraction(title))
+    item_id = int(str(database.items_for_documents([document_id], 10)[0]["id"]))
+    return document_id, item_id
+
+
+def test_reranker_scores_are_append_only_and_survive_item_replacement(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    document_id, item_id = stored_item_id(database, "gmail-1")
+
+    assert database.save_reranker_scores([(item_id, 0.42)], "Qwen/test", "abc123") == 1
+    database.store_extraction(document_id, extraction("Replaced"), replace=True)
+
+    rows = database.connection.execute(
+        "SELECT item_id,document_id,normalized_title,score,model,prompt_version FROM reranker_scores"
+    ).fetchall()
+    assert [tuple(row) for row in rows] == [(item_id, document_id, "title", 0.42, "Qwen/test", "abc123")]
+    # SQLite reuses the deleted rowid, so item_id alone can point at a different item after a
+    # reprocess. The denormalized title is what keeps the audit row attributable to what was scored.
+    replaced = database.items_for_documents([document_id], 10)[0]
+    assert replaced["id"] == item_id
+    assert replaced["normalized_title"] == "replaced"
+    database.close()
+
+
+def test_reranker_scores_accumulate_across_runs(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    _, item_id = stored_item_id(database, "gmail-1")
+
+    database.save_reranker_scores([(item_id, 0.1)], "Qwen/test", "v1")
+    database.save_reranker_scores([(item_id, 0.9)], "Qwen/test", "v2")
+
+    rows = database.connection.execute("SELECT score,prompt_version FROM reranker_scores ORDER BY id").fetchall()
+    assert [tuple(row) for row in rows] == [(0.1, "v1"), (0.9, "v2")]
+    database.close()
+
+
+def test_reranker_scores_report_unwritten_rows_and_skip_non_finite(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    _, item_id = stored_item_id(database, "gmail-1")
+
+    assert database.save_reranker_scores([(item_id, 0.5), (999_999, 0.6)], "Qwen/test", "v1") == 1
+    assert database.save_reranker_scores([(item_id, float("nan")), (item_id, float("inf"))], "Qwen/test", "v1") == 0
+    assert database.save_reranker_scores([], "Qwen/test", "v1") == 0
+
+    scores = database.connection.execute("SELECT score FROM reranker_scores").fetchall()
+    assert [row["score"] for row in scores] == [0.5]
+    database.close()
 
 
 def test_document_and_digest_idempotency(tmp_path: Path) -> None:
@@ -227,7 +280,7 @@ def test_v2_schema_upgrades_without_losing_documents(tmp_path: Path) -> None:
 
     upgraded = Database(path)
 
-    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 8
+    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 9
     assert upgraded.connection.execute("SELECT gmail_message_id FROM gmail_document_state").fetchone()[0] == "gmail-1"
     assert upgraded.connection.execute("SELECT 1 FROM sqlite_master WHERE name='hackernews_document_state'").fetchone()[0] == 1
     upgraded.close()
@@ -275,7 +328,7 @@ def test_v3_hackernews_state_upgrades_without_losing_metadata(tmp_path: Path) ->
 
     row = upgraded.connection.execute("SELECT hn_item_id,requested_url,fetch_status FROM hackernews_document_state").fetchone()
     assert tuple(row) == (123, "https://example.com", "not_requested")
-    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8
+    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
     upgraded.close()
 
 
@@ -297,7 +350,7 @@ def test_v6_schema_adds_parent_checkpoint_destination(tmp_path: Path) -> None:
     ).fetchone()
     assert tuple(row) == ('["message"]', "webhook")
     assert "retired_at" in {column["name"] for column in upgraded.connection.execute("PRAGMA table_info(digest_deliveries)")}
-    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8
+    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
     upgraded.close()
 
 
@@ -359,6 +412,7 @@ def test_backup_and_reset(tmp_path: Path) -> None:
         "gmail_document_state": 0,
         "hackernews_document_state": 0,
         "items": 0,
+        "reranker_scores": 0,
         "digest_deliveries": 0,
         "digests": 0,
         "runs": 0,

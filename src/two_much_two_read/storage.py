@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import os
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Iterator, Sequence
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -17,7 +18,16 @@ from two_read_runtime.permissions import prepare_private_file, repair_sqlite_fil
 from .digest import canonical_url, normalized_title
 from .schemas import DigestItem, EmailExtraction, ItemAnalysis, ResolvedContent, SourceDocument
 
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
+# Deliberately carries no foreign key to items: store_items(replace=True) deletes and re-inserts
+# a document's items on every reprocess, and an audit log has to outlive the rows it describes.
+# document_id and normalized_title keep a scored row traceable after its item id is gone.
+RERANKER_SCORES_SCHEMA = """CREATE TABLE IF NOT EXISTS reranker_scores(
+  id INTEGER PRIMARY KEY, item_id INTEGER NOT NULL, document_id INTEGER NOT NULL, normalized_title TEXT NOT NULL,
+  score REAL NOT NULL, model TEXT NOT NULL, prompt_version TEXT NOT NULL, scored_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS reranker_scores_item ON reranker_scores(item_id);
+CREATE INDEX IF NOT EXISTS reranker_scores_scored_at ON reranker_scores(scored_at);"""
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS documents(
@@ -75,6 +85,7 @@ CREATE TABLE IF NOT EXISTS runs(
   discovered_count INTEGER NOT NULL DEFAULT 0, processed_count INTEGER NOT NULL DEFAULT 0,
   failed_count INTEGER NOT NULL DEFAULT 0, delivered_digest_count INTEGER NOT NULL DEFAULT 0, error_summary TEXT
 );
+{RERANKER_SCORES_SCHEMA}
 INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES({SCHEMA_VERSION}, datetime('now'));
 """
 
@@ -138,6 +149,9 @@ class Database:
             if version == 7:
                 self._migrate_v7_to_v8()
                 version = 8
+            if version == 8:
+                self._migrate_v8_to_v9()
+                version = 9
             if version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
                 raise DatabaseSchemaResetRequiredError(
                     f"DATABASE_SCHEMA_RESET_REQUIRED: back up {path} and remove it before rerunning 2much2read"
@@ -226,6 +240,11 @@ class Database:
             if "retired_at" not in columns:
                 connection.execute("ALTER TABLE digest_deliveries ADD COLUMN retired_at TEXT")
             connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(8, datetime('now'))")
+
+    def _migrate_v8_to_v9(self) -> None:
+        with self.transaction() as connection:
+            connection.executescript(RERANKER_SCORES_SCHEMA)
+            connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(9, datetime('now'))")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -592,6 +611,36 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def save_reranker_scores(
+        self,
+        scores: Sequence[tuple[int, float]],
+        model: str,
+        prompt_version: str,
+        scored_at: datetime | None = None,
+    ) -> int:
+        """Append reranker scores and return how many rows were written.
+
+        Scores are stored exactly as the model produced them; normalizing here would bake in an
+        activation choice the audit trail cannot later distinguish from the model's own output.
+        A caller that gets back fewer rows than it supplied lost candidates to a concurrent
+        reprocess, so it can report the gap rather than trust an unverified write.
+        """
+        if not scores:
+            return 0
+        timestamp = (scored_at or datetime.now(UTC)).isoformat()
+        saved = 0
+        with self.transaction() as connection:
+            for item_id, score in scores:
+                if not math.isfinite(score):
+                    continue
+                cursor = connection.execute(
+                    """INSERT INTO reranker_scores(item_id,document_id,normalized_title,score,model,prompt_version,scored_at)
+                    SELECT id,document_id,normalized_title,?,?,?,? FROM items WHERE id=?""",
+                    (float(score), model, prompt_version, timestamp, int(item_id)),
+                )
+                saved += cursor.rowcount
+        return saved
+
     def save_digest(
         self,
         digest_key: str,
@@ -816,6 +865,7 @@ class Database:
                 "gmail_document_state",
                 "hackernews_document_state",
                 "items",
+                "reranker_scores",
                 "digest_deliveries",
                 "digests",
                 "runs",
@@ -836,6 +886,10 @@ class Database:
         with self.transaction() as connection:
             for table in (
                 "url_resolution_cache",
+                # No foreign key keeps the audit rows through reprocessing, but a reset must still
+                # clear them: SQLite reuses deleted rowids, so surviving rows would attach an old
+                # score to whichever item later takes its item_id.
+                "reranker_scores",
                 "items",
                 "gmail_document_state",
                 "hackernews_document_state",

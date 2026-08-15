@@ -125,13 +125,12 @@ def test_default_runtime_paths_are_application_scoped(isolated_home: Path, monke
     assert settings.lock_path == isolated_home / ".local/share/2much2read-runtime/2busy1miss/2busy1miss.lock"
 
 
-def test_default_runtime_paths_keep_legacy_files_until_installer_migration(
-    isolated_home: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_files_at_pre_scoping_locations_are_ignored(isolated_home: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     config_root = isolated_home / ".config/2much2read-runtime"
     data_root = isolated_home / ".local/share/2much2read-runtime"
     config_root.mkdir(parents=True)
     data_root.mkdir(parents=True)
+    # Files at the pre-scoping locations must no longer be picked up.
     for path in (
         config_root / "calendar-token.json",
         data_root / "2busy1miss.sqlite3",
@@ -143,9 +142,9 @@ def test_default_runtime_paths_keep_legacy_files_until_installer_migration(
 
     settings = Settings()
 
-    assert settings.google_calendar_token_path == config_root / "calendar-token.json"
-    assert settings.database_path == data_root / "2busy1miss.sqlite3"
-    assert settings.lock_path == data_root / "2busy1miss.lock"
+    assert settings.google_calendar_token_path == config_root / "2busy1miss/calendar-token.json"
+    assert settings.database_path == data_root / "2busy1miss/2busy1miss.sqlite3"
+    assert settings.lock_path == data_root / "2busy1miss/2busy1miss.lock"
 
 
 def test_agenda_schedule_time_requires_a_minute_precision_time() -> None:
