@@ -63,40 +63,6 @@ LABELS = {
         "discussion": "Discussion",
         "source": "Source",
     },
-    "fr": {
-        "summary": "Résumé",
-        "why": "Pourquoi c’est important",
-        "top": "🔥 À la une",
-        "rest": "🧰 Autres éléments à noter",
-        "processed": "📊 Traitement",
-        "topic": "Sujet : ",
-        "sources": "Sources : ",
-        "valid": "éléments valides",
-        "hn": "HN",
-        "points": "points",
-        "comments": "commentaires",
-        "metadata": "Contenu : métadonnées uniquement",
-        "article": "Article",
-        "discussion": "Discussion",
-        "source": "Source",
-    },
-    "ja": {
-        "summary": "要約",
-        "why": "重要な理由",
-        "top": "🔥 今日の注目",
-        "rest": "🧰 その他の注目",
-        "processed": "📊 処理結果",
-        "topic": "トピック：",
-        "sources": "情報源：",
-        "valid": "件の有効項目",
-        "hn": "HN",
-        "points": "ポイント",
-        "comments": "件のコメント",
-        "metadata": "内容：メタデータのみ",
-        "article": "記事",
-        "discussion": "議論",
-        "source": "出典",
-    },
 }
 NEUTRAL_LABELS = {
     "summary": "•",
@@ -333,17 +299,38 @@ def merge_related_entries(
     return merged, deduped
 
 
-def _labels(language: str) -> dict[str, str]:
+LANGUAGE_ALIASES = {
+    "zh-tw": "zh-tw",
+    "zh-hant": "zh-tw",
+    "zh-hk": "zh-tw",
+    "zh-mo": "zh-tw",
+    "zh-cn": "zh-cn",
+    "zh-hans": "zh-cn",
+}
+SUPPORTED_DIGEST_LANGUAGES = ("zh-tw", "zh-cn", "en")
+
+
+def digest_language_code(language: str) -> str:
     normalized = language.casefold().replace("_", "-")
-    aliases = {
-        "zh-tw": "zh-tw",
-        "zh-hant": "zh-tw",
-        "zh-hk": "zh-tw",
-        "zh-mo": "zh-tw",
-        "zh-cn": "zh-cn",
-        "zh-hans": "zh-cn",
-    }
-    return LABELS.get(aliases.get(normalized, normalized.split("-", maxsplit=1)[0]), NEUTRAL_LABELS)
+    return LANGUAGE_ALIASES.get(normalized, normalized.split("-", maxsplit=1)[0])
+
+
+def merging_applies(language: str) -> bool:
+    """Whether repeat coverage can be identified at all in this digest language.
+
+    Merging identifies a story by the identity-shaped tokens its title and summary keep in Latin
+    script, which works because a Chinese digest leaves nothing else in Latin script. An English
+    digest leaves ordinary vocabulary there too, and no amount of shaping separates the two: lower
+    case was filtered by shape, a bare acronym by frequency, and Title Case defeats both, since
+    "OpenAI Launches New AI Model for Coding" and the same sentence about Search then share five
+    accepted tokens and score 0.714. Identifying stories across an English digest needs embeddings
+    or entity recognition, not another pattern, so merging stays off until that exists.
+    """
+    return digest_language_code(language) in {"zh-tw", "zh-cn"}
+
+
+def _labels(language: str) -> dict[str, str]:
+    return LABELS.get(digest_language_code(language), NEUTRAL_LABELS)
 
 
 def render_digest(

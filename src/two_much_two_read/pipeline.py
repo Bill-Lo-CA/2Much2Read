@@ -16,7 +16,14 @@ from .article_extractor import ArticleExtractionError, extract_article
 from .article_fetcher import ArticleFetcher, ArticleFetchError, ResolvedUrl, UrlResolutionError
 from .command_models import DeliveryCheckpointResetResult, NewsletterRetryResult, NewsletterRunResult
 from .config import GmailSource, HackerNewsSource, Settings, load_sources
-from .digest import DigestEntry, common_story_tokens, dedupe_entries, merge_related_entries, render_digest
+from .digest import (
+    DigestEntry,
+    common_story_tokens,
+    dedupe_entries,
+    merge_related_entries,
+    merging_applies,
+    render_digest,
+)
 from .gmail import GmailClient, credentials, message_headers
 from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
 from .mime import MAX_ANALYSIS_CHARS, EmailExtractionError, extract_gmail_payload
@@ -148,14 +155,14 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
 
 
 def _merged_entries(
-    entries: list[DigestEntry], threshold: float, secondary_items: int, corpus: list[DigestEntry]
+    entries: list[DigestEntry], threshold: float, secondary_items: int, corpus: list[DigestEntry], language: str
 ) -> list[DigestEntry]:
     # The corpus is every ranked candidate, not the handful that reach merging: repeat coverage of
     # one story inflates its own identifying tokens, so a narrow corpus discards exactly them.
-    common = common_story_tokens(corpus)
     headlines = [entry for entry in entries if entry.review_score is not None]
     mentions = [entry for entry in entries if entry.review_score is None]
-    headlines, mentions = merge_related_entries(headlines, mentions, threshold, common)
+    if merging_applies(language):
+        headlines, mentions = merge_related_entries(headlines, mentions, threshold, common_story_tokens(corpus))
     return headlines + mentions[:secondary_items]
 
 
@@ -621,6 +628,7 @@ def run_pipeline(
                     settings.digest_merge_similarity,
                     settings.digest_secondary_items,
                     ranked_entries,
+                    settings.digest_language,
                 )
                 reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status)
             finally:

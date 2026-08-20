@@ -15,6 +15,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from two_read_runtime.discord import DiscordDestination, configured_destination, configured_destinations
 from two_read_runtime.paths import app_config_file, app_data_file, config_dir, env_file
 
+from .digest import SUPPORTED_DIGEST_LANGUAGES, digest_language_code
+
 
 class GmailFilter(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -149,6 +151,21 @@ class Settings(BaseSettings):
     digest_review_candidate_limit: int = Field(default=20, ge=1)
     digest_rerank_candidate_limit: int = Field(default=100, ge=1)
     digest_security_candidate_slots: int = Field(default=7, ge=0)
+
+    @field_validator("digest_language")
+    @classmethod
+    def supported_digest_language(cls, value: str) -> str:
+        """Only the languages the pipeline has actually been built and measured for.
+
+        Every stage is language-specific in some way - the extractor is told to translate into it,
+        the reviewer explains itself in it, the output is validated against it, and merging only
+        works where prose is not Latin script. Accepting a language none of that was written for
+        produced a digest that merely looked wrong rather than failing.
+        """
+        if digest_language_code(value) not in SUPPORTED_DIGEST_LANGUAGES:
+            supported = ", ".join(SUPPORTED_DIGEST_LANGUAGES)
+            raise ValueError(f"DIGEST_LANGUAGE={value!r} is not supported; use one of: {supported}")
+        return value
 
     def __init__(self, **data: Any) -> None:
         super().__init__(_env_file=env_file("2much2read"), **data)

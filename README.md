@@ -152,8 +152,11 @@ carried none, and a merged Hacker News entry keeps its discussion link, score, a
 The secondary limit is applied after merging, so an absorbed mention frees its slot for the next
 candidate instead of shrinking the section.
 
-Neither the canonical URL nor the title identifies a story across newsletters: each translates a
-headline differently and links to a different page for one event. Matching therefore runs on the
+Merging runs only for a Chinese digest, and `DIGEST_LANGUAGE` accepts only Chinese and English at
+all — every stage is language-specific, and these are the ones the pipeline has been built and
+measured for. Neither the canonical URL nor the title identifies a story across newsletters: each
+translates a headline differently and links to a different page for one event. Matching therefore
+runs on the
 tokens shaped like an identity — capitalised in the source, or carrying a version number — in the
 title and summary, minus the tokens too widespread across the run's candidates to identify anything.
 `DIGEST_MERGE_SIMILARITY` sets the threshold, and two conditions hold regardless: two distinct shared
@@ -172,6 +175,15 @@ appearing in more than 15% of the run's candidates are dropped as well. That fre
 over every ranked candidate rather than the handful that reach merging: repeat coverage of one story
 inflates its own identifying tokens, and over the merge input the same measurement inverts, putting
 `gpt-5.6` at 26.7% against `ai` at 6.7%.
+
+None of that survives an English digest, which is why merging is gated rather than tuned further.
+The whole technique rests on Chinese prose leaving nothing but proper nouns in Latin script. English
+prose leaves ordinary vocabulary there too, and three successive attempts each closed one class and
+exposed the next: shape filtered lowercase words, frequency filtered a bare acronym, and Title Case
+defeats both — "OpenAI Launches New AI Model for Coding" and the same sentence about Search share
+five accepted tokens and score 0.714, with a frequency filter powerless because those words appear
+only in that pair. Identifying stories across an English digest needs embeddings or entity
+recognition, not another pattern.
 
 Headline items are then rewritten from fuller text than the extractor ever saw. The extractor splits
 one email into up to ten items, so each is written from a few lines and lands around 60 characters,

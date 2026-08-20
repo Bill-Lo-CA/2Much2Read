@@ -9,7 +9,9 @@ from two_much_two_read.digest import (
     common_story_tokens,
     dedupe,
     merge_related_entries,
+    merging_applies,
     render_digest,
+    story_similarity,
 )
 from two_much_two_read.schemas import DigestItem
 from two_read_runtime.discord import chunk_text, sanitize_discord_text
@@ -122,8 +124,6 @@ def test_renderer_uses_actual_topic_and_sources(topic: str) -> None:
     ("language", "labels"),
     [
         ("en", ("🔥 Top stories", "Summary：", "Why it matters：", "📊 Processed")),
-        ("fr", ("🔥 À la une", "Résumé：", "Pourquoi c’est important：", "📊 Traitement")),
-        ("ja", ("🔥 今日の注目", "要約：", "重要な理由：", "📊 処理結果")),
         ("zh-CN", ("🔥 今日重点", "摘要：", "为什么重要：", "📊 本次处理")),
     ],
 )
@@ -510,3 +510,19 @@ def test_a_small_corpus_never_treats_a_true_pair_as_common() -> None:
     right = merged_entry("Cerebras 加速 GPT-5.6 Sol", "Cerebras 讓 GPT-5.6 Sol 更快。", "TLDR Dev")
 
     assert common_story_tokens([left, right]) == frozenset()
+
+
+def test_merging_is_off_for_a_latin_script_digest_language() -> None:
+    """Three P1 findings in a row were one gap: the technique needs non-Latin prose to work."""
+    assert merging_applies("zh-TW") and merging_applies("zh-CN")
+    assert not merging_applies("en")
+
+
+def test_title_cased_vocabulary_would_merge_two_unrelated_english_stories() -> None:
+    """Why merging is gated rather than patched again: shape and frequency both accept these."""
+    left = merged_entry(
+        "OpenAI Launches New AI Model for Coding", "OpenAI released a new model for software development.", "TLDR AI"
+    )
+    right = merged_entry("OpenAI Launches New AI Model for Search", "OpenAI released a new model for search ranking.", "TLDR AI")
+
+    assert story_similarity(left, right, common_story_tokens([left, right])) >= 0.25

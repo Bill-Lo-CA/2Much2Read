@@ -16,6 +16,7 @@ from pydantic import BaseModel, ValidationError
 from two_read_runtime.endpoint_policy import validate_ollama_endpoint
 
 from .config import Settings
+from .digest import digest_language_code
 from .schemas import ArticleAnalysis, DigestReview, EmailExtraction, ItemDeepening
 
 SYSTEM_PROMPT = (
@@ -197,16 +198,7 @@ def _language_instruction(language: str) -> str:
 
 
 def _language_code(language: str) -> str:
-    normalized = language.casefold().replace("_", "-")
-    aliases = {
-        "zh-tw": "zh-tw",
-        "zh-hant": "zh-tw",
-        "zh-hk": "zh-tw",
-        "zh-mo": "zh-tw",
-        "zh-cn": "zh-cn",
-        "zh-hans": "zh-cn",
-    }
-    return aliases.get(normalized, normalized.split("-", maxsplit=1)[0])
+    return digest_language_code(language)
 
 
 def _detected_language(text: str, expected: str) -> str:
