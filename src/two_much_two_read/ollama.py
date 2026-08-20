@@ -507,8 +507,11 @@ class OllamaClient:
             f"content_basis={basis}\n"
         )
         system = DEEPEN_SYSTEM_PROMPT.format(language_instruction=_language_instruction(self.digest_language))
+        # Mirrors the prompt below exactly, with the longer of the two truncated_input values, so
+        # the budget is never computed against a shorter string than the one actually sent.
         overhead = _estimated_tokens(system) + _estimated_tokens(
-            f"{header}Schema: {json.dumps(schema)}\n<untrusted_source>\n\n</untrusted_source>\n{_deepen_tail_guard()}"
+            f"{header}truncated_input=true\nSchema: {json.dumps(schema)}\n"
+            f"<untrusted_source>\n\n</untrusted_source>\n{_deepen_tail_guard()}"
         )
         bounded, truncated = fitted_deepening_content(content, overhead, self.num_ctx)
         prompt = (

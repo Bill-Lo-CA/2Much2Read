@@ -201,8 +201,10 @@ def test_an_unexpected_parser_failure_falls_back_instead_of_ending_the_run(monke
     monkeypatch.setattr(pipeline, "extract_article", lambda *_: (_ for _ in ()).throw(TypeError("parser blew up")))
     ollama = FakeOllama()
     messages: list[str] = []
+    # Merged coverage, so falling back still has something fuller than the item's own summary.
+    merged = replace(entry("Headline", "https://example.com/a"), merged_summaries=("甲家的摘要。", "乙家的摘要。"))
 
-    deepened = pipeline._deepened_entries(Settings(), ollama, [entry("Headline", "https://example.com/a")], messages.append)
+    deepened = pipeline._deepened_entries(Settings(), ollama, [merged], messages.append)
 
     assert ollama.calls[0][1] == "newsletters"
     assert deepened[0].item.summary_zh_tw == "重寫後長很多的摘要內容。"
@@ -217,8 +219,12 @@ def test_an_unreachable_page_falls_back_without_a_warning(monkeypatch: pytest.Mo
     fake_fetcher(monkeypatch, None)
     messages: list[str] = []
 
-    pipeline._deepened_entries(Settings(), FakeOllama(), [entry("Headline", "https://example.com/a")], messages.append)
+    merged = replace(entry("Headline", "https://example.com/a"), merged_summaries=("甲家的摘要。", "乙家的摘要。"))
+    ollama = FakeOllama()
 
+    pipeline._deepened_entries(Settings(), ollama, [merged], messages.append)
+
+    assert ollama.calls[0][1] == "newsletters"
     assert [message for message in messages if message.startswith("Warning")] == []
 
 
@@ -245,12 +251,12 @@ def test_a_hacker_news_self_post_is_never_rewritten_from_its_discussion_page(mon
         content_basis="hn_self_post",
     )
 
-    pipeline._deepened_entries(Settings(), ollama, [self_post], lambda _: None)
+    deepened = pipeline._deepened_entries(Settings(), ollama, [self_post], lambda _: None)
 
     assert fetched == []
-    _, basis, content = ollama.calls[0]
-    assert basis == "newsletters"
-    assert "Cerebras hardware" not in content
+    # Nothing fuller than the item's own summary is left, so no rewrite is attempted at all.
+    assert ollama.calls == []
+    assert deepened[0].item.summary_zh_tw == "很短的摘要。"
 
 
 def test_a_hacker_news_story_with_a_real_article_is_still_rewritten(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -266,3 +272,41 @@ def test_a_hacker_news_story_with_a_real_article_is_still_rewritten(monkeypatch:
     pipeline._deepened_entries(Settings(), ollama, [story], lambda _: None)
 
     assert ollama.calls[0][1] == "article"
+
+
+def test_a_headline_with_nothing_fuller_than_its_own_summary_is_not_rewritten(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The rewrite exists to use fuller text; with none, the prompt could only be met by inventing.
+
+    It asks for four to six sentences naming versions and numbers, and the fallback here is the
+    item's own 60-character summary, which supports none of that.
+    """
+    fake_fetcher(monkeypatch, None)
+    ollama = FakeOllama()
+    messages: list[str] = []
+
+    deepened = pipeline._deepened_entries(Settings(), ollama, [entry("Headline", "https://example.com/a")], messages.append)
+
+    assert ollama.calls == []
+    assert deepened[0].item.summary_zh_tw == "很短的摘要。"
+    assert [message for message in messages if message.startswith("Expanding")] == []
+
+
+def test_a_self_post_with_merged_coverage_is_still_rewritten_from_the_newsletters() -> None:
+    """The discussion page stays out of it, but other newsletters on the story are fuller text."""
+    discussion = "https://news.ycombinator.com/item?id=456"
+    ollama = FakeOllama()
+    self_post = replace(
+        entry("Ask HN: 有人在生產環境跑本地模型嗎", discussion),
+        discussion_url=discussion,
+        hn_item_id="456",
+        content_basis="hn_self_post",
+        also_from=("TLDR AI",),
+        merged_summaries=("原始的短摘要。", "另一家寫的較長內容。"),
+    )
+
+    pipeline._deepened_entries(Settings(), ollama, [self_post], lambda _: None)
+
+    sources, basis, content = ollama.calls[0]
+    assert basis == "newsletters"
+    assert sources == "AlphaSignal, TLDR AI"
+    assert "另一家寫的較長內容。" in content

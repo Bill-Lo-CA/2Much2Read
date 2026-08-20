@@ -220,8 +220,16 @@ def _deepened_entries(
         if entry.review_score is None:
             deepened.append(entry)
             continue
-        status(f"Expanding {entry.item.title}")
         content, basis = _headline_source(entry, fetcher, status)
+        if basis == "newsletters" and not entry.merged_summaries:
+            # The fallback is this item's own summary, so there is nothing fuller to rewrite from.
+            # The prompt asks for four to six sentences naming versions and numbers, and a single
+            # 60-character summary supports none of that: the model could only pad or invent, and
+            # the reader would have no way to tell an expanded headline from an inflated one. A
+            # generation is skipped rather than spent turning one sentence into six.
+            deepened.append(entry)
+            continue
+        status(f"Expanding {entry.item.title}")
         sources = ", ".join((entry.source_name or entry.source_id or "Unknown", *entry.also_from))
         try:
             rewrite = ollama.deepen_item(entry.item.title, entry.item.category, sources, basis, content)

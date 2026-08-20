@@ -199,7 +199,10 @@ always rewritten from that fallback: it has no article, so its stored URL is the
 and extract_article cannot tell the author's post from the replies to it. Email bodies are never persisted
 - only their hash and length - so the article is the only route back to fuller text. The rewrite is
 discarded, keeping the original summary, when the fetch or the model fails, when the model reports
-that the source text is not about this item, or when it answers in the wrong language. This adds
+that the source text is not about this item, or when it answers in the wrong language. A headline
+with no article and no merged coverage is skipped outright rather than rewritten: the fallback would
+be its own summary, and a prompt asking for four to six sentences naming versions and numbers could
+only be met from one sentence by padding or inventing. This adds
 roughly one article fetch and one generation per headline. Selection hands the review model over
 still loaded when the rewrite is enabled, and it stays resident across the headlines, so the rewrite
 costs no model load; the extractor and reranker are already released by then, so the three models
