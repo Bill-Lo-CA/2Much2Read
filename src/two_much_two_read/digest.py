@@ -242,6 +242,32 @@ STORY_COMMON_TOKEN_FRACTION = 0.15
 STORY_COMMON_TOKEN_MINIMUM = 3
 
 
+# The whole technique rests on one thing: Chinese prose leaves nothing but proper nouns in Latin
+# script, so a Latin token is an identity. DIGEST_LANGUAGE does not establish that - it is the
+# configuration, not the data. Title translation is instructed but never validated, and in the live
+# database 100 of 476 items carried a title with no CJK at all under DIGEST_LANGUAGE=zh-TW.
+#
+# One Chinese title is enough, because the comparison is an intersection: if either side offers only
+# proper nouns, the shared set holds only proper nouns. Measured over those 476 real items, pairs
+# reaching the default threshold split by title script as 130 Chinese-Chinese, 73 mixed, and 17
+# English-English - and every clear false merge was in the last group, such as "Claude Code sessions
+# can now talk to each other" against "A Claude Code skill was eating 200,000 tokens" at 0.667. The
+# mixed group is the opposite: it is mostly one story that one newsletter translated and another did
+# not, which is the repeat coverage this feature exists to find. So the requirement is one Chinese
+# title, not two - demanding both would discard 73 real pairs to remove 17.
+STORY_CJK = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
+
+# Below this the document-frequency filter cannot fire at all: it needs a token to appear more than
+# max(3, 15% of the corpus) times, so on three or fewer candidates nothing is ever common, and a
+# generic token like "ai" identifies a pair on its own. A corpus that small cannot support the
+# measurement the filter depends on, so merging does not run on it.
+STORY_CORPUS_MINIMUM = 4
+
+
+def _is_cjk_prose(text: str) -> bool:
+    return bool(STORY_CJK.search(text))
+
+
 def _tokens(text: str) -> set[str]:
     found = STORY_TOKEN.findall(STORY_BOILERPLATE.sub(" ", text))
     return {token.casefold() for token in found if len(token) > 1 and STORY_IDENTITY_TOKEN.match(token)}
@@ -261,6 +287,8 @@ def common_story_tokens(entries: Sequence[DigestEntry]) -> frozenset[str]:
 
 
 def story_similarity(left: DigestEntry, right: DigestEntry, common: frozenset[str] = frozenset()) -> float:
+    if not (_is_cjk_prose(left.item.title) or _is_cjk_prose(right.item.title)):
+        return 0.0
     shared = (story_tokens(left) & story_tokens(right)) - common
     if len(shared) < STORY_MINIMUM_SHARED_TOKENS:
         return 0.0
@@ -327,7 +355,7 @@ def digest_language_code(language: str) -> str:
     return LANGUAGE_ALIASES.get(normalized, normalized.split("-", maxsplit=1)[0])
 
 
-def merging_applies(language: str) -> bool:
+def merging_applies(language: str, corpus_size: int) -> bool:
     """Whether repeat coverage can be identified at all in this digest language.
 
     Merging identifies a story by the identity-shaped tokens its title and summary keep in Latin
@@ -337,8 +365,12 @@ def merging_applies(language: str) -> bool:
     "OpenAI Launches New AI Model for Coding" and the same sentence about Search then share five
     accepted tokens and score 0.714. Identifying stories across an English digest needs embeddings
     or entity recognition, not another pattern, so merging stays off until that exists.
+
+    This is the coarse gate, on the setting. It cannot be the only one: title translation is
+    instructed but never validated, so a Chinese digest still carries English titles - 21% of them
+    in the live database - and story_similarity tests each pair's titles for itself.
     """
-    return digest_language_code(language) in {"zh-tw", "zh-cn"}
+    return digest_language_code(language) in {"zh-tw", "zh-cn"} and corpus_size >= STORY_CORPUS_MINIMUM
 
 
 def _labels(language: str) -> dict[str, str]:

@@ -162,7 +162,7 @@ def _merged_entries(
     # one story inflates its own identifying tokens, so a narrow corpus discards exactly them.
     headlines = [entry for entry in entries if entry.review_score is not None]
     mentions = [entry for entry in entries if entry.review_score is None]
-    if merging_applies(language):
+    if merging_applies(language, len(corpus)):
         headlines, mentions = merge_related_entries(headlines, mentions, threshold, common_story_tokens(corpus))
     return headlines + mentions[:secondary_items]
 

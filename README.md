@@ -183,12 +183,24 @@ inflates its own identifying tokens, and over the merge input the same measureme
 
 None of that survives an English digest, which is why merging is gated rather than tuned further.
 The whole technique rests on Chinese prose leaving nothing but proper nouns in Latin script. English
-prose leaves ordinary vocabulary there too, and three successive attempts each closed one class and
+prose leaves ordinary vocabulary there too, and successive attempts each closed one class and
 exposed the next: shape filtered lowercase words, frequency filtered a bare acronym, and Title Case
 defeats both — "OpenAI Launches New AI Model for Coding" and the same sentence about Search share
 five accepted tokens and score 0.714, with a frequency filter powerless because those words appear
 only in that pair. Identifying stories across an English digest needs embeddings or entity
 recognition, not another pattern.
+
+`DIGEST_LANGUAGE` is the coarse gate and cannot be the only one, because it describes the
+configuration rather than the data: title translation is instructed but never validated, and 100 of
+476 items in the live database carried a title with no CJK at all under `DIGEST_LANGUAGE=zh-TW`. So
+each pair is tested on its own titles, and at least one has to be Chinese prose. One is enough
+because the comparison is an intersection — if either side offers only proper nouns, so does the
+shared set. Over those 476 items, pairs reaching the default threshold split by title script as 130
+Chinese-Chinese, 73 mixed, and 17 English-English; every clear false merge was in the last group,
+while the mixed group is mostly one story that one newsletter translated and another did not, which
+is exactly the repeat coverage this feature exists to find. Requiring one Chinese title removes all
+17 and keeps all 203. Merging is also skipped when fewer than four candidates were ranked, since
+below that no token can exceed the frequency floor and nothing is ever filtered.
 
 Headline items are then rewritten from fuller text than the extractor ever saw. The extractor splits
 one email into up to ten items, so each is written from a few lines and lands around 60 characters,

@@ -13,6 +13,7 @@ from two_much_two_read.digest import (
     merging_applies,
     render_digest,
     story_similarity,
+    story_tokens,
 )
 from two_much_two_read.schemas import DigestItem
 from two_read_runtime.discord import chunk_text, sanitize_discord_text
@@ -434,7 +435,13 @@ def test_ordinary_vocabulary_never_identifies_a_story() -> None:
     assert len(mentions) == 1
 
 
-def test_an_english_digest_still_merges_on_product_names() -> None:
+def test_two_english_titles_never_merge_even_on_product_names() -> None:
+    """The deliberate cost of testing the premise on the titles rather than on DIGEST_LANGUAGE.
+
+    These two really are the same story, and they no longer merge. Measured over 476 real items,
+    requiring one Chinese title removes 17 English-English pairs, every clear false merge among
+    them, and costs cases like this one - which the language gate was already blocking anyway.
+    """
     left = merged_entry(
         "OpenAI previews GPT-5.6 Sol Ultrafast",
         "OpenAI previewed a mode generating 750 tokens per second.",
@@ -450,7 +457,24 @@ def test_an_english_digest_still_merges_on_product_names() -> None:
 
     headlines, mentions = merge_related_entries([left], [right], 0.25)
 
-    assert headlines[0].also_from == ("TLDR Dev",)
+    assert headlines[0].also_from == ()
+    assert len(mentions) == 1
+
+
+def test_an_untranslated_title_still_merges_into_a_chinese_one() -> None:
+    """The most valuable case: one newsletter translated the headline and another did not.
+
+    21% of live items keep an English title under DIGEST_LANGUAGE=zh-TW, and mixed pairs were the
+    largest group of real repeat coverage, so one Chinese title has to be enough.
+    """
+    chinese = merged_entry(
+        "OpenAI 推出 Linux 版 ChatGPT 桌面應用", "OpenAI 讓 ChatGPT 桌面應用登上 Linux。", "TLDR AI", review_score=90
+    )
+    english = merged_entry("OpenAI's ChatGPT desktop app is now on Linux", "ChatGPT 桌面應用開始支援 Linux。", "AlphaSignal")
+
+    headlines, mentions = merge_related_entries([chinese], [english], 0.25)
+
+    assert headlines[0].also_from == ("AlphaSignal",)
     assert mentions == []
 
 
@@ -514,19 +538,40 @@ def test_a_small_corpus_never_treats_a_true_pair_as_common() -> None:
 
 
 def test_merging_is_off_for_a_latin_script_digest_language() -> None:
-    """Three P1 findings in a row were one gap: the technique needs non-Latin prose to work."""
-    assert merging_applies("zh-TW") and merging_applies("zh-CN")
-    assert not merging_applies("en")
+    """Repeated findings on one gap: the technique needs non-Latin prose to work."""
+    assert merging_applies("zh-TW", 20) and merging_applies("zh-CN", 20)
+    assert not merging_applies("en", 20)
 
 
-def test_title_cased_vocabulary_would_merge_two_unrelated_english_stories() -> None:
-    """Why merging is gated rather than patched again: shape and frequency both accept these."""
+def test_merging_is_off_when_the_corpus_cannot_support_the_frequency_filter() -> None:
+    """Under four candidates no token can ever exceed the floor, so nothing is ever filtered.
+
+    A generic token like "ai" then identifies a pair on its own, which is what the filter exists
+    to prevent.
+    """
+    assert not merging_applies("zh-TW", 3)
+    assert merging_applies("zh-TW", 4)
+
+    tiny = [merged_entry(f"OpenAI 推出 AI 產品 {i}", f"OpenAI 的 AI 產品 {i}。", "TLDR AI") for i in range(3)]
+    assert common_story_tokens(tiny) == frozenset()
+
+
+def test_title_cased_vocabulary_is_stopped_by_the_title_script_rather_than_by_a_filter() -> None:
+    """Shape and frequency both accept these; only the absence of Chinese prose separates them."""
     left = merged_entry(
         "OpenAI Launches New AI Model for Coding", "OpenAI released a new model for software development.", "TLDR AI"
     )
     right = merged_entry("OpenAI Launches New AI Model for Search", "OpenAI released a new model for search ranking.", "TLDR AI")
 
-    assert story_similarity(left, right, common_story_tokens([left, right])) >= 0.25
+    # Six accepted tokens each, five of them shared, and the frequency filter is powerless because
+    # those words occur only in this pair. The titles carrying no Chinese prose is the whole signal.
+    assert len(story_tokens(left) & story_tokens(right)) == 5
+    assert story_similarity(left, right, common_story_tokens([left, right])) == 0.0
+
+    # Translating one title collapses its identity tokens to the vendor name alone, which the
+    # two-shared-token rule already rejects: the two mechanisms cover different halves of this.
+    translated = replace(left, item=left.item.model_copy(update={"title": "OpenAI 推出程式開發新模型"}))
+    assert story_tokens(translated) & story_tokens(right) == {"openai"}
 
 
 def test_two_newsletters_on_one_article_keep_both_attributions() -> None:
