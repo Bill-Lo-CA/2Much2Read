@@ -6,6 +6,7 @@ import pytest
 from two_much_two_read.digest import (
     DigestEntry,
     canonical_url,
+    common_story_tokens,
     dedupe,
     merge_related_entries,
     render_digest,
@@ -469,3 +470,43 @@ def test_absorbing_a_hacker_news_entry_keeps_its_discussion() -> None:
 
     assert headlines[0].discussion_url == "https://news.ycombinator.com/item?id=456"
     assert (headlines[0].hn_item_id, headlines[0].hn_score, headlines[0].hn_comments) == ("456", 210, 64)
+
+
+def ai_corpus() -> list[DigestEntry]:
+    """A day of AI newsletters, where the domain's own topic word is in most items."""
+    vendors = ["Google", "Meta", "Nvidia", "Cursor", "Anthropic", "Mistral", "Cohere", "Databricks", "Figma", "Zed"]
+    return [merged_entry(f"{name} 推出 AI 產品", f"{name} 的 AI 產品發表。", "TLDR AI") for name in vendors]
+
+
+def test_a_generic_acronym_does_not_identify_a_story() -> None:
+    """AI is capitalised, so shape alone let two unrelated OpenAI products merge at 0.5."""
+    left = merged_entry("OpenAI 推出 ChatGPT AI 編碼工具", "OpenAI 發表 ChatGPT 的 AI 編碼工具。", "TLDR AI", review_score=90)
+    right = merged_entry("OpenAI 推出 Sora AI 影片模型", "OpenAI 發表 Sora 的 AI 影片模型。", "AlphaSignal")
+    common = common_story_tokens([left, right, *ai_corpus()])
+
+    assert common == frozenset({"ai"})
+    headlines, mentions = merge_related_entries([left], [right], 0.25, common)
+
+    assert headlines[0].also_from == ()
+    assert len(mentions) == 1
+
+
+def test_a_product_name_survives_the_common_token_filter() -> None:
+    left = merged_entry(
+        "OpenAI 推出 GPT-5.6 Sol 超快版本", "OpenAI 以 Cerebras 推出 GPT-5.6 Sol。", "AlphaSignal", review_score=90
+    )
+    right = merged_entry("使用 Cerebras 加速 GPT-5.6 Sol", "Cerebras 讓 GPT-5.6 Sol 達到每秒 750 tokens。", "TLDR Dev")
+    common = common_story_tokens([left, right, *ai_corpus()])
+
+    headlines, mentions = merge_related_entries([left], [right], 0.25, common)
+
+    assert headlines[0].also_from == ("TLDR Dev",)
+    assert mentions == []
+
+
+def test_a_small_corpus_never_treats_a_true_pair_as_common() -> None:
+    """Two mentions of one story are 100% of a two-entry corpus; the floor stops that."""
+    left = merged_entry("OpenAI 推出 GPT-5.6 Sol", "OpenAI 推出 GPT-5.6 Sol。", "AlphaSignal", review_score=90)
+    right = merged_entry("Cerebras 加速 GPT-5.6 Sol", "Cerebras 讓 GPT-5.6 Sol 更快。", "TLDR Dev")
+
+    assert common_story_tokens([left, right]) == frozenset()

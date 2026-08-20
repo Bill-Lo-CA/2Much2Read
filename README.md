@@ -155,8 +155,9 @@ candidate instead of shrinking the section.
 Neither the canonical URL nor the title identifies a story across newsletters: each translates a
 headline differently and links to a different page for one event. Matching therefore runs on the
 tokens shaped like an identity — capitalised in the source, or carrying a version number — in the
-title and summary. `DIGEST_MERGE_SIMILARITY` sets the threshold, and two conditions hold regardless:
-two distinct shared tokens, and at least one of them shared by the two titles. Every condition was
+title and summary, minus the tokens too widespread across the run's candidates to identify anything.
+`DIGEST_MERGE_SIMILARITY` sets the threshold, and two conditions hold regardless: two distinct shared
+tokens, and at least one of them shared by the two titles. Every condition was
 added because the previous one let something through. Pairs covering one story shared two to five
 tokens while every other pair shared at most one, always a bare vendor word like "openai". A summary
 routinely names another story to compare against it, so body overlap alone merged an item about Grok
@@ -165,7 +166,12 @@ is Latin script: with `DIGEST_LANGUAGE=en`, "OpenAI launches new AI model for co
 tokens with the same sentence about Google. Filtering by document frequency does not fix that — no
 cutoff both keeps `gpt-5.6` and drops `model`, because a batch of fifteen items is far too small to
 infer a stopword list — whereas shape separates them in both languages. Products written lowercase
-in their own name are the known cost.
+in their own name are the known cost. Shape does not catch a generic acronym, though — `AI` is
+capitalised, and two unrelated OpenAI products sharing `openai` and `ai` scored 0.5 — so tokens
+appearing in more than 15% of the run's candidates are dropped as well. That frequency is measured
+over every ranked candidate rather than the handful that reach merging: repeat coverage of one story
+inflates its own identifying tokens, and over the merge input the same measurement inverts, putting
+`gpt-5.6` at 26.7% against `ai` at 6.7%.
 
 Headline items are then rewritten from fuller text than the extractor ever saw. The extractor splits
 one email into up to ten items, so each is written from a few lines and lands around 60 characters,
@@ -175,8 +181,10 @@ merged newsletter coverage when there is no link or the fetch fails. Email bodie
 - only their hash and length - so the article is the only route back to fuller text. The rewrite is
 discarded, keeping the original summary, when the fetch or the model fails, when the model reports
 that the source text is not about this item, or when it answers in the wrong language. This adds
-roughly one article fetch and one generation per headline, and the review model stays resident across
-them rather than reloading per item.
+roughly one article fetch and one generation per headline. Selection hands the review model over
+still loaded when the rewrite is enabled, and it stays resident across the headlines, so the rewrite
+costs no model load; the extractor and reranker are already released by then, so the three models
+still never share memory.
 
 Reviewer input is split by category rather than taken as one global top-N.
 `DIGEST_SECURITY_CANDIDATE_SLOTS` (default 7 of the 20) reserves slots for `SECURITY` items; the

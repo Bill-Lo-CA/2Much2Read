@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections import Counter
 from collections.abc import Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -236,6 +237,15 @@ STORY_MINIMUM_SHARED_TOKENS = 2
 # once - on the measured zh-TW items and on an English set, this takes every true pair and no false
 # one. Products that are lowercase in their own name are the known cost of that.
 STORY_IDENTITY_TOKEN = re.compile(r"^(?:[A-Z].*|.*\d.*)$")
+# Shape keeps ordinary vocabulary out but not a generic acronym: "AI" is capitalised, so two
+# unrelated OpenAI products shared "openai" and "ai" and merged at 0.5. Such a word is identifiable
+# by being everywhere - across a day's real candidates "ai" appeared in 28.8% of them while the next
+# token, a vendor name, appeared in 8.5%. The corpus has to be the whole ranked candidate set: over
+# the handful of entries that reach merging, the duplicates being looked for inflate their own
+# identifying tokens, and the same measurement inverts to "gpt-5.6" at 26.7% against "ai" at 6.7%.
+# The floor keeps a small corpus from treating a true pair's two mentions as common.
+STORY_COMMON_TOKEN_FRACTION = 0.15
+STORY_COMMON_TOKEN_MINIMUM = 3
 
 
 def _tokens(text: str) -> set[str]:
@@ -247,8 +257,17 @@ def story_tokens(entry: DigestEntry) -> set[str]:
     return _tokens(f"{entry.item.title} {entry.item.summary_zh_tw}")
 
 
-def story_similarity(left: DigestEntry, right: DigestEntry) -> float:
-    shared = story_tokens(left) & story_tokens(right)
+def common_story_tokens(entries: Sequence[DigestEntry]) -> frozenset[str]:
+    """Tokens too widespread in this run to identify anything, such as a domain's own topic word."""
+    counts: Counter[str] = Counter()
+    for entry in entries:
+        counts.update(story_tokens(entry))
+    limit = max(STORY_COMMON_TOKEN_MINIMUM, len(entries) * STORY_COMMON_TOKEN_FRACTION)
+    return frozenset(token for token, count in counts.items() if count > limit)
+
+
+def story_similarity(left: DigestEntry, right: DigestEntry, common: frozenset[str] = frozenset()) -> float:
+    shared = (story_tokens(left) & story_tokens(right)) - common
     if len(shared) < STORY_MINIMUM_SHARED_TOKENS:
         return 0.0
     # A summary routinely names another story to compare against it: one run had Grok 4.6 described
@@ -256,9 +275,9 @@ def story_similarity(left: DigestEntry, right: DigestEntry) -> float:
     # the same story at all. Merging them handed the GPT-5.6 headline the Grok article's link, and
     # the headline rewrite then restated the whole item from it. A story's own subject is named in
     # its title, so the titles have to overlap too, not merely the bodies.
-    if not (_tokens(left.item.title) & _tokens(right.item.title)):
+    if not ((_tokens(left.item.title) & _tokens(right.item.title)) - common):
         return 0.0
-    return len(shared) / len(story_tokens(left) | story_tokens(right))
+    return len(shared) / len((story_tokens(left) | story_tokens(right)) - common)
 
 
 def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:
@@ -282,7 +301,10 @@ def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:
 
 
 def merge_related_entries(
-    headlines: list[DigestEntry], mentions: list[DigestEntry], threshold: float
+    headlines: list[DigestEntry],
+    mentions: list[DigestEntry],
+    threshold: float,
+    common: frozenset[str] = frozenset(),
 ) -> tuple[list[DigestEntry], list[DigestEntry]]:
     """Fold repeat coverage of a headline story into that headline, then dedupe the mentions.
 
@@ -294,7 +316,7 @@ def merge_related_entries(
     merged = list(headlines)
     remaining: list[DigestEntry] = []
     for mention in mentions:
-        scores = [(story_similarity(mention, headline), index) for index, headline in enumerate(merged)]
+        scores = [(story_similarity(mention, headline, common), index) for index, headline in enumerate(merged)]
         best, index = max(scores, default=(0.0, -1))
         if best >= threshold and index >= 0:
             merged[index] = _absorbed(merged[index], mention)
@@ -302,7 +324,7 @@ def merge_related_entries(
         remaining.append(mention)
     deduped: list[DigestEntry] = []
     for mention in remaining:
-        scores = [(story_similarity(mention, kept), index) for index, kept in enumerate(deduped)]
+        scores = [(story_similarity(mention, kept, common), index) for index, kept in enumerate(deduped)]
         best, index = max(scores, default=(0.0, -1))
         if best >= threshold and index >= 0:
             deduped[index] = _absorbed(deduped[index], mention)

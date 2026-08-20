@@ -16,7 +16,7 @@ from .article_extractor import ArticleExtractionError, extract_article
 from .article_fetcher import ArticleFetcher, ArticleFetchError, ResolvedUrl, UrlResolutionError
 from .command_models import DeliveryCheckpointResetResult, NewsletterRetryResult, NewsletterRunResult
 from .config import GmailSource, HackerNewsSource, Settings, load_sources
-from .digest import DigestEntry, dedupe_entries, merge_related_entries, render_digest
+from .digest import DigestEntry, common_story_tokens, dedupe_entries, merge_related_entries, render_digest
 from .gmail import GmailClient, credentials, message_headers
 from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
 from .mime import MAX_ANALYSIS_CHARS, EmailExtractionError, extract_gmail_payload
@@ -131,7 +131,11 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
     # The context fitter trims from the tail, where the reserved candidates sit by design.
     # The reviewer is released by the caller, once the headline rewrite has also finished with it.
     review = ollama.review_digest(
-        candidates, settings.digest_max_items, RESERVED_CATEGORY, settings.digest_security_candidate_slots
+        candidates,
+        settings.digest_max_items,
+        RESERVED_CATEGORY,
+        settings.digest_security_candidate_slots,
+        settings.digest_deepen_headlines,
     )
     scores = {selection.candidate_id: selection.score for selection in review.selected}
     selected = [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]
@@ -143,10 +147,15 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
     return selected + unselected
 
 
-def _merged_entries(entries: list[DigestEntry], threshold: float, secondary_items: int) -> list[DigestEntry]:
+def _merged_entries(
+    entries: list[DigestEntry], threshold: float, secondary_items: int, corpus: list[DigestEntry]
+) -> list[DigestEntry]:
+    # The corpus is every ranked candidate, not the handful that reach merging: repeat coverage of
+    # one story inflates its own identifying tokens, so a narrow corpus discards exactly them.
+    common = common_story_tokens(corpus)
     headlines = [entry for entry in entries if entry.review_score is not None]
     mentions = [entry for entry in entries if entry.review_score is None]
-    headlines, mentions = merge_related_entries(headlines, mentions, threshold)
+    headlines, mentions = merge_related_entries(headlines, mentions, threshold, common)
     return headlines + mentions[:secondary_items]
 
 
@@ -608,7 +617,10 @@ def run_pipeline(
             try:
                 reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
                 reviewed_entries = _merged_entries(
-                    reviewed_entries, settings.digest_merge_similarity, settings.digest_secondary_items
+                    reviewed_entries,
+                    settings.digest_merge_similarity,
+                    settings.digest_secondary_items,
+                    ranked_entries,
                 )
                 reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status)
             finally:

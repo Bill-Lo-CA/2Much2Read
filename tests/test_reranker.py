@@ -244,7 +244,7 @@ def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None
         (4, None),
         (5, None),
     ]
-    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 0.25, 2)] == [1, 2, 3]
+    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 0.25, 2, ranked)] == [1, 2, 3]
 
 
 def test_secondary_mentions_can_be_turned_off() -> None:
@@ -259,4 +259,4 @@ def test_secondary_mentions_can_be_turned_off() -> None:
     ranked = [entry(index, f"Story {index}", "TLDR AI") for index in range(1, 4)]
     reviewed = pipeline._reviewed_entries(settings, FakeOllama(), ranked)
 
-    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 0.25, 0)] == [1]
+    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 0.25, 0, ranked)] == [1]
