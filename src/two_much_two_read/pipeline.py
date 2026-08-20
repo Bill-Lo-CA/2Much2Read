@@ -150,7 +150,7 @@ def _merged_entries(entries: list[DigestEntry], threshold: float, secondary_item
     return headlines + mentions[:secondary_items]
 
 
-def _headline_source(entry: DigestEntry, fetcher: ArticleFetcher) -> tuple[str, str]:
+def _headline_source(entry: DigestEntry, fetcher: ArticleFetcher, status: StatusReporter) -> tuple[str, str]:
     """The fullest text available for a headline: the article itself, or the newsletters on it.
 
     The extractor's own summary is the floor, not the goal - it was written from a few lines of one
@@ -162,13 +162,17 @@ def _headline_source(entry: DigestEntry, fetcher: ArticleFetcher) -> tuple[str, 
         try:
             fetched = fetcher.fetch(url)
             return extract_article(fetched.content_type, fetched.body).text, "article"
-        except Exception:
-            # Deliberately broad. This parses third-party HTML that nothing in this project
-            # controls, and a longer summary is an enhancement: no shape of page should be able to
-            # end a run that has already extracted, ranked, and reviewed a full digest. One did -
-            # a hidden ancestor with a styled descendant raised a TypeError out of the parser and
-            # took the whole digest with it. The newsletter summaries below are always available.
+        except (ArticleFetchError, ArticleExtractionError, UrlResolutionError):
             pass
+        except Exception as error:
+            # Deliberately broad, and reported rather than swallowed. This parses third-party HTML
+            # that nothing in this project controls, and a longer summary is an enhancement: no
+            # shape of page should be able to end a run that has already extracted, ranked, and
+            # reviewed a full digest. One did - a hidden ancestor with a styled descendant raised a
+            # TypeError out of the parser and took the whole digest with it. Anything reaching here
+            # is a defect rather than an unreachable page, so it is named: a silent fallback would
+            # let the rewrite quietly stop working for a whole class of pages.
+            status(f"Warning: could not read {url} ({type(error).__name__}); using the newsletter summaries")
     summaries = entry.merged_summaries or (entry.item.summary_zh_tw,)
     return "\n\n".join((*summaries, entry.item.why_it_matters_zh_tw)), "newsletters"
 
@@ -185,7 +189,7 @@ def _deepened_entries(
             deepened.append(entry)
             continue
         status(f"Expanding {entry.item.title}")
-        content, basis = _headline_source(entry, fetcher)
+        content, basis = _headline_source(entry, fetcher, status)
         sources = ", ".join((entry.source_name or entry.source_id or "Unknown", *entry.also_from))
         try:
             rewrite = ollama.deepen_item(entry.item.title, entry.item.category, sources, basis, content)

@@ -200,8 +200,23 @@ def test_an_unexpected_parser_failure_falls_back_instead_of_ending_the_run(monke
     fake_fetcher(monkeypatch, ARTICLE.encode())
     monkeypatch.setattr(pipeline, "extract_article", lambda *_: (_ for _ in ()).throw(TypeError("parser blew up")))
     ollama = FakeOllama()
+    messages: list[str] = []
 
-    deepened = pipeline._deepened_entries(Settings(), ollama, [entry("Headline", "https://example.com/a")], lambda _: None)
+    deepened = pipeline._deepened_entries(Settings(), ollama, [entry("Headline", "https://example.com/a")], messages.append)
 
     assert ollama.calls[0][1] == "newsletters"
     assert deepened[0].item.summary_zh_tw == "重寫後長很多的摘要內容。"
+    # Named, not swallowed: a silent fallback would hide the rewrite failing for a class of pages.
+    assert [message for message in messages if message.startswith("Warning")] == [
+        "Warning: could not read https://example.com/a (TypeError); using the newsletter summaries"
+    ]
+
+
+def test_an_unreachable_page_falls_back_without_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A page that cannot be fetched is ordinary; only a defect in our own parsing is reported."""
+    fake_fetcher(monkeypatch, None)
+    messages: list[str] = []
+
+    pipeline._deepened_entries(Settings(), FakeOllama(), [entry("Headline", "https://example.com/a")], messages.append)
+
+    assert [message for message in messages if message.startswith("Warning")] == []
