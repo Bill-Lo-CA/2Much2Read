@@ -162,7 +162,12 @@ def _headline_source(entry: DigestEntry, fetcher: ArticleFetcher) -> tuple[str, 
         try:
             fetched = fetcher.fetch(url)
             return extract_article(fetched.content_type, fetched.body).text, "article"
-        except (ArticleFetchError, ArticleExtractionError, UrlResolutionError):
+        except Exception:
+            # Deliberately broad. This parses third-party HTML that nothing in this project
+            # controls, and a longer summary is an enhancement: no shape of page should be able to
+            # end a run that has already extracted, ranked, and reviewed a full digest. One did -
+            # a hidden ancestor with a styled descendant raised a TypeError out of the parser and
+            # took the whole digest with it. The newsletter summaries below are always available.
             pass
     summaries = entry.merged_summaries or (entry.item.summary_zh_tw,)
     return "\n\n".join((*summaries, entry.item.why_it_matters_zh_tw)), "newsletters"

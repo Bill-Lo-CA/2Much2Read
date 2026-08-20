@@ -25,3 +25,20 @@ def test_rejects_paywall_teaser_and_sanitizes_self_posts() -> None:
 
     assert len(extracted.text) >= 500
     assert "ignore" not in extracted.text
+
+
+def test_a_styled_descendant_of_a_hidden_element_does_not_crash_the_extractor() -> None:
+    """find_all materialises its list, so decomposing the ancestor destroys a node still in it.
+
+    GitHub and several news sites nest styled elements inside hidden containers. Reading the
+    destroyed node's attributes raised TypeError out of the parser and ended a whole digest run.
+    """
+    html = (
+        b"<html><body><div style='display:none'><span style='color:red'>hidden</span></div>"
+        b"<article><p>" + b"visible body text. " * 40 + b"</p></article></body></html>"
+    )
+
+    extracted = extract_article("text/html", html)
+
+    assert "visible body text" in extracted.text
+    assert "hidden" not in extracted.text

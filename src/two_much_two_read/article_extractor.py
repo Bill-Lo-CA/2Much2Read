@@ -48,7 +48,12 @@ def extract_article(content_type: str, body: bytes) -> ExtractedArticle:
     ):
         node.decompose()
     for node in soup.find_all(style=True):
-        style = str(node["style"]).replace(" ", "").lower()
+        # find_all materialises the list first, and decomposing a hidden ancestor destroys its
+        # descendants, clearing their attributes. A descendant that also carried style is still in
+        # this list, so reading it would raise instead of being skipped as already removed.
+        if node.attrs is None:
+            continue
+        style = str(node.attrs.get("style", "")).replace(" ", "").lower()
         if "display:none" in style or "visibility:hidden" in style:
             node.decompose()
     root = soup.find("article") or soup.find("main") or soup.body or soup

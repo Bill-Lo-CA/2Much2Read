@@ -193,3 +193,15 @@ def test_a_rewrite_in_the_wrong_language_is_rejected(monkeypatch: pytest.MonkeyP
         with pytest.raises(OllamaSchemaError, match="OLLAMA_DEEPEN_INVALID"):
             client.deepen_item("標題", "AI_MODEL", "TLDR AI", "article", "some article text")
         client.close()
+
+
+def test_an_unexpected_parser_failure_falls_back_instead_of_ending_the_run(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A TypeError out of the HTML parser ended a run that had already produced a full digest."""
+    fake_fetcher(monkeypatch, ARTICLE.encode())
+    monkeypatch.setattr(pipeline, "extract_article", lambda *_: (_ for _ in ()).throw(TypeError("parser blew up")))
+    ollama = FakeOllama()
+
+    deepened = pipeline._deepened_entries(Settings(), ollama, [entry("Headline", "https://example.com/a")], lambda _: None)
+
+    assert ollama.calls[0][1] == "newsletters"
+    assert deepened[0].item.summary_zh_tw == "重寫後長很多的摘要內容。"
