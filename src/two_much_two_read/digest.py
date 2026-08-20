@@ -166,7 +166,35 @@ def _preserve_hn_attribution(primary: DigestEntry, other: DigestEntry) -> Digest
     )
 
 
+def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:
+    names = list(primary.also_from)
+    for name in (other.source_name, *other.also_from):
+        if name and name != primary.source_name and name not in names:
+            names.append(name)
+    summaries = list(primary.merged_summaries) or [primary.item.summary_zh_tw]
+    for summary in (other.item.summary_zh_tw, *other.merged_summaries):
+        if summary not in summaries:
+            summaries.append(summary)
+    return replace(
+        # The absorbed entry stops being rendered, so its Hacker News discussion, score, and comment
+        # count would be lost with it.
+        _preserve_hn_attribution(primary, other),
+        also_from=tuple(names),
+        merged_summaries=tuple(summaries),
+        # A newsletter that only names a story often carries no link while another one does.
+        article_url=primary.article_url or other.article_url,
+    )
+
+
 def dedupe_entries(items: list[DigestEntry]) -> list[DigestEntry]:
+    """Fold entries that are literally the same story into one, keeping the strongest.
+
+    Two newsletters linking the same canonical article is the least ambiguous repeat coverage there
+    is - it needs none of the token heuristics that related-story merging rests on, and so it holds
+    in every digest language. It was also the case that lost the most: the loser was dropped here,
+    before merging ever ran, so the surviving entry never recorded the other newsletter or its
+    wording. Absorbing carries both across, exactly as the related-story merge does.
+    """
     # ponytail: one-pass in-memory dedupe; move history lookup to SQLite when volume warrants it.
     winners: dict[str, DigestEntry] = {}
     for item in items:
@@ -175,9 +203,9 @@ def dedupe_entries(items: list[DigestEntry]) -> list[DigestEntry]:
         if current is None:
             winners[key] = item
         elif _entry_rank(item) > _entry_rank(current):
-            winners[key] = _preserve_hn_attribution(item, current)
+            winners[key] = _absorbed(item, current)
         else:
-            winners[key] = _preserve_hn_attribution(current, item)
+            winners[key] = _absorbed(current, item)
     return list(winners.values())
 
 
@@ -246,26 +274,6 @@ def story_similarity(left: DigestEntry, right: DigestEntry, common: frozenset[st
     return len(shared) / len((story_tokens(left) | story_tokens(right)) - common)
 
 
-def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:
-    names = list(primary.also_from)
-    for name in (other.source_name, *other.also_from):
-        if name and name != primary.source_name and name not in names:
-            names.append(name)
-    summaries = list(primary.merged_summaries) or [primary.item.summary_zh_tw]
-    for summary in (other.item.summary_zh_tw, *other.merged_summaries):
-        if summary not in summaries:
-            summaries.append(summary)
-    return replace(
-        # The absorbed entry stops being rendered, so its Hacker News discussion, score, and comment
-        # count would be lost with it, exactly as exact-URL dedupe already avoids.
-        _preserve_hn_attribution(primary, other),
-        also_from=tuple(names),
-        merged_summaries=tuple(summaries),
-        # A newsletter that only names a story often carries no link while another one does.
-        article_url=primary.article_url or other.article_url,
-    )
-
-
 def merge_related_entries(
     headlines: list[DigestEntry],
     mentions: list[DigestEntry],
@@ -279,12 +287,16 @@ def merge_related_entries(
     entry and records the other sources, which is worth showing: several newsletters carrying one
     story is itself a signal.
     """
+    # story_similarity returns 0.0 as a sentinel for "these are not the same story" - it is what
+    # both the two-token and the title-overlap conditions report - so a zero can never be compared
+    # against the threshold. Leaving it to ">= threshold" made a threshold of 0 absorb every
+    # mention into some headline on no shared identity at all.
     merged = list(headlines)
     remaining: list[DigestEntry] = []
     for mention in mentions:
         scores = [(story_similarity(mention, headline, common), index) for index, headline in enumerate(merged)]
         best, index = max(scores, default=(0.0, -1))
-        if best >= threshold and index >= 0:
+        if index >= 0 and best > 0 and best >= threshold:
             merged[index] = _absorbed(merged[index], mention)
             continue
         remaining.append(mention)
@@ -292,7 +304,7 @@ def merge_related_entries(
     for mention in remaining:
         scores = [(story_similarity(mention, kept, common), index) for index, kept in enumerate(deduped)]
         best, index = max(scores, default=(0.0, -1))
-        if best >= threshold and index >= 0:
+        if index >= 0 and best > 0 and best >= threshold:
             deduped[index] = _absorbed(deduped[index], mention)
             continue
         deduped.append(mention)

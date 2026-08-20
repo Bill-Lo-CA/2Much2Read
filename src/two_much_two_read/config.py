@@ -146,7 +146,8 @@ class Settings(BaseSettings):
     digest_max_items: int = Field(default=5, ge=1)
     digest_top_items: int = Field(default=5, ge=0)
     digest_secondary_items: int = Field(default=10, ge=0)
-    digest_merge_similarity: float = Field(default=0.25, ge=0, le=1)
+    # Strictly positive: 0 reads as "off" but would mean "merge on the token gates alone".
+    digest_merge_similarity: float = Field(default=0.25, gt=0, le=1)
     digest_deepen_headlines: bool = True
     digest_review_candidate_limit: int = Field(default=20, ge=1)
     digest_rerank_candidate_limit: int = Field(default=100, ge=1)

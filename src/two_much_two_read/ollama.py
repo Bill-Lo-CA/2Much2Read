@@ -191,10 +191,17 @@ def fitted_deepening_content(content: str, overhead_tokens: int, num_ctx: int) -
     return bounded, len(bounded) < len(content)
 
 
+# The script has to be named, not just the tag. _validate_digest_language holds the answer to a
+# specific script, so an instruction that only says "Use zh-HK" asks for something narrower than
+# what is checked; the same alias table both sides read is what keeps them from drifting apart.
+LANGUAGE_SCRIPTS = {"zh-tw": "Traditional Chinese", "zh-cn": "Simplified Chinese"}
+
+
 def _language_instruction(language: str) -> str:
-    if language.casefold().replace("_", "-") in {"zh-tw", "zh-hant"}:
-        return f"Use Traditional Chinese ({language}) for every title, overview, summary, and practical-significance field."
-    return f"Use {language} for every title, overview, summary, and practical-significance field."
+    field = "for every title, overview, summary, and practical-significance field."
+    if script := LANGUAGE_SCRIPTS.get(digest_language_code(language)):
+        return f"Use {script} ({language}) {field}"
+    return f"Use {language} {field}"
 
 
 def _language_code(language: str) -> str:

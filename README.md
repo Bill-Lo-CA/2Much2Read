@@ -152,16 +152,21 @@ carried none, and a merged Hacker News entry keeps its discussion link, score, a
 The secondary limit is applied after merging, so an absorbed mention frees its slot for the next
 candidate instead of shrinking the section.
 
+Two newsletters linking the same canonical article are folded together first, and that case needs
+none of what follows: an identical URL is not a heuristic, so it holds in every digest language.
+Everything below is for the harder case, where the same event reaches two newsletters as two
+different pages.
+
 Merging runs only for a Chinese digest, and `DIGEST_LANGUAGE` accepts only Chinese and English at
 all — every stage is language-specific, and these are the ones the pipeline has been built and
 measured for. Neither the canonical URL nor the title identifies a story across newsletters: each
 translates a headline differently and links to a different page for one event. Matching therefore
-runs on the
-tokens shaped like an identity — capitalised in the source, or carrying a version number — in the
-title and summary, minus the tokens too widespread across the run's candidates to identify anything.
-`DIGEST_MERGE_SIMILARITY` sets the threshold, and two conditions hold regardless: two distinct shared
-tokens, and at least one of them shared by the two titles. Every condition was
-added because the previous one let something through. Pairs covering one story shared two to five
+runs on the tokens shaped like an identity — capitalised in the source, or carrying a version
+number — in the title and summary, minus the tokens too widespread across the run's candidates to
+identify anything. `DIGEST_MERGE_SIMILARITY` sets the threshold — strictly positive, since 0 reads
+as "off" but would mean "merge on the token conditions alone" — and two conditions hold regardless
+of it: two distinct shared tokens, and at least one of them shared by the two titles. Every
+condition was added because the previous one let something through. Pairs covering one story shared two to five
 tokens while every other pair shared at most one, always a bare vendor word like "openai". A summary
 routinely names another story to compare against it, so body overlap alone merged an item about Grok
 into one about GPT-5.6 Sol. And ordinary vocabulary only looks identifying in a language whose prose
@@ -189,7 +194,9 @@ Headline items are then rewritten from fuller text than the extractor ever saw. 
 one email into up to ten items, so each is written from a few lines and lands around 60 characters,
 which is thin for the items leading the digest. `DIGEST_DEEPEN_HEADLINES` (default on) fetches each
 headline's article and rewrites its summary and significance on the review model, falling back to the
-merged newsletter coverage when there is no link or the fetch fails. Email bodies are never persisted
+merged newsletter coverage when there is no link or the fetch fails. A Hacker News self-post is
+always rewritten from that fallback: it has no article, so its stored URL is the discussion page,
+and extract_article cannot tell the author's post from the replies to it. Email bodies are never persisted
 - only their hash and length - so the article is the only route back to fuller text. The rewrite is
 discarded, keeping the original summary, when the fetch or the model fails, when the model reports
 that the source text is not about this item, or when it answers in the wrong language. This adds

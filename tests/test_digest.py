@@ -8,6 +8,7 @@ from two_much_two_read.digest import (
     canonical_url,
     common_story_tokens,
     dedupe,
+    dedupe_entries,
     merge_related_entries,
     merging_applies,
     render_digest,
@@ -526,3 +527,81 @@ def test_title_cased_vocabulary_would_merge_two_unrelated_english_stories() -> N
     right = merged_entry("OpenAI Launches New AI Model for Search", "OpenAI released a new model for search ranking.", "TLDR AI")
 
     assert story_similarity(left, right, common_story_tokens([left, right])) >= 0.25
+
+
+def test_two_newsletters_on_one_article_keep_both_attributions() -> None:
+    """The least ambiguous repeat coverage there is, and the case that used to lose the most.
+
+    Exact-URL dedupe ran before merging and simply dropped the loser, so the surviving entry
+    recorded neither the other newsletter nor its wording.
+    """
+    url = "https://article.example/gpt-5-6"
+    stronger = replace(merged_entry("GPT-5.6 Sol 發表", "OpenAI 推出 GPT-5.6 Sol。", "AlphaSignal", url), review_score=90)
+    weaker = merged_entry("OpenAI 發表新模型", "GPT-5.6 Sol 以 Cerebras 硬體達到 750 tokens/second。", "TLDR AI", url)
+
+    kept = dedupe_entries([stronger, weaker])
+
+    assert len(kept) == 1
+    assert kept[0].source_name == "AlphaSignal"
+    assert kept[0].also_from == ("TLDR AI",)
+    assert kept[0].merged_summaries == (
+        "OpenAI 推出 GPT-5.6 Sol。",
+        "GPT-5.6 Sol 以 Cerebras 硬體達到 750 tokens/second。",
+    )
+
+
+def test_exact_url_attribution_does_not_depend_on_the_digest_language() -> None:
+    """Related-story merging is gated to Chinese; an identical URL needs no token heuristic at all."""
+    url = "https://article.example/story"
+    entries = [
+        merged_entry("OpenAI Launches New AI Model", "OpenAI launches a new model.", "TLDR AI", url),
+        merged_entry("New AI Model From OpenAI", "The model is available today.", "AlphaSignal", url),
+    ]
+
+    assert dedupe_entries(entries)[0].also_from == ("AlphaSignal",)
+
+
+def test_a_tracking_parameter_does_not_hide_repeat_coverage() -> None:
+    first = merged_entry("GPT-5.6 Sol 發表", "OpenAI 推出 GPT-5.6 Sol。", "AlphaSignal", "https://article.example/a")
+    second = merged_entry("OpenAI 新模型", "GPT-5.6 Sol 開放使用。", "TLDR AI", "https://article.example/a?utm_source=tldr")
+
+    assert dedupe_entries([first, second])[0].also_from == ("TLDR AI",)
+
+
+def test_a_zero_threshold_cannot_merge_stories_that_share_no_identity() -> None:
+    """story_similarity reports 0.0 for "not the same story", so it can never clear a threshold.
+
+    Left to ">= threshold", a threshold of 0 absorbed every mention into some headline.
+    """
+    headline = replace(merged_entry("Gemini 3.7 發表", "Google 推出 Gemini 3.7。", "TLDR AI"), review_score=90)
+    unrelated = merged_entry("Rust 1.94 釋出", "Rust 團隊釋出 1.94 版。", "TLDR Dev")
+
+    headlines, mentions = merge_related_entries([headline], [unrelated], 0.0)
+
+    assert headlines[0].also_from == ()
+    assert [entry.item.title for entry in mentions] == ["Rust 1.94 釋出"]
+
+
+def test_a_newsletter_and_hacker_news_on_one_article_show_as_two_sources() -> None:
+    """Two independent sources carrying one article is the signal the source line exists to show."""
+    article_url = "https://article.example/story"
+    text = render_digest(
+        [
+            DigestEntry(item("Newsletter title", article_url, importance=9), source_name="TLDR AI"),
+            DigestEntry(
+                item("HN title", f"{article_url}?utm_source=hn"),
+                source_name="Hacker News",
+                hn_score=10,
+                hn_comments=2,
+                hn_item_id="456",
+                discussion_url="https://news.ycombinator.com/item?id=456",
+            ),
+        ],
+        datetime(2026, 7, 24, tzinfo=UTC),
+        "AI",
+        "Newsletter, HN",
+    )
+
+    assert "來源：TLDR AI, Hacker News" in text
+    assert "討論：<https://news.ycombinator.com/item?id=456>" in text
+    assert "HN title" not in text

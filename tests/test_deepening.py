@@ -220,3 +220,49 @@ def test_an_unreachable_page_falls_back_without_a_warning(monkeypatch: pytest.Mo
     pipeline._deepened_entries(Settings(), FakeOllama(), [entry("Headline", "https://example.com/a")], messages.append)
 
     assert [message for message in messages if message.startswith("Warning")] == []
+
+
+def test_a_hacker_news_self_post_is_never_rewritten_from_its_discussion_page(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A self-post has no article, so its stored source_url is the discussion URL.
+
+    Fetching that returns the whole thread, and extract_article cannot tell the author's post from
+    the replies: the rewrite would restate a commenter's claim as the headline's own finding.
+    """
+    discussion = "https://news.ycombinator.com/item?id=456"
+    fetched: list[str] = []
+
+    class FakeFetcher:
+        def fetch(self, url: str) -> FetchedArticle:
+            fetched.append(url)
+            return FetchedArticle(url, url, "text/html", ARTICLE.encode())
+
+    monkeypatch.setattr(pipeline, "ArticleFetcher", FakeFetcher)
+    ollama = FakeOllama()
+    self_post = replace(
+        entry("Ask HN: 有人在生產環境跑本地模型嗎", discussion),
+        discussion_url=discussion,
+        hn_item_id="456",
+        content_basis="hn_self_post",
+    )
+
+    pipeline._deepened_entries(Settings(), ollama, [self_post], lambda _: None)
+
+    assert fetched == []
+    _, basis, content = ollama.calls[0]
+    assert basis == "newsletters"
+    assert "Cerebras hardware" not in content
+
+
+def test_a_hacker_news_story_with_a_real_article_is_still_rewritten(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_fetcher(monkeypatch, ARTICLE.encode())
+    ollama = FakeOllama()
+    story = replace(
+        entry("Headline", "https://example.com/a"),
+        discussion_url="https://news.ycombinator.com/item?id=456",
+        hn_item_id="456",
+        content_basis="article",
+    )
+
+    pipeline._deepened_entries(Settings(), ollama, [story], lambda _: None)
+
+    assert ollama.calls[0][1] == "article"

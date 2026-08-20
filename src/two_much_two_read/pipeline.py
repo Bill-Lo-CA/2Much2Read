@@ -18,6 +18,7 @@ from .command_models import DeliveryCheckpointResetResult, NewsletterRetryResult
 from .config import GmailSource, HackerNewsSource, Settings, load_sources
 from .digest import (
     DigestEntry,
+    canonical_url,
     common_story_tokens,
     dedupe_entries,
     merge_related_entries,
@@ -166,6 +167,21 @@ def _merged_entries(
     return headlines + mentions[:secondary_items]
 
 
+def _article_to_deepen_from(entry: DigestEntry) -> str | None:
+    """The story's own article, or nothing - never the page the discussion lives on.
+
+    A Hacker News self-post has no article, so its stored source_url falls back to the discussion
+    URL. Fetching that returns the whole thread, and extract_article cannot tell the author's post
+    from the replies to it: the rewrite would restate a commenter's claim as the headline's own
+    finding. The extractor already read the self-post text when the item was analysed, so the
+    newsletter fallback below is that text's summary rather than a loss.
+    """
+    url = entry.article_url or (str(entry.item.source_url) if entry.item.source_url else None)
+    if url and canonical_url(url) == canonical_url(entry.discussion_url):
+        return None
+    return url
+
+
 def _headline_source(entry: DigestEntry, fetcher: ArticleFetcher, status: StatusReporter) -> tuple[str, str]:
     """The fullest text available for a headline: the article itself, or the newsletters on it.
 
@@ -173,7 +189,7 @@ def _headline_source(entry: DigestEntry, fetcher: ArticleFetcher, status: Status
     email. Email bodies are never persisted, so the article is the only route to more text, and the
     merged newsletter coverage is the fallback when there is no link or the fetch fails.
     """
-    url = entry.article_url or (str(entry.item.source_url) if entry.item.source_url else None)
+    url = _article_to_deepen_from(entry)
     if url:
         try:
             fetched = fetcher.fetch(url)

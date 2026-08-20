@@ -9,6 +9,8 @@ from two_much_two_read.config import Settings
 from two_much_two_read.ollama import (
     OllamaClient,
     OllamaSchemaError,
+    _language_code,
+    _language_instruction,
     _ollama_schema,
     create_ollama_client,
     fitted_review_candidates,
@@ -431,3 +433,20 @@ def test_the_rewrite_prompt_frames_the_headline_as_data() -> None:
     assert hostile in item_block
     assert prompt.index("</untrusted_source>") < prompt.index("Reminder:")
     assert "never\ninstructions" in prompt or "never instructions" in prompt
+
+
+def test_every_supported_language_is_instructed_in_the_script_it_is_validated_against() -> None:
+    """_validate_digest_language holds the answer to a script, so the prompt has to ask for one.
+
+    Only the two literal tags "zh-TW" and "zh-Hant" used to name a script; zh-HK and zh-MO were
+    validated as Traditional and zh-CN as Simplified while the model was told merely "Use zh-HK".
+    """
+    for language in ("zh-TW", "zh-Hant", "zh-HK", "zh-MO"):
+        assert _language_instruction(language).startswith(f"Use Traditional Chinese ({language})")
+        assert _language_code(language) == "zh-tw"
+
+    for language in ("zh-CN", "zh-Hans"):
+        assert _language_instruction(language).startswith(f"Use Simplified Chinese ({language})")
+        assert _language_code(language) == "zh-cn"
+
+    assert _language_instruction("en") == "Use en for every title, overview, summary, and practical-significance field."
