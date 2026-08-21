@@ -12,6 +12,8 @@ from two_much_two_read.config import Settings
 from two_much_two_read.digest import DigestEntry
 from two_much_two_read.ollama import (
     DEEPEN_RESERVED_OUTPUT_TOKENS,
+    OllamaClient,
+    OllamaContextError,
     OllamaSchemaError,
     create_ollama_client,
     fitted_deepening_content,
@@ -310,3 +312,41 @@ def test_a_self_post_with_merged_coverage_is_still_rewritten_from_the_newsletter
     assert basis == "newsletters"
     assert sources == "AlphaSignal, TLDR AI"
     assert "另一家寫的較長內容。" in content
+
+
+def test_no_room_for_source_text_is_refused_rather_than_asked(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A small OLLAMA_NUM_CTX leaves the fixed prompt consuming the whole window.
+
+    Sending it anyway asks for four to six sentences of specifics from a headline alone, which the
+    model can only answer by inventing - the same failure as rewriting a headline with nothing
+    fuller behind it, reached from the other side.
+    """
+    posted: list[object] = []
+
+    class FakeClient:
+        def post(self, *args: object, **kwargs: object) -> object:
+            posted.append(args)
+            raise AssertionError("the model must not be asked when no source text fits")
+
+    client = OllamaClient(num_ctx=2048)
+    client._client = FakeClient()  # type: ignore[assignment]
+
+    with pytest.raises(OllamaContextError, match="OLLAMA_DEEPEN_NO_ROOM"):
+        client.deepen_item("Headline", "AI_MODEL", "TLDR AI", "article", "很長的文章內容。" * 500)
+
+    assert posted == []
+
+
+def test_a_context_refusal_keeps_the_original_summary(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake_fetcher(monkeypatch, ARTICLE.encode())
+    messages: list[str] = []
+
+    deepened = pipeline._deepened_entries(
+        Settings(),
+        FakeOllama(OllamaContextError("OLLAMA_DEEPEN_NO_ROOM")),
+        [entry("Headline", "https://example.com/a")],
+        messages.append,
+    )
+
+    assert deepened[0].item.summary_zh_tw == "很短的摘要。"
+    assert any("kept the original summary" in message for message in messages)

@@ -211,7 +211,18 @@ always rewritten from that fallback: it has no article, so its stored URL is the
 and extract_article cannot tell the author's post from the replies to it. Email bodies are never persisted
 - only their hash and length - so the article is the only route back to fuller text. The rewrite is
 discarded, keeping the original summary, when the fetch or the model fails, when the model reports
-that the source text is not about this item, or when it answers in the wrong language. A headline
+that the source text is not about this item, or when it answers in the wrong language. It is refused
+outright when trimming to `OLLAMA_NUM_CTX` leaves no source text at all — at 2048 the fixed prompt
+and the output reservation consume the window, and asking for four to six sentences of specifics
+from a headline alone can only be answered by inventing.
+
+The wrong-language check runs per field as well as over the joined text, because the two catch
+different things. Telling Traditional from Simplified needs volume, so that runs on the join; but an
+aggregate reports only the dominant language, which lets a short English practical-significance
+field sit unnoticed beside a long Chinese summary. Script needs no volume, so it is checked per
+field — `降低延遲。` is far too short to classify as Traditional and still unmistakably CJK. All 476
+items in the live database carry CJK in both fields, so this rejects nothing that was already
+working. A headline
 with no article and no merged coverage is skipped outright rather than rewritten: the fallback would
 be its own summary, and a prompt asking for four to six sentences naming versions and numbers could
 only be met from one sentence by padding or inventing. This adds

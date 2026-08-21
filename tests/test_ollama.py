@@ -12,6 +12,7 @@ from two_much_two_read.ollama import (
     OllamaSchemaError,
     _language_instruction,
     _ollama_schema,
+    _validate_digest_language,
     create_ollama_client,
     fitted_review_candidates,
 )
@@ -471,3 +472,28 @@ def test_same_story_rejects_a_response_that_is_not_the_schema(respx_mock: respx.
 
     with pytest.raises(OllamaSchemaError, match="OLLAMA_SAME_STORY_INVALID"):
         client.same_story({"title": "甲", "summary": "s", "source": ""}, {"title": "乙", "summary": "s", "source": ""})
+
+
+def test_one_field_in_the_wrong_language_cannot_hide_behind_a_long_one() -> None:
+    """The aggregate reports only the dominant language, so a short field never moves it."""
+    summary = "OpenAI 今日發表 GPT-5.6 Sol 超快版本，透過 Cerebras 硬體達到每秒 750 個輸出 tokens。" * 6
+
+    with pytest.raises(ValueError, match="outside DIGEST_LANGUAGE"):
+        _validate_digest_language("zh-TW", [summary, "This matters because inference cost drops sharply."])
+
+    _validate_digest_language("zh-TW", [summary, "影響部署成本。"])
+
+
+def test_a_field_too_short_to_classify_is_still_accepted() -> None:
+    """Script is length-insensitive where detection is not: these read as zh-cn on their own."""
+    summary = "OpenAI 今日發表 GPT-5.6 Sol 超快版本，透過 Cerebras 硬體達到每秒 750 個輸出 tokens。" * 6
+
+    for short in ("降低延遲。", "重要。", "GPT-5.6 更快。", "成本下降 40%。"):
+        _validate_digest_language("zh-TW", [summary, short])
+
+
+def test_a_chinese_field_cannot_hide_in_an_english_digest_either() -> None:
+    with pytest.raises(ValueError, match="outside DIGEST_LANGUAGE"):
+        _validate_digest_language(
+            "en", ["OpenAI released a very fast model today with new hardware.", "這件事很重要因為成本下降。"]
+        )

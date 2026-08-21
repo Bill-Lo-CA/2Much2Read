@@ -224,8 +224,27 @@ def _detected_language(text: str, expected: str) -> str:
     return cast(str, detect_chinese(text))
 
 
+def _wrong_script(value: str, expected: str) -> bool:
+    """Whether one field is plainly not written in the expected script.
+
+    Telling Traditional from Simplified needs volume, so detection runs over the joined fields.
+    Script does not, and that difference is what lets one field hide behind another: an English
+    practical-significance field beside a long Chinese summary never moves the aggregate, which
+    reports only the dominant language. Checked per field, it has nowhere to hide. Length-insensitive
+    is the point - "降低延遲。" is far too short to classify as Traditional and still unmistakably CJK,
+    and every one of 476 real items carries CJK in both fields.
+    """
+    cjk = len(CJK_PATTERN.findall(value))
+    if expected.startswith("zh"):
+        return cjk == 0
+    return cjk * 2 > len("".join(value.split()))
+
+
 def _validate_digest_language(language: str, values: list[str]) -> None:
     expected = digest_language_code(language)
+    for value in values:
+        if _wrong_script(value, expected):
+            raise ValueError(f"model returned a field outside DIGEST_LANGUAGE={language!r}: {_preview(value)!r}")
     try:
         detected = _detected_language("\n".join(values), expected)
     except (LangDetectException, ChineseLangDetectException) as error:
@@ -236,6 +255,10 @@ def _validate_digest_language(language: str, values: list[str]) -> None:
 
 class OllamaSchemaError(ValueError):
     """A completed Ollama response failed schema validation."""
+
+
+class OllamaContextError(ValueError):
+    """The prompt leaves no room for the source text it exists to read."""
 
 
 class SubscriptionClassification(BaseModel):
@@ -567,6 +590,12 @@ class OllamaClient:
             f"<untrusted_source>\n\n</untrusted_source>\n{_deepen_tail_guard()}"
         )
         bounded, truncated = fitted_deepening_content(content, overhead, self.num_ctx)
+        if content and not bounded:
+            # A small OLLAMA_NUM_CTX leaves the fixed prompt and the output reservation consuming
+            # the whole window. Sending it anyway asks for four to six sentences of specifics from
+            # a headline alone, which the model can only answer by inventing - the same failure as
+            # rewriting a headline that has nothing fuller behind it, reached from the other side.
+            raise OllamaContextError(f"OLLAMA_DEEPEN_NO_ROOM num_ctx={self.num_ctx} title={title!r}")
         prompt = (
             f"{header}truncated_input={str(truncated).lower()}\n"
             f"Schema: {json.dumps(schema)}\n<untrusted_source>\n{bounded}\n</untrusted_source>\n"

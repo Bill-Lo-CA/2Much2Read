@@ -26,7 +26,7 @@ from .digest import (
 from .gmail import GmailClient, credentials, message_headers
 from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
 from .mime import MAX_ANALYSIS_CHARS, EmailExtractionError, extract_gmail_payload
-from .ollama import OllamaClient, OllamaSchemaError, close_ollama_client, create_ollama_client
+from .ollama import OllamaClient, OllamaContextError, OllamaSchemaError, close_ollama_client, create_ollama_client
 from .reranker import RelevanceReranker
 from .schemas import DigestItem, ExtractedEmailContent, ResolvedContent
 from .storage import Database
@@ -261,7 +261,7 @@ def _deepened_entries(
         sources = ", ".join((entry.source_name or entry.source_id or "Unknown", *entry.also_from))
         try:
             rewrite = ollama.deepen_item(entry.item.title, entry.item.category, sources, basis, content)
-        except (OllamaSchemaError, httpx.HTTPError) as error:
+        except (OllamaContextError, OllamaSchemaError, httpx.HTTPError) as error:
             # A headline with its original short summary still beats losing the digest.
             status(f"Warning: kept the original summary for {entry.item.title} ({type(error).__name__})")
             deepened.append(entry)
