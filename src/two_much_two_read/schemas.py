@@ -140,6 +140,11 @@ class StoryIdentity(BaseModel):
     "A Claude Code skill was eating 200,000 tokens" share two proper nouns and are unrelated; no
     rule over token shape or frequency separates those from a real duplicate, because the
     difference is semantic. A model is asked instead, and it answers with one boolean.
+
+    One boolean, not a score with a threshold: swapping which item is presented first moves a
+    0-100 score by up to 35 points, which is wider than the 20-point gap between the true and false
+    pairs it would have to separate, while the same swap never flips the boolean. The README records
+    the measurement.
     """
 
     model_config = ConfigDict(extra="forbid")

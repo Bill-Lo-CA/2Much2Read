@@ -178,6 +178,23 @@ than a wrong digest. Over real runs it puts 0 to 15 pairs in front of the model 
 model or the transport fails, the answer is no — not merging loses an attribution, while a wrong
 merge hands one headline another story's article and rewrites it from there.
 
+A boolean rather than a 0-100 score with a threshold, and that was measured rather than assumed. A
+score does separate the cases — over the pairs from every review round plus known true duplicates,
+the false ones scored `0 0 0 0 0 0 20 30` and the true ones `50 85 95 95 100 100`, a gap of 20. But
+swapping which item is presented first, changing nothing else, moves a score by up to 35 points: the
+genuinely ambiguous pair scores 50 one way and 85 the other. **The gap a threshold would sit in is
+narrower than the noise from argument order alone**, so whether two entries merged would depend on
+which one happened to be the headline and which the mention. The same swap never flips the boolean.
+The model also uses only about seven distinct values, six of the eight false pairs scoring exactly
+0, so a threshold has two or three meaningful positions rather than a hundred — exposing it as a
+setting would advertise tuning that does not exist. Forcing a discrete judgement is what makes the
+answer stable; the number is an ordinal the model was never calibrated to produce.
+
+The one thing a score would buy is picking the best headline when a mention matches several. That
+does not pay either: a model answering yes to two different headlines is a contradiction rather than
+a ranking problem — those two headlines should have merged with each other — and the first match is
+already the highest-ranked headline, since they arrive in reranker order.
+
 This runs on the review model rather than the small one for a practical reason: selection has just
 finished and the headline rewrite is next, so it is already resident and nothing else can be loaded
 beside it within the card. Against the pairs from every review round plus known true duplicates it
