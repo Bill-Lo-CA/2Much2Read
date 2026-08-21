@@ -215,10 +215,6 @@ def _language_instruction(language: str) -> str:
     return f"Use {language} {field}"
 
 
-def _language_code(language: str) -> str:
-    return digest_language_code(language)
-
-
 def _detected_language(text: str, expected: str) -> str:
     detected = cast(str, detect(text))
     if expected not in {"zh-cn", "zh-tw"}:
@@ -229,7 +225,7 @@ def _detected_language(text: str, expected: str) -> str:
 
 
 def _validate_digest_language(language: str, values: list[str]) -> None:
-    expected = _language_code(language)
+    expected = digest_language_code(language)
     try:
         detected = _detected_language("\n".join(values), expected)
     except (LangDetectException, ChineseLangDetectException) as error:
@@ -459,7 +455,6 @@ class OllamaClient:
         maximum: int,
         reserved_category: str = "",
         reserved: int = 0,
-        keep_loaded: bool = False,
     ) -> DigestReview:
         schema = _ollama_schema(DigestReview.model_json_schema())
         candidates = fitted_review_candidates(candidates, schema, maximum, self.num_ctx, reserved_category, reserved)
@@ -472,10 +467,11 @@ class OllamaClient:
                 "format": schema,
                 "stream": False,
                 "think": False,
-                # Selection normally releases the 8B model immediately, which is what keeps three
-                # models off an 8GB card. When the headline rewrite runs straight afterwards it uses
-                # the same model and nothing loads in between, so paying that reload buys nothing.
-                "keep_alive": self.keep_alive if keep_loaded else "0",
+                # Left loaded. Merging and the headline rewrite both run on this model straight
+                # afterwards and nothing loads in between, so releasing it here would buy a reload
+                # and nothing else. run_pipeline unloads it once all three are done, which is what
+                # keeps three models off an 8GB card.
+                "keep_alive": self.keep_alive,
                 "options": {"temperature": 0, "num_ctx": self.num_ctx},
             },
             timeout=self.timeout,

@@ -138,7 +138,7 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
     # The reviewer is released by the caller, once merging and the headline rewrite have also
     # finished with it: both run on this model, and nothing else loads in between.
     review = ollama.review_digest(
-        candidates, settings.digest_max_items, RESERVED_CATEGORY, settings.digest_security_candidate_slots, True
+        candidates, settings.digest_max_items, RESERVED_CATEGORY, settings.digest_security_candidate_slots
     )
     scores = {selection.candidate_id: selection.score for selection in review.selected}
     selected = [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]
