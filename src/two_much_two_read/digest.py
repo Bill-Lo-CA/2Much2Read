@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -62,40 +62,6 @@ LABELS = {
         "discussion": "Discussion",
         "source": "Source",
     },
-    "fr": {
-        "summary": "Résumé",
-        "why": "Pourquoi c’est important",
-        "top": "🔥 À la une",
-        "rest": "🧰 Autres éléments à noter",
-        "processed": "📊 Traitement",
-        "topic": "Sujet : ",
-        "sources": "Sources : ",
-        "valid": "éléments valides",
-        "hn": "HN",
-        "points": "points",
-        "comments": "commentaires",
-        "metadata": "Contenu : métadonnées uniquement",
-        "article": "Article",
-        "discussion": "Discussion",
-        "source": "Source",
-    },
-    "ja": {
-        "summary": "要約",
-        "why": "重要な理由",
-        "top": "🔥 今日の注目",
-        "rest": "🧰 その他の注目",
-        "processed": "📊 処理結果",
-        "topic": "トピック：",
-        "sources": "情報源：",
-        "valid": "件の有効項目",
-        "hn": "HN",
-        "points": "ポイント",
-        "comments": "件のコメント",
-        "metadata": "内容：メタデータのみ",
-        "article": "記事",
-        "discussion": "議論",
-        "source": "出典",
-    },
 }
 NEUTRAL_LABELS = {
     "summary": "•",
@@ -131,6 +97,9 @@ class DigestEntry:
     source_name: str | None = None
     reranker_score: float | None = None
     review_score: int | None = None
+    # Filled by merge_related_entries when other newsletters covered the same story.
+    also_from: tuple[str, ...] = ()
+    merged_summaries: tuple[str, ...] = ()
 
 
 def canonical_url(value: str | None) -> str | None:
@@ -196,7 +165,45 @@ def _preserve_hn_attribution(primary: DigestEntry, other: DigestEntry) -> Digest
     )
 
 
+def _article_url(entry: DigestEntry) -> str | None:
+    """The entry's article link, or None when what it stores is the discussion page instead."""
+    if entry.article_url and canonical_url(entry.article_url) != canonical_url(entry.discussion_url):
+        return entry.article_url
+    return None
+
+
+def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:
+    names = list(primary.also_from)
+    for name in (other.source_name, *other.also_from):
+        if name and name != primary.source_name and name not in names:
+            names.append(name)
+    summaries = list(primary.merged_summaries) or [primary.item.summary_zh_tw]
+    for summary in (other.item.summary_zh_tw, *other.merged_summaries):
+        if summary not in summaries:
+            summaries.append(summary)
+    return replace(
+        # The absorbed entry stops being rendered, so its Hacker News discussion, score, and comment
+        # count would be lost with it.
+        _preserve_hn_attribution(primary, other),
+        also_from=tuple(names),
+        merged_summaries=tuple(summaries),
+        # A newsletter that only names a story often carries no link while another one does. A
+        # Hacker News self-post stores its discussion URL here, which is not an article at all, so
+        # it does not block borrowing one: keeping it would lose both the link the renderer shows
+        # and the fuller text the headline rewrite reads.
+        article_url=_article_url(primary) or _article_url(other) or primary.article_url,
+    )
+
+
 def dedupe_entries(items: list[DigestEntry]) -> list[DigestEntry]:
+    """Fold entries that are literally the same story into one, keeping the strongest.
+
+    Two newsletters linking the same canonical article is the least ambiguous repeat coverage there
+    is - it needs none of the token heuristics that related-story merging rests on, and so it holds
+    in every digest language. It was also the case that lost the most: the loser was dropped here,
+    before merging ever ran, so the surviving entry never recorded the other newsletter or its
+    wording. Absorbing carries both across, exactly as the related-story merge does.
+    """
     # ponytail: one-pass in-memory dedupe; move history lookup to SQLite when volume warrants it.
     winners: dict[str, DigestEntry] = {}
     for item in items:
@@ -205,23 +212,115 @@ def dedupe_entries(items: list[DigestEntry]) -> list[DigestEntry]:
         if current is None:
             winners[key] = item
         elif _entry_rank(item) > _entry_rank(current):
-            winners[key] = _preserve_hn_attribution(item, current)
+            winners[key] = _absorbed(item, current)
         else:
-            winners[key] = _preserve_hn_attribution(current, item)
+            winners[key] = _absorbed(current, item)
     return list(winners.values())
 
 
-def _labels(language: str) -> dict[str, str]:
+# Newsletters translate a headline differently and link to different pages for the same event, so
+# neither the canonical URL nor the rendered title identifies a story across sources. What survives
+# translation is the Latin-script product and vendor names, which makes them a usable shortlist for
+# which pairs to ask about. TLDR's section markers are stripped first: they are shared by every item
+# in a section and would shortlist a whole newsletter against itself.
+STORY_BOILERPLATE = re.compile(r"\((?:product launch|sponsor|\d+\s*minute read)\)", re.IGNORECASE)
+STORY_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9.\-]*")
+# Capitalised in the source, or carrying a version number. This once tried to be a definition of
+# identity, which it cannot be - ordinary English vocabulary is capitalised in a Title Case headline.
+# It is now only a cost control on how many pairs reach the model: over real runs it holds the
+# shortlist to 0-15 pairs per digest, against 17-108 without it. Missing a product that is lowercase
+# in its own name costs a merge rather than causing a wrong one.
+STORY_IDENTITY_TOKEN = re.compile(r"^(?:[A-Z].*|.*\d.*)$")
+
+
+def _tokens(text: str) -> set[str]:
+    found = STORY_TOKEN.findall(STORY_BOILERPLATE.sub(" ", text))
+    return {token.casefold() for token in found if len(token) > 1 and STORY_IDENTITY_TOKEN.match(token)}
+
+
+def story_tokens(entry: DigestEntry) -> set[str]:
+    return _tokens(f"{entry.item.title} {entry.item.summary_zh_tw}")
+
+
+def share_a_candidate_token(left: DigestEntry, right: DigestEntry) -> bool:
+    """Whether two entries are worth asking a model about. A shortlist, not a decision.
+
+    Token overlap cannot answer whether two items are the same story - six rounds of filtering it
+    established that the classes it gets wrong are unbounded, because the distinction is semantic
+    rather than lexical. "Claude Code sessions can now talk to each other" and "A Claude Code skill
+    was eating 200,000 tokens" share two proper nouns and are unrelated, and no rule over token
+    shape or frequency separates that from a real duplicate.
+
+    So overlap only decides which pairs get asked. Precision moved to the model, which frees this to
+    be loose: one shared identity-shaped token is enough. Measured over real runs that puts 0 to 15
+    pairs in front of the model per digest, typically 2 to 5. Dropping the shape requirement as well
+    would raise the worst case to 108, which is why it stays.
+    """
+    return bool(story_tokens(left) & story_tokens(right))
+
+
+def merge_related_entries(
+    headlines: list[DigestEntry],
+    mentions: list[DigestEntry],
+    same_story: Callable[[DigestEntry, DigestEntry], bool],
+) -> tuple[list[DigestEntry], list[DigestEntry]]:
+    """Fold repeat coverage of a headline story into that headline, then dedupe the mentions.
+
+    The reviewer already drops duplicates from its own selection, so the copies it rejected land in
+    the mention list and reappear under the headline they duplicate. Merging keeps the strongest
+    entry and records the other sources, which is worth showing: several newsletters carrying one
+    story is itself a signal.
+
+    Whether two entries are the same story is decided by `same_story`, which the pipeline backs with
+    a model. Token overlap only shortlists, so the first pair the model accepts wins rather than the
+    highest-scoring one - there is no longer a score to rank by, and a mention that is the same story
+    as two different headlines is a contradiction rather than a ranking problem.
+    """
+    merged = list(headlines)
+    remaining: list[DigestEntry] = []
+    for mention in mentions:
+        index = _first_match(mention, merged, same_story)
+        if index is None:
+            remaining.append(mention)
+            continue
+        merged[index] = _absorbed(merged[index], mention)
+    deduped: list[DigestEntry] = []
+    for mention in remaining:
+        index = _first_match(mention, deduped, same_story)
+        if index is None:
+            deduped.append(mention)
+            continue
+        deduped[index] = _absorbed(deduped[index], mention)
+    return merged, deduped
+
+
+def _first_match(
+    entry: DigestEntry, candidates: list[DigestEntry], same_story: Callable[[DigestEntry, DigestEntry], bool]
+) -> int | None:
+    for index, candidate in enumerate(candidates):
+        if share_a_candidate_token(entry, candidate) and same_story(entry, candidate):
+            return index
+    return None
+
+
+LANGUAGE_ALIASES = {
+    "zh-tw": "zh-tw",
+    "zh-hant": "zh-tw",
+    "zh-hk": "zh-tw",
+    "zh-mo": "zh-tw",
+    "zh-cn": "zh-cn",
+    "zh-hans": "zh-cn",
+}
+SUPPORTED_DIGEST_LANGUAGES = ("zh-tw", "zh-cn", "en")
+
+
+def digest_language_code(language: str) -> str:
     normalized = language.casefold().replace("_", "-")
-    aliases = {
-        "zh-tw": "zh-tw",
-        "zh-hant": "zh-tw",
-        "zh-hk": "zh-tw",
-        "zh-mo": "zh-tw",
-        "zh-cn": "zh-cn",
-        "zh-hans": "zh-cn",
-    }
-    return LABELS.get(aliases.get(normalized, normalized.split("-", maxsplit=1)[0]), NEUTRAL_LABELS)
+    return LANGUAGE_ALIASES.get(normalized, normalized.split("-", maxsplit=1)[0])
+
+
+def _labels(language: str) -> dict[str, str]:
+    return LABELS.get(digest_language_code(language), NEUTRAL_LABELS)
 
 
 def render_digest(
@@ -254,7 +353,8 @@ def render_digest(
             f"   {labels['why']}：{sanitize_discord_text(item.why_it_matters_zh_tw)}",
         ]
         if value.source_name:
-            lines.append(f"   {labels['source']}：{sanitize_discord_text(value.source_name)}")
+            names = ", ".join((value.source_name, *value.also_from))
+            lines.append(f"   {labels['source']}：{sanitize_discord_text(names)}")
         if value.hn_item_id:
             if value.hn_score is not None and value.hn_comments is not None:
                 lines.append(f"   {labels['hn']}：{value.hn_score} {labels['points']} · {value.hn_comments} {labels['comments']}")
@@ -264,8 +364,9 @@ def render_digest(
                 lines.append(f"   {labels['article']}：<{value.article_url}>")
             if value.discussion_url:
                 lines.append(f"   {labels['discussion']}：<{value.discussion_url}>")
-        elif item.source_url:
-            lines.append(f"   {labels['article']}：<{item.source_url}>")
+        elif url := (value.article_url or (str(item.source_url) if item.source_url else None)):
+            # article_url may have been borrowed from a merged entry whose newsletter linked the story.
+            lines.append(f"   {labels['article']}：<{url}>")
         return "\n".join(lines)
 
     def mention(value: DigestEntry) -> str:
@@ -273,7 +374,7 @@ def render_digest(
         item = value.item
         parts = [f"• {sanitize_discord_text(item.title)}"]
         if value.source_name:
-            parts.append(sanitize_discord_text(value.source_name))
+            parts.append(sanitize_discord_text(", ".join((value.source_name, *value.also_from))))
         url = value.article_url or (str(item.source_url) if item.source_url else None) or value.discussion_url
         if url:
             parts.append(f"<{url}>")

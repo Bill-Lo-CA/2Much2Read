@@ -132,6 +132,53 @@ class ArticleAnalysis(ItemAnalysis):
     pass
 
 
+class StoryIdentity(BaseModel):
+    """Whether two digest items describe the same event.
+
+    Token overlap can only ask whether two items share vocabulary, and six rounds of filtering it
+    never reached the question that matters. "Claude Code sessions can now talk to each other" and
+    "A Claude Code skill was eating 200,000 tokens" share two proper nouns and are unrelated; no
+    rule over token shape or frequency separates those from a real duplicate, because the
+    difference is semantic. A model is asked instead, and it answers with one boolean.
+
+    One boolean, not a score with a threshold: swapping which item is presented first moves a
+    0-100 score by up to 35 points, which is wider than the 20-point gap between the true and false
+    pairs it would have to separate, while the same swap never flips the boolean. The README records
+    the measurement.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    same_story: bool = Field(description="True only if both items report the same specific event")
+
+
+class ItemDeepening(BaseModel):
+    """A headline item rewritten from fuller source text than the extractor ever saw.
+
+    The extractor splits one email into up to ten items, so each gets a few lines of input and
+    returns a summary around 60 characters. A headline deserves more, and the field bounds have
+    always allowed it, so this rewrite runs over the article body or the merged newsletter coverage.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Decided before the rewrite is written, so the model commits to the judgement first. A link can
+    # be wrong - mismatched by the URL matcher or borrowed from a merge - and rewriting from the
+    # wrong page turns a wrong link into a headline whose body describes a different story.
+    covers_the_item: bool = Field(description="True only if the source text is about this item's own headline")
+    summary_zh_tw: str = Field(min_length=1, max_length=800, description="What happened, in the digest language")
+    why_it_matters_zh_tw: str = Field(min_length=1, max_length=800, description="Practical significance, in the digest language")
+
+    @field_validator("summary_zh_tw", "why_it_matters_zh_tw")
+    @classmethod
+    def reject_model_links(cls, value: str) -> str:
+        # Written from untrusted article text, so it is held to the same rule as every other
+        # model-owned field: the renderer owns links, the model never supplies them.
+        if MODEL_TEXT_INJECTION.search(value):
+            raise ValueError("model-owned text must not contain URLs or Markdown links")
+        return value
+
+
 class EmailExtraction(BaseModel):
     source_id: str
     newsletter_title: str

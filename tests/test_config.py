@@ -1,6 +1,7 @@
 from pathlib import Path
 
 import pytest
+from pydantic import ValidationError
 
 from two_much_two_read import config
 from two_much_two_read.config import (
@@ -247,3 +248,21 @@ def test_subscription_file_updates_emit_explicit_gmail_types(tmp_path: Path) -> 
     )
 
     assert "type: gmail" in sources_path.read_text(encoding="utf-8")
+
+
+def test_only_the_measured_digest_languages_are_accepted() -> None:
+    for language in ("zh-TW", "zh-Hant", "zh-CN", "en", "en-US"):
+        assert Settings(digest_language=language).digest_language == language
+
+    for language in ("fr", "ja", "de"):
+        with pytest.raises(ValidationError, match="is not supported"):
+            Settings(digest_language=language)
+
+
+def test_the_merge_judgement_budget_bounds_what_one_digest_may_spend() -> None:
+    """A bound against a pathological run: real runs shortlist 0 to 15 pairs, typically 2 to 5."""
+    assert Settings().digest_merge_judgements == 60
+    assert Settings(digest_merge_judgements=0).digest_merge_judgements == 0
+
+    with pytest.raises(ValidationError):
+        Settings(digest_merge_judgements=-1)

@@ -195,7 +195,7 @@ def test_unwritten_reranker_scores_are_reported() -> None:
     assert messages == ["Warning: recorded 1 of 2 reranker scores"]
 
 
-def test_final_review_selects_scored_items_and_releases_the_reviewer() -> None:
+def test_final_review_selects_scored_items_and_leaves_the_reviewer_loaded() -> None:
     class FakeOllama:
         review_model = "qwen3:8b"
 
@@ -212,15 +212,19 @@ def test_final_review_selects_scored_items_and_releases_the_reviewer() -> None:
             self.unloaded.append(model)
 
     ollama = FakeOllama()
-    settings = Settings(
-        digest_max_items=1, digest_review_candidate_limit=2, digest_secondary_items=0, ollama_review_model="qwen3:8b"
-    )
+    settings = Settings(digest_max_items=1, digest_review_candidate_limit=2, ollama_review_model="qwen3:8b")
 
     reviewed = pipeline._reviewed_entries(settings, ollama, [entry(2, "Release", "TLDR AI"), entry(1, "Trial", "AlphaSignal")])
 
-    assert [(value.candidate_id, value.review_score) for value in reviewed] == [(2, 90)]
+    assert [(value.candidate_id, value.review_score) for value in reviewed] == [(2, 90), (1, None)]
     assert ollama.candidates[0]["source"] == "TLDR AI"
-    assert ollama.unloaded == ["qwen3:8b"]
+    # The headline rewrite runs on the same model, so run_pipeline releases it, not this step.
+    assert ollama.unloaded == []
+
+
+def never_the_same(_left: DigestEntry, _right: DigestEntry) -> bool:
+    """These fixtures are unrelated stories; the model would say so."""
+    return False
 
 
 def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None:
@@ -236,8 +240,16 @@ def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None
 
     reviewed = pipeline._reviewed_entries(settings, FakeOllama(), ranked)
 
-    # The selection keeps its review score; the next two ranked candidates follow without one.
-    assert [(value.candidate_id, value.review_score) for value in reviewed] == [(1, 90), (2, None), (3, None)]
+    # Every passed-over candidate is returned; the secondary limit is applied after merging, so a
+    # mention absorbed into a headline frees its slot for the next one rather than shrinking the list.
+    assert [(value.candidate_id, value.review_score) for value in reviewed] == [
+        (1, 90),
+        (2, None),
+        (3, None),
+        (4, None),
+        (5, None),
+    ]
+    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 2, never_the_same)] == [1, 2, 3]
 
 
 def test_secondary_mentions_can_be_turned_off() -> None:
@@ -250,5 +262,6 @@ def test_secondary_mentions_can_be_turned_off() -> None:
 
     settings = Settings(digest_max_items=1, digest_secondary_items=0)
     ranked = [entry(index, f"Story {index}", "TLDR AI") for index in range(1, 4)]
+    reviewed = pipeline._reviewed_entries(settings, FakeOllama(), ranked)
 
-    assert [value.candidate_id for value in pipeline._reviewed_entries(settings, FakeOllama(), ranked)] == [1]
+    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 0, never_the_same)] == [1]

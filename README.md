@@ -144,6 +144,93 @@ extracted and ranked, so listing them costs nothing beyond the message length; s
 for a headline-only digest. `DIGEST_TOP_ITEMS` controls how many entries the renderer puts in the
 headline section, so keep it equal to `DIGEST_MAX_ITEMS` unless you want mentions promoted into it.
 
+Several newsletters cover the same story, and the reviewer drops the copies from its own selection,
+which used to land them in the secondary section under the headline they duplicate. Repeat coverage
+is now folded into the entry it duplicates: the strongest one keeps its place, the other newsletters
+are listed alongside it, a link is borrowed from a merged entry when the headline's own newsletter
+carried none, and a merged Hacker News entry keeps its discussion link, score, and comment count.
+The secondary limit is applied after merging, so an absorbed mention frees its slot for the next
+candidate instead of shrinking the section.
+
+Two newsletters linking the same canonical article are folded together first, and that case needs
+none of what follows: an identical URL is not a heuristic, so it holds in every digest language.
+Everything below is for the harder case, where the same event reaches two newsletters as two
+different pages.
+
+Whether two entries are the same story is decided by the review model, not by comparing their text.
+Token overlap was tried thoroughly first and the record is worth keeping, because it is what makes
+the current design obviously right: six successive review rounds each found a different class of
+pair it got wrong. Lowercase vocabulary (`launches`, `new`, `model`) was filtered by requiring
+identity-shaped tokens; a bare acronym (`AI`) by document frequency; Title Case (`Launches`, `New`,
+`Model`) defeated both; gating on `DIGEST_LANGUAGE` was holed by the 21% of items whose titles the
+extractor never translated; and every remaining variant is another instance of the same thing.
+Measured over 476 real items, 17 unrelated pairs still merged — *"Claude Code sessions can now talk
+to each other"* against *"A Claude Code skill was eating 200,000 tokens"* among them, where the
+shared tokens are genuine proper nouns naming a vendor rather than a story. The classes are
+unbounded because the question is semantic and token overlap is lexical.
+
+So token overlap now only decides which pairs are worth asking about. A pair sharing one
+identity-shaped token is shortlisted; the model answers one boolean for it. That inverts the
+economics of the shortlist — it can be loose, because a wrong shortlist costs a generation rather
+than a wrong digest. Over real runs it puts 0 to 15 pairs in front of the model per digest, typically
+2 to 5; dropping the shape requirement raises the worst case to 108, which is why it stays.
+`DIGEST_MERGE_JUDGEMENTS` (default 60) bounds a pathological run. Past the budget, and whenever the
+model or the transport fails, the answer is no — not merging loses an attribution, while a wrong
+merge hands one headline another story's article and rewrites it from there.
+
+A boolean rather than a 0-100 score with a threshold, and that was measured rather than assumed. A
+score does separate the cases — over the pairs from every review round plus known true duplicates,
+the false ones scored `0 0 0 0 0 0 20 30` and the true ones `50 85 95 95 100 100`, a gap of 20. But
+swapping which item is presented first, changing nothing else, moves a score by up to 35 points: the
+genuinely ambiguous pair scores 50 one way and 85 the other. **The gap a threshold would sit in is
+narrower than the noise from argument order alone**, so whether two entries merged would depend on
+which one happened to be the headline and which the mention. The same swap never flips the boolean.
+The model also uses only about seven distinct values, six of the eight false pairs scoring exactly
+0, so a threshold has two or three meaningful positions rather than a hundred — exposing it as a
+setting would advertise tuning that does not exist. Forcing a discrete judgement is what makes the
+answer stable; the number is an ordinal the model was never calibrated to produce.
+
+The one thing a score would buy is picking the best headline when a mention matches several. That
+does not pay either: a model answering yes to two different headlines is a contradiction rather than
+a ranking problem — those two headlines should have merged with each other — and the first match is
+already the highest-ranked headline, since they arrive in reranker order.
+
+This runs on the review model rather than the small one for a practical reason: selection has just
+finished and the headline rewrite is next, so it is already resident and nothing else can be loaded
+beside it within the card. Against the pairs from every review round plus known true duplicates it
+answered 9 of 10 correctly, the exception being a true pair it declined to merge — the safe
+direction, and arguably the right call, since one item announced a watermark and the other reported
+on using it.
+
+Headline items are then rewritten from fuller text than the extractor ever saw. The extractor splits
+one email into up to ten items, so each is written from a few lines and lands around 60 characters,
+which is thin for the items leading the digest. `DIGEST_DEEPEN_HEADLINES` (default on) fetches each
+headline's article and rewrites its summary and significance on the review model, falling back to the
+merged newsletter coverage when there is no link or the fetch fails. A Hacker News self-post is
+always rewritten from that fallback: it has no article, so its stored URL is the discussion page,
+and extract_article cannot tell the author's post from the replies to it. Email bodies are never persisted
+- only their hash and length - so the article is the only route back to fuller text. The rewrite is
+discarded, keeping the original summary, when the fetch or the model fails, when the model reports
+that the source text is not about this item, or when it answers in the wrong language. It is refused
+outright when trimming to `OLLAMA_NUM_CTX` leaves no source text at all — at 2048 the fixed prompt
+and the output reservation consume the window, and asking for four to six sentences of specifics
+from a headline alone can only be answered by inventing.
+
+The wrong-language check runs per field as well as over the joined text, because the two catch
+different things. Telling Traditional from Simplified needs volume, so that runs on the join; but an
+aggregate reports only the dominant language, which lets a short English practical-significance
+field sit unnoticed beside a long Chinese summary. Script needs no volume, so it is checked per
+field — `降低延遲。` is far too short to classify as Traditional and still unmistakably CJK. All 476
+items in the live database carry CJK in both fields, so this rejects nothing that was already
+working. A headline
+with no article and no merged coverage is skipped outright rather than rewritten: the fallback would
+be its own summary, and a prompt asking for four to six sentences naming versions and numbers could
+only be met from one sentence by padding or inventing. This adds
+roughly one article fetch and one generation per headline. Selection hands the review model over
+still loaded when the rewrite is enabled, and it stays resident across the headlines, so the rewrite
+costs no model load; the extractor and reranker are already released by then, so the three models
+still never share memory.
+
 Reviewer input is split by category rather than taken as one global top-N.
 `DIGEST_SECURITY_CANDIDATE_SLOTS` (default 7 of the 20) reserves slots for `SECURITY` items; the
 rest go to the remaining categories. The reranker ranks AI releases above vulnerability

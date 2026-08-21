@@ -15,12 +15,14 @@ from two_much_two_read import mail_operations, pipeline
 from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl
 from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult
 from two_much_two_read.config import HackerNewsSource, Settings
+from two_much_two_read.digest import DigestEntry
 from two_much_two_read.hackernews import HackerNewsCandidate, HackerNewsDiscovery, ResolvedHackerNewsContent
 from two_much_two_read.mime import EmailExtractionError
 from two_much_two_read.ollama import OllamaSchemaError
 from two_much_two_read.pipeline import deliver_digest, run_pipeline
 from two_much_two_read.schemas import (
     ArticleAnalysis,
+    DigestItem,
     EmailExtraction,
     ExtractedEmailContent,
     NewsletterItemAnalysis,
@@ -110,6 +112,7 @@ def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
             replace(entry, review_score=100 - index) for index, entry in enumerate(entries[: settings.digest_max_items])
         ],
     )
+    monkeypatch.setattr(pipeline, "_deepened_entries", lambda _settings, _ollama, entries, _status: entries)
 
 
 def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -721,7 +724,7 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
         "_process_source",
         lambda *args, **kwargs: events.append("extractor:run") or (0, 0, 0, 0, [], []),
     )
-    monkeypatch.setattr(pipeline, "_unload_model", lambda *_: events.append("extractor:unload"))
+    monkeypatch.setattr(pipeline, "_unload_model", lambda _ollama, model, *_: events.append(f"unload:{model}"))
     monkeypatch.setattr(pipeline, "RelevanceReranker", FakeReranker)
     monkeypatch.setattr(
         pipeline,
@@ -733,17 +736,26 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
         "_reviewed_entries",
         lambda *args: events.append("reviewer:run") or [],
     )
+    monkeypatch.setattr(
+        pipeline,
+        "_deepened_entries",
+        lambda _settings, _ollama, entries, _status: events.append("reviewer:deepen") or entries,
+    )
 
     run_pipeline(settings, no_deliver=True)
 
+    # The reviewer stays resident across the headline rewrite and is released only afterwards,
+    # so the three models still never hold memory at the same time.
     assert events == [
         "extractor:load",
         "extractor:run",
-        "extractor:unload",
+        "unload:llama3.2:3b",
         "reranker:load",
         "reranker:rank",
         "reranker:unload",
         "reviewer:run",
+        "reviewer:deepen",
+        "unload:qwen3:8b",
     ]
 
 
@@ -1863,3 +1875,97 @@ def test_labels_reconcile_repairs_terminal_messages_and_records_retries(tmp_path
     ).fetchall()
     assert [tuple(row) for row in rows] == [("synced", None), ("failed", "GMAIL_LABEL_SYNC_FAILED")]
     database.close()
+
+
+class CountingOllama:
+    def __init__(self, answers: list[bool] | None = None, error: Exception | None = None) -> None:
+        self.seen: list[tuple[dict[str, str], dict[str, str]]] = []
+        self.answers = answers
+        self.error = error
+
+    def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
+        self.seen.append((left, right))
+        if self.error is not None:
+            raise self.error
+        return self.answers.pop(0) if self.answers else True
+
+
+def judged_entry(candidate_id: int, title: str, summary: str) -> DigestEntry:
+    return DigestEntry(
+        DigestItem(
+            title=title,
+            category="AI_MODEL",
+            summary_zh_tw=summary,
+            why_it_matters_zh_tw="重要原因",
+            importance=8,
+            confidence=0.8,
+        ),
+        candidate_id=candidate_id,
+        source_name="TLDR AI",
+    )
+
+
+def test_the_model_is_sent_the_title_and_summary_of_both_items() -> None:
+    ollama = CountingOllama()
+    left = judged_entry(1, "GPT-5.6 Sol 發表", "OpenAI 推出 GPT-5.6 Sol。")
+    right = judged_entry(2, "OpenAI 加速 GPT-5.6 Sol", "Cerebras 硬體驅動 GPT-5.6 Sol。")
+
+    assert pipeline._story_judge(ollama, 10, lambda _: None)(left, right)
+    assert ollama.seen == [
+        (
+            {"title": "GPT-5.6 Sol 發表", "summary": "OpenAI 推出 GPT-5.6 Sol。", "source": "TLDR AI"},
+            {"title": "OpenAI 加速 GPT-5.6 Sol", "summary": "Cerebras 硬體驅動 GPT-5.6 Sol。", "source": "TLDR AI"},
+        ),
+    ]
+
+
+def test_one_pair_is_only_ever_asked_about_once() -> None:
+    """The mention list is compared against headlines and then against itself."""
+    ollama = CountingOllama([False])
+    left, right = judged_entry(1, "甲", "甲摘要"), judged_entry(2, "乙", "乙摘要")
+    decide = pipeline._story_judge(ollama, 10, lambda _: None)
+
+    assert decide(left, right) is False
+    assert decide(left, right) is False
+    assert len(ollama.seen) == 1
+
+
+def test_the_budget_stops_the_run_from_spending_more_generations() -> None:
+    """Past the budget nothing merges, which loses an attribution rather than inventing one."""
+    ollama = CountingOllama()
+    decide = pipeline._story_judge(ollama, 2, lambda _: None)
+    pairs = [(judged_entry(i, f"標題{i}", "摘要"), judged_entry(100 + i, f"其他{i}", "摘要")) for i in range(5)]
+
+    answers = [decide(left, right) for left, right in pairs]
+
+    assert answers == [True, True, False, False, False]
+    assert len(ollama.seen) == 2
+
+
+def test_a_failed_comparison_answers_no_and_is_reported() -> None:
+    ollama = CountingOllama(error=OllamaSchemaError("bad json"))
+    messages: list[str] = []
+
+    decided = pipeline._story_judge(ollama, 10, messages.append)(judged_entry(1, "甲", "摘要"), judged_entry(2, "乙", "摘要"))
+
+    assert decided is False
+    assert messages == ["Warning: could not compare 甲 (OllamaSchemaError); left unmerged"]
+
+
+def test_a_transport_failure_also_leaves_the_pair_unmerged() -> None:
+    ollama = CountingOllama(error=httpx.ConnectError("ollama down"))
+
+    assert not pipeline._story_judge(ollama, 10, lambda _: None)(judged_entry(1, "甲", "摘要"), judged_entry(2, "乙", "摘要"))
+
+
+def test_only_shortlisted_pairs_reach_the_model() -> None:
+    """The shortlist is what keeps this to a handful of generations per digest."""
+    ollama = CountingOllama()
+    headline = replace(judged_entry(1, "GPT-5.6 Sol 發表", "OpenAI 推出 GPT-5.6 Sol。"), review_score=90)
+    unrelated = judged_entry(2, "Rust 1.94 釋出", "Rust 團隊釋出 1.94 版。")
+    related = judged_entry(3, "GPT-5.6 Sol 開放使用", "OpenAI 開放 GPT-5.6 Sol。")
+
+    merged = pipeline._merged_entries([headline, unrelated, related], 10, pipeline._story_judge(ollama, 10, lambda _: None))
+
+    assert len(ollama.seen) == 1
+    assert [entry.item.title for entry in merged] == ["GPT-5.6 Sol 發表", "Rust 1.94 釋出"]
