@@ -109,8 +109,30 @@ def test_the_matcher_only_field_never_reaches_a_persisted_digest_item() -> None:
         DigestItem.model_validate(analysis_values())
 
 
-def test_a_verbatim_headline_may_contain_a_url_the_display_title_may_not() -> None:
-    """It is copied out of untrusted text, so rejecting it would fail the whole email."""
+def test_a_url_in_the_verbatim_headline_is_stripped_rather_than_rejected() -> None:
+    """The display title rejects URLs; this one is copied from untrusted text and only feeds matching."""
     item = NewsletterItemAnalysis.model_validate(analysis_values(source_title="Read https://example.com"))
 
-    assert item.source_title == "Read https://example.com"
+    assert item.source_title == "Read"
+
+
+def test_a_prose_newsletter_headline_is_trimmed_rather_than_failing_the_email() -> None:
+    """Four of seven failures in one run were this, each losing a whole email's worth of items."""
+    inline_link = "OpenAI is launching a new thing [ https://link.thenewstack.io/click/9j84b54LBT8Mf2_YhLP04 ]"
+
+    item = NewsletterItemAnalysis.model_validate(analysis_values(source_title=inline_link))
+
+    assert item.source_title == "OpenAI is launching a new thing"
+
+
+def test_an_overlong_headline_is_bounded_instead_of_rejected() -> None:
+    item = NewsletterItemAnalysis.model_validate(analysis_values(source_title="word " * 200))
+
+    assert len(item.source_title) == 200
+
+
+def test_a_headline_that_is_only_a_link_still_yields_something_to_match_on() -> None:
+    """min_length has already passed by then, so an empty result would slip through as valid."""
+    item = NewsletterItemAnalysis.model_validate(analysis_values(source_title="https://example.com/story"))
+
+    assert item.source_title == "https://example.com/story"
