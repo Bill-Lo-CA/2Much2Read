@@ -157,50 +157,33 @@ none of what follows: an identical URL is not a heuristic, so it holds in every 
 Everything below is for the harder case, where the same event reaches two newsletters as two
 different pages.
 
-Merging runs only for a Chinese digest, and `DIGEST_LANGUAGE` accepts only Chinese and English at
-all — every stage is language-specific, and these are the ones the pipeline has been built and
-measured for. Neither the canonical URL nor the title identifies a story across newsletters: each
-translates a headline differently and links to a different page for one event. Matching therefore
-runs on the tokens shaped like an identity — capitalised in the source, or carrying a version
-number — in the title and summary, minus the tokens too widespread across the run's candidates to
-identify anything. `DIGEST_MERGE_SIMILARITY` sets the threshold — strictly positive, since 0 reads
-as "off" but would mean "merge on the token conditions alone" — and two conditions hold regardless
-of it: two distinct shared tokens, and at least one of them shared by the two titles. Every
-condition was added because the previous one let something through. Pairs covering one story shared two to five
-tokens while every other pair shared at most one, always a bare vendor word like "openai". A summary
-routinely names another story to compare against it, so body overlap alone merged an item about Grok
-into one about GPT-5.6 Sol. And ordinary vocabulary only looks identifying in a language whose prose
-is Latin script: with `DIGEST_LANGUAGE=en`, "OpenAI launches new AI model for coding" shares five
-tokens with the same sentence about Google. Filtering by document frequency does not fix that — no
-cutoff both keeps `gpt-5.6` and drops `model`, because a batch of fifteen items is far too small to
-infer a stopword list — whereas shape separates them in both languages. Products written lowercase
-in their own name are the known cost. Shape does not catch a generic acronym, though — `AI` is
-capitalised, and two unrelated OpenAI products sharing `openai` and `ai` scored 0.5 — so tokens
-appearing in more than 15% of the run's candidates are dropped as well. That frequency is measured
-over every ranked candidate rather than the handful that reach merging: repeat coverage of one story
-inflates its own identifying tokens, and over the merge input the same measurement inverts, putting
-`gpt-5.6` at 26.7% against `ai` at 6.7%.
+Whether two entries are the same story is decided by the review model, not by comparing their text.
+Token overlap was tried thoroughly first and the record is worth keeping, because it is what makes
+the current design obviously right: six successive review rounds each found a different class of
+pair it got wrong. Lowercase vocabulary (`launches`, `new`, `model`) was filtered by requiring
+identity-shaped tokens; a bare acronym (`AI`) by document frequency; Title Case (`Launches`, `New`,
+`Model`) defeated both; gating on `DIGEST_LANGUAGE` was holed by the 21% of items whose titles the
+extractor never translated; and every remaining variant is another instance of the same thing.
+Measured over 476 real items, 17 unrelated pairs still merged — *"Claude Code sessions can now talk
+to each other"* against *"A Claude Code skill was eating 200,000 tokens"* among them, where the
+shared tokens are genuine proper nouns naming a vendor rather than a story. The classes are
+unbounded because the question is semantic and token overlap is lexical.
 
-None of that survives an English digest, which is why merging is gated rather than tuned further.
-The whole technique rests on Chinese prose leaving nothing but proper nouns in Latin script. English
-prose leaves ordinary vocabulary there too, and successive attempts each closed one class and
-exposed the next: shape filtered lowercase words, frequency filtered a bare acronym, and Title Case
-defeats both — "OpenAI Launches New AI Model for Coding" and the same sentence about Search share
-five accepted tokens and score 0.714, with a frequency filter powerless because those words appear
-only in that pair. Identifying stories across an English digest needs embeddings or entity
-recognition, not another pattern.
+So token overlap now only decides which pairs are worth asking about. A pair sharing one
+identity-shaped token is shortlisted; the model answers one boolean for it. That inverts the
+economics of the shortlist — it can be loose, because a wrong shortlist costs a generation rather
+than a wrong digest. Over real runs it puts 0 to 15 pairs in front of the model per digest, typically
+2 to 5; dropping the shape requirement raises the worst case to 108, which is why it stays.
+`DIGEST_MERGE_JUDGEMENTS` (default 60) bounds a pathological run. Past the budget, and whenever the
+model or the transport fails, the answer is no — not merging loses an attribution, while a wrong
+merge hands one headline another story's article and rewrites it from there.
 
-`DIGEST_LANGUAGE` is the coarse gate and cannot be the only one, because it describes the
-configuration rather than the data: title translation is instructed but never validated, and 100 of
-476 items in the live database carried a title with no CJK at all under `DIGEST_LANGUAGE=zh-TW`. So
-each pair is tested on its own titles, and at least one has to be Chinese prose. One is enough
-because the comparison is an intersection — if either side offers only proper nouns, so does the
-shared set. Over those 476 items, pairs reaching the default threshold split by title script as 130
-Chinese-Chinese, 73 mixed, and 17 English-English; every clear false merge was in the last group,
-while the mixed group is mostly one story that one newsletter translated and another did not, which
-is exactly the repeat coverage this feature exists to find. Requiring one Chinese title removes all
-17 and keeps all 203. Merging is also skipped when fewer than four candidates were ranked, since
-below that no token can exceed the frequency floor and nothing is ever filtered.
+This runs on the review model rather than the small one for a practical reason: selection has just
+finished and the headline rewrite is next, so it is already resident and nothing else can be loaded
+beside it within the card. Against the pairs from every review round plus known true duplicates it
+answered 9 of 10 correctly, the exception being a true pair it declined to merge — the safe
+direction, and arguably the right call, since one item announced a watermark and the other reported
+on using it.
 
 Headline items are then rewritten from fuller text than the extractor ever saw. The extractor splits
 one email into up to ten items, so each is written from a few lines and lands around 60 characters,

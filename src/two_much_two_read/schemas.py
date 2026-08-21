@@ -132,6 +132,21 @@ class ArticleAnalysis(ItemAnalysis):
     pass
 
 
+class StoryIdentity(BaseModel):
+    """Whether two digest items describe the same event.
+
+    Token overlap can only ask whether two items share vocabulary, and six rounds of filtering it
+    never reached the question that matters. "Claude Code sessions can now talk to each other" and
+    "A Claude Code skill was eating 200,000 tokens" share two proper nouns and are unrelated; no
+    rule over token shape or frequency separates those from a real duplicate, because the
+    difference is semantic. A model is asked instead, and it answers with one boolean.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    same_story: bool = Field(description="True only if both items report the same specific event")
+
+
 class ItemDeepening(BaseModel):
     """A headline item rewritten from fuller source text than the extractor ever saw.
 

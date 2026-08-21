@@ -19,10 +19,8 @@ from .config import GmailSource, HackerNewsSource, Settings, load_sources
 from .digest import (
     DigestEntry,
     canonical_url,
-    common_story_tokens,
     dedupe_entries,
     merge_related_entries,
-    merging_applies,
     render_digest,
 )
 from .gmail import GmailClient, credentials, message_headers
@@ -137,13 +135,10 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
             }
         )
     # The context fitter trims from the tail, where the reserved candidates sit by design.
-    # The reviewer is released by the caller, once the headline rewrite has also finished with it.
+    # The reviewer is released by the caller, once merging and the headline rewrite have also
+    # finished with it: both run on this model, and nothing else loads in between.
     review = ollama.review_digest(
-        candidates,
-        settings.digest_max_items,
-        RESERVED_CATEGORY,
-        settings.digest_security_candidate_slots,
-        settings.digest_deepen_headlines,
+        candidates, settings.digest_max_items, RESERVED_CATEGORY, settings.digest_security_candidate_slots, True
     )
     scores = {selection.candidate_id: selection.score for selection in review.selected}
     selected = [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]
@@ -155,15 +150,48 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
     return selected + unselected
 
 
+def _story_judge(ollama: OllamaClient, budget: int, status: StatusReporter) -> Callable[[DigestEntry, DigestEntry], bool]:
+    """Ask the review model whether two shortlisted entries are the same story.
+
+    Bounded and memoised, because the shortlist is loose by design. The budget caps how many
+    generations one digest may spend on merging; past it nothing merges, which loses an attribution
+    rather than producing a wrong one. A model or transport failure is answered no for the same
+    reason: not merging is the safe direction.
+    """
+    answers: dict[tuple[int | None, int | None], bool] = {}
+    spent = 0
+
+    def judge(left: DigestEntry, right: DigestEntry) -> bool:
+        nonlocal spent
+        key = (left.candidate_id, right.candidate_id)
+        identified = None not in key
+        if identified and key in answers:
+            return answers[key]
+        if spent >= budget:
+            return False
+        spent += 1
+        try:
+            same = ollama.same_story(_judged(left), _judged(right))
+        except (OllamaSchemaError, httpx.HTTPError) as error:
+            status(f"Warning: could not compare {left.item.title} ({type(error).__name__}); left unmerged")
+            same = False
+        if identified:
+            answers[key] = same
+        return same
+
+    return judge
+
+
+def _judged(entry: DigestEntry) -> dict[str, str]:
+    return {"title": entry.item.title, "summary": entry.item.summary_zh_tw, "source": entry.source_name or ""}
+
+
 def _merged_entries(
-    entries: list[DigestEntry], threshold: float, secondary_items: int, corpus: list[DigestEntry], language: str
+    entries: list[DigestEntry], secondary_items: int, same_story: Callable[[DigestEntry, DigestEntry], bool]
 ) -> list[DigestEntry]:
-    # The corpus is every ranked candidate, not the handful that reach merging: repeat coverage of
-    # one story inflates its own identifying tokens, so a narrow corpus discards exactly them.
     headlines = [entry for entry in entries if entry.review_score is not None]
     mentions = [entry for entry in entries if entry.review_score is None]
-    if merging_applies(language, len(corpus)):
-        headlines, mentions = merge_related_entries(headlines, mentions, threshold, common_story_tokens(corpus))
+    headlines, mentions = merge_related_entries(headlines, mentions, same_story)
     return headlines + mentions[:secondary_items]
 
 
@@ -649,10 +677,8 @@ def run_pipeline(
                 reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
                 reviewed_entries = _merged_entries(
                     reviewed_entries,
-                    settings.digest_merge_similarity,
                     settings.digest_secondary_items,
-                    ranked_entries,
-                    settings.digest_language,
+                    _story_judge(ollama, settings.digest_merge_judgements, status),
                 )
                 reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status)
             finally:

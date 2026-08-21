@@ -259,9 +259,10 @@ def test_only_the_measured_digest_languages_are_accepted() -> None:
             Settings(digest_language=language)
 
 
-def test_a_zero_merge_threshold_is_rejected_because_it_reads_as_off() -> None:
-    """0 looks like "disable merging" but would mean "merge on the token gates alone"."""
-    with pytest.raises(ValidationError):
-        Settings(digest_merge_similarity=0)
+def test_the_merge_judgement_budget_bounds_what_one_digest_may_spend() -> None:
+    """A bound against a pathological run: real runs shortlist 0 to 15 pairs, typically 2 to 5."""
+    assert Settings().digest_merge_judgements == 60
+    assert Settings(digest_merge_judgements=0).digest_merge_judgements == 0
 
-    assert Settings(digest_merge_similarity=0.05).digest_merge_similarity == 0.05
+    with pytest.raises(ValidationError):
+        Settings(digest_merge_judgements=-1)

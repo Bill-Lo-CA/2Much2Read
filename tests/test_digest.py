@@ -1,3 +1,4 @@
+from collections.abc import Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -6,13 +7,11 @@ import pytest
 from two_much_two_read.digest import (
     DigestEntry,
     canonical_url,
-    common_story_tokens,
     dedupe,
     dedupe_entries,
     merge_related_entries,
-    merging_applies,
     render_digest,
-    story_similarity,
+    share_a_candidate_token,
     story_tokens,
 )
 from two_much_two_read.schemas import DigestItem
@@ -327,6 +326,17 @@ def merged_entry(title: str, summary: str, source: str, url: str | None = None, 
     )
 
 
+def judge(answer: bool) -> tuple[Callable[[DigestEntry, DigestEntry], bool], list[tuple[str, str]]]:
+    """A stand-in for the model, recording which pairs the shortlist actually put in front of it."""
+    asked: list[tuple[str, str]] = []
+
+    def decide(left: DigestEntry, right: DigestEntry) -> bool:
+        asked.append((left.item.title, right.item.title))
+        return answer
+
+    return decide, asked
+
+
 def test_repeat_coverage_of_a_headline_is_folded_into_it() -> None:
     """The reviewer drops duplicates from its own picks, so they land in the mention list."""
     headline = merged_entry(
@@ -339,7 +349,7 @@ def test_repeat_coverage_of_a_headline_is_folded_into_it() -> None:
         "https://cerebras.ai/blog/gpt-5-6-sol",
     )
 
-    headlines, mentions = merge_related_entries([headline], [mention], 0.25)
+    headlines, mentions = merge_related_entries([headline], [mention], judge(True)[0])
 
     assert mentions == []
     assert headlines[0].also_from == ("TLDR Dev",)
@@ -348,13 +358,18 @@ def test_repeat_coverage_of_a_headline_is_folded_into_it() -> None:
     assert len(headlines[0].merged_summaries) == 2
 
 
-def test_two_launches_from_the_same_section_are_not_merged() -> None:
-    """Section markers dominate token overlap, which is why they are stripped before comparing."""
+def test_a_section_marker_never_puts_a_whole_newsletter_in_front_of_the_model() -> None:
+    """Section markers are shared by every item in a section, so they would shortlist all of them."""
     left = merged_entry("CORMA (PRODUCT LAUNCH)", "Corma 是網路安全防禦的 AI 基礎模型。", "TLDR InfoSec", review_score=90)
     right = merged_entry("MINDGARD (PRODUCT LAUNCH)", "Mindgard 提供 AI 紅隊測試平台。", "TLDR InfoSec")
 
-    headlines, mentions = merge_related_entries([left], [right], 0.25)
+    # "product" and "launch" are gone; only the topic word survives, and that is the model's to judge.
+    assert story_tokens(left) & story_tokens(right) == {"ai"}
 
+    decide, asked = judge(False)
+    headlines, mentions = merge_related_entries([left], [right], decide)
+
+    assert len(asked) == 1
     assert headlines[0].also_from == ()
     assert len(mentions) == 1
 
@@ -363,8 +378,10 @@ def test_the_same_vendor_covering_two_stories_is_not_merged() -> None:
     left = merged_entry("DeepSeek 釋出 V4-Pro 智慧代理", "DeepSeek V4-Pro 推出，支援離峰價格。", "AlphaSignal", review_score=90)
     right = merged_entry("DeepSeek Harness 開發者預覽", "DeepSeek Harness 提供模組化插件系統。", "TLDR Dev")
 
-    headlines, mentions = merge_related_entries([left], [right], 0.25)
+    decide, asked = judge(False)
+    headlines, mentions = merge_related_entries([left], [right], decide)
 
+    assert asked == [("DeepSeek Harness 開發者預覽", "DeepSeek 釋出 V4-Pro 智慧代理")]
     assert headlines[0].also_from == ()
     assert len(mentions) == 1
 
@@ -373,7 +390,7 @@ def test_mentions_are_deduped_against_each_other_too() -> None:
     first = merged_entry("Gemini 3.7 Flash：Google 高速模型", "Google 推出 Gemini 3.7 Flash。", "ThursdAI")
     second = merged_entry("Google 推出 Gemini 3.7 Flash 模型", "Gemini 3.7 Flash 價格減半。", "TLDR AI")
 
-    headlines, mentions = merge_related_entries([], [first, second], 0.25)
+    headlines, mentions = merge_related_entries([], [first, second], judge(True)[0])
 
     assert headlines == []
     assert len(mentions) == 1
@@ -408,8 +425,12 @@ def test_a_story_merely_named_by_another_is_not_merged_into_it() -> None:
         "https://x.ai/news/grok-4-6",
     )
 
-    headlines, mentions = merge_related_entries([headline], [other], 0.25)
+    decide, asked = judge(False)
+    headlines, mentions = merge_related_entries([headline], [other], decide)
 
+    # Two shared identity tokens are enough to ask about, and only the model can tell that one item
+    # names the other to compare against it rather than reporting the same event.
+    assert len(asked) == 1
     assert headlines[0].also_from == ()
     assert headlines[0].article_url is None
     assert len(mentions) == 1
@@ -429,34 +450,13 @@ def test_ordinary_vocabulary_never_identifies_a_story() -> None:
         "TLDR AI",
     )
 
-    headlines, mentions = merge_related_entries([left], [right], 0.25)
+    decide, asked = judge(False)
+    headlines, mentions = merge_related_entries([left], [right], decide)
 
-    assert headlines[0].also_from == ()
-    assert len(mentions) == 1
-
-
-def test_two_english_titles_never_merge_even_on_product_names() -> None:
-    """The deliberate cost of testing the premise on the titles rather than on DIGEST_LANGUAGE.
-
-    These two really are the same story, and they no longer merge. Measured over 476 real items,
-    requiring one Chinese title removes 17 English-English pairs, every clear false merge among
-    them, and costs cases like this one - which the language gate was already blocking anyway.
-    """
-    left = merged_entry(
-        "OpenAI previews GPT-5.6 Sol Ultrafast",
-        "OpenAI previewed a mode generating 750 tokens per second.",
-        "TLDR AI",
-        review_score=90,
-    )
-    right = merged_entry(
-        "Cerebras accelerates GPT-5.6 Sol Ultrafast",
-        "Cerebras hardware drives GPT-5.6 Sol to 750 tokens per second.",
-        "TLDR Dev",
-        "https://cerebras.ai/blog/sol",
-    )
-
-    headlines, mentions = merge_related_entries([left], [right], 0.25)
-
+    # They share only the topic word "AI", which is exactly the kind of overlap six rounds of
+    # filtering could not classify. It is put to the model instead of being decided here.
+    assert story_tokens(left) & story_tokens(right) == {"ai"}
+    assert len(asked) == 1
     assert headlines[0].also_from == ()
     assert len(mentions) == 1
 
@@ -472,7 +472,7 @@ def test_an_untranslated_title_still_merges_into_a_chinese_one() -> None:
     )
     english = merged_entry("OpenAI's ChatGPT desktop app is now on Linux", "ChatGPT 桌面應用開始支援 Linux。", "AlphaSignal")
 
-    headlines, mentions = merge_related_entries([chinese], [english], 0.25)
+    headlines, mentions = merge_related_entries([chinese], [english], judge(True)[0])
 
     assert headlines[0].also_from == ("AlphaSignal",)
     assert mentions == []
@@ -491,87 +491,10 @@ def test_absorbing_a_hacker_news_entry_keeps_its_discussion() -> None:
         hn_comments=64,
     )
 
-    headlines, _ = merge_related_entries([headline], [hacker_news], 0.25)
+    headlines, _ = merge_related_entries([headline], [hacker_news], judge(True)[0])
 
     assert headlines[0].discussion_url == "https://news.ycombinator.com/item?id=456"
     assert (headlines[0].hn_item_id, headlines[0].hn_score, headlines[0].hn_comments) == ("456", 210, 64)
-
-
-def ai_corpus() -> list[DigestEntry]:
-    """A day of AI newsletters, where the domain's own topic word is in most items."""
-    vendors = ["Google", "Meta", "Nvidia", "Cursor", "Anthropic", "Mistral", "Cohere", "Databricks", "Figma", "Zed"]
-    return [merged_entry(f"{name} 推出 AI 產品", f"{name} 的 AI 產品發表。", "TLDR AI") for name in vendors]
-
-
-def test_a_generic_acronym_does_not_identify_a_story() -> None:
-    """AI is capitalised, so shape alone let two unrelated OpenAI products merge at 0.5."""
-    left = merged_entry("OpenAI 推出 ChatGPT AI 編碼工具", "OpenAI 發表 ChatGPT 的 AI 編碼工具。", "TLDR AI", review_score=90)
-    right = merged_entry("OpenAI 推出 Sora AI 影片模型", "OpenAI 發表 Sora 的 AI 影片模型。", "AlphaSignal")
-    common = common_story_tokens([left, right, *ai_corpus()])
-
-    assert common == frozenset({"ai"})
-    headlines, mentions = merge_related_entries([left], [right], 0.25, common)
-
-    assert headlines[0].also_from == ()
-    assert len(mentions) == 1
-
-
-def test_a_product_name_survives_the_common_token_filter() -> None:
-    left = merged_entry(
-        "OpenAI 推出 GPT-5.6 Sol 超快版本", "OpenAI 以 Cerebras 推出 GPT-5.6 Sol。", "AlphaSignal", review_score=90
-    )
-    right = merged_entry("使用 Cerebras 加速 GPT-5.6 Sol", "Cerebras 讓 GPT-5.6 Sol 達到每秒 750 tokens。", "TLDR Dev")
-    common = common_story_tokens([left, right, *ai_corpus()])
-
-    headlines, mentions = merge_related_entries([left], [right], 0.25, common)
-
-    assert headlines[0].also_from == ("TLDR Dev",)
-    assert mentions == []
-
-
-def test_a_small_corpus_never_treats_a_true_pair_as_common() -> None:
-    """Two mentions of one story are 100% of a two-entry corpus; the floor stops that."""
-    left = merged_entry("OpenAI 推出 GPT-5.6 Sol", "OpenAI 推出 GPT-5.6 Sol。", "AlphaSignal", review_score=90)
-    right = merged_entry("Cerebras 加速 GPT-5.6 Sol", "Cerebras 讓 GPT-5.6 Sol 更快。", "TLDR Dev")
-
-    assert common_story_tokens([left, right]) == frozenset()
-
-
-def test_merging_is_off_for_a_latin_script_digest_language() -> None:
-    """Repeated findings on one gap: the technique needs non-Latin prose to work."""
-    assert merging_applies("zh-TW", 20) and merging_applies("zh-CN", 20)
-    assert not merging_applies("en", 20)
-
-
-def test_merging_is_off_when_the_corpus_cannot_support_the_frequency_filter() -> None:
-    """Under four candidates no token can ever exceed the floor, so nothing is ever filtered.
-
-    A generic token like "ai" then identifies a pair on its own, which is what the filter exists
-    to prevent.
-    """
-    assert not merging_applies("zh-TW", 3)
-    assert merging_applies("zh-TW", 4)
-
-    tiny = [merged_entry(f"OpenAI 推出 AI 產品 {i}", f"OpenAI 的 AI 產品 {i}。", "TLDR AI") for i in range(3)]
-    assert common_story_tokens(tiny) == frozenset()
-
-
-def test_title_cased_vocabulary_is_stopped_by_the_title_script_rather_than_by_a_filter() -> None:
-    """Shape and frequency both accept these; only the absence of Chinese prose separates them."""
-    left = merged_entry(
-        "OpenAI Launches New AI Model for Coding", "OpenAI released a new model for software development.", "TLDR AI"
-    )
-    right = merged_entry("OpenAI Launches New AI Model for Search", "OpenAI released a new model for search ranking.", "TLDR AI")
-
-    # Six accepted tokens each, five of them shared, and the frequency filter is powerless because
-    # those words occur only in this pair. The titles carrying no Chinese prose is the whole signal.
-    assert len(story_tokens(left) & story_tokens(right)) == 5
-    assert story_similarity(left, right, common_story_tokens([left, right])) == 0.0
-
-    # Translating one title collapses its identity tokens to the vendor name alone, which the
-    # two-shared-token rule already rejects: the two mechanisms cover different halves of this.
-    translated = replace(left, item=left.item.model_copy(update={"title": "OpenAI 推出程式開發新模型"}))
-    assert story_tokens(translated) & story_tokens(right) == {"openai"}
 
 
 def test_two_newsletters_on_one_article_keep_both_attributions() -> None:
@@ -613,20 +536,6 @@ def test_a_tracking_parameter_does_not_hide_repeat_coverage() -> None:
     assert dedupe_entries([first, second])[0].also_from == ("TLDR AI",)
 
 
-def test_a_zero_threshold_cannot_merge_stories_that_share_no_identity() -> None:
-    """story_similarity reports 0.0 for "not the same story", so it can never clear a threshold.
-
-    Left to ">= threshold", a threshold of 0 absorbed every mention into some headline.
-    """
-    headline = replace(merged_entry("Gemini 3.7 發表", "Google 推出 Gemini 3.7。", "TLDR AI"), review_score=90)
-    unrelated = merged_entry("Rust 1.94 釋出", "Rust 團隊釋出 1.94 版。", "TLDR Dev")
-
-    headlines, mentions = merge_related_entries([headline], [unrelated], 0.0)
-
-    assert headlines[0].also_from == ()
-    assert [entry.item.title for entry in mentions] == ["Rust 1.94 釋出"]
-
-
 def test_a_newsletter_and_hacker_news_on_one_article_show_as_two_sources() -> None:
     """Two independent sources carrying one article is the signal the source line exists to show."""
     article_url = "https://article.example/story"
@@ -650,3 +559,34 @@ def test_a_newsletter_and_hacker_news_on_one_article_show_as_two_sources() -> No
     assert "來源：TLDR AI, Hacker News" in text
     assert "討論：<https://news.ycombinator.com/item?id=456>" in text
     assert "HN title" not in text
+
+
+def test_the_shortlist_asks_only_about_pairs_sharing_an_identity_token() -> None:
+    """It decides who gets asked, not who merges — precision moved to the model.
+
+    Loose on purpose: one shared token is enough. Over real runs that put 0 to 15 pairs in front of
+    the model per digest; dropping the shape requirement as well raised the worst case to 108.
+    """
+    left = merged_entry("GPT-5.6 Sol 發表", "OpenAI 推出 GPT-5.6 Sol。", "TLDR AI")
+    same = merged_entry("OpenAI 開放 GPT-5.6 Sol", "GPT-5.6 Sol 開放使用。", "AlphaSignal")
+    unrelated = merged_entry("Rust 1.94 釋出", "Rust 團隊釋出 1.94 版。", "TLDR Dev")
+
+    assert share_a_candidate_token(left, same)
+    assert not share_a_candidate_token(left, unrelated)
+
+    # The pair that took six review rounds to classify. Title Case vocabulary still passes the
+    # shape filter, so they are shortlisted - and that is now correct, because being shortlisted
+    # means being asked rather than being merged. Where the old code had to decide this from
+    # "Launches", "New", and "Model", the model is asked whether they report the same event.
+    coding = merged_entry("OpenAI Launches New AI Model for Coding", "OpenAI released a coding model.", "TLDR AI")
+    search = merged_entry("OpenAI Launches New AI Model for Search", "OpenAI released a search model.", "TLDR AI")
+
+    assert share_a_candidate_token(coding, search)
+    assert story_tokens(coding) & story_tokens(search) == {"openai", "launches", "new", "ai", "model"}
+
+    decide, asked = judge(False)
+    headlines, mentions = merge_related_entries([replace(coding, review_score=90)], [search], decide)
+
+    assert len(asked) == 1
+    assert headlines[0].also_from == ()
+    assert len(mentions) == 1

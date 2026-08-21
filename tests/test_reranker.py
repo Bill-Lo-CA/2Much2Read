@@ -222,6 +222,11 @@ def test_final_review_selects_scored_items_and_leaves_the_reviewer_loaded() -> N
     assert ollama.unloaded == []
 
 
+def never_the_same(_left: DigestEntry, _right: DigestEntry) -> bool:
+    """These fixtures are unrelated stories; the model would say so."""
+    return False
+
+
 def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None:
     class FakeOllama:
         def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
@@ -244,7 +249,7 @@ def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None
         (4, None),
         (5, None),
     ]
-    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 0.25, 2, ranked, "zh-TW")] == [1, 2, 3]
+    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 2, never_the_same)] == [1, 2, 3]
 
 
 def test_secondary_mentions_can_be_turned_off() -> None:
@@ -259,4 +264,4 @@ def test_secondary_mentions_can_be_turned_off() -> None:
     ranked = [entry(index, f"Story {index}", "TLDR AI") for index in range(1, 4)]
     reviewed = pipeline._reviewed_entries(settings, FakeOllama(), ranked)
 
-    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 0.25, 0, ranked, "zh-TW")] == [1]
+    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 0, never_the_same)] == [1]

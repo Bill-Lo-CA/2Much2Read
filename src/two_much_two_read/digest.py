@@ -1,8 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections import Counter
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
 from datetime import datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -166,6 +165,13 @@ def _preserve_hn_attribution(primary: DigestEntry, other: DigestEntry) -> Digest
     )
 
 
+def _article_url(entry: DigestEntry) -> str | None:
+    """The entry's article link, or None when what it stores is the discussion page instead."""
+    if entry.article_url and canonical_url(entry.article_url) != canonical_url(entry.discussion_url):
+        return entry.article_url
+    return None
+
+
 def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:
     names = list(primary.also_from)
     for name in (other.source_name, *other.also_from):
@@ -181,8 +187,11 @@ def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:
         _preserve_hn_attribution(primary, other),
         also_from=tuple(names),
         merged_summaries=tuple(summaries),
-        # A newsletter that only names a story often carries no link while another one does.
-        article_url=primary.article_url or other.article_url,
+        # A newsletter that only names a story often carries no link while another one does. A
+        # Hacker News self-post stores its discussion URL here, which is not an article at all, so
+        # it does not block borrowing one: keeping it would lose both the link the renderer shows
+        # and the fuller text the headline rewrite reads.
+        article_url=_article_url(primary) or _article_url(other) or primary.article_url,
     )
 
 
@@ -210,62 +219,18 @@ def dedupe_entries(items: list[DigestEntry]) -> list[DigestEntry]:
 
 
 # Newsletters translate a headline differently and link to different pages for the same event, so
-# neither the canonical URL nor the rendered title identifies a story across sources. Product and
-# vendor names survive translation in Latin script, so they carry the identity instead. TLDR's
-# section markers are stripped first: two unrelated product launches otherwise share most of their
-# tokens, which was the single worst false match when this was measured against a day of real items.
+# neither the canonical URL nor the rendered title identifies a story across sources. What survives
+# translation is the Latin-script product and vendor names, which makes them a usable shortlist for
+# which pairs to ask about. TLDR's section markers are stripped first: they are shared by every item
+# in a section and would shortlist a whole newsletter against itself.
 STORY_BOILERPLATE = re.compile(r"\((?:product launch|sponsor|\d+\s*minute read)\)", re.IGNORECASE)
 STORY_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9.\-]*")
-# Measured over a day of real items: every pair covering the same story shared between two and five
-# tokens, and every pair that did not shared at most one, always a bare vendor or topic word such as
-# "openai", "deepseek", or "ai". Items carry between 1 and 15 tokens, so a ratio alone is fragile -
-# on a short item a single shared vendor name already clears any useful threshold. Requiring two
-# distinct shared tokens is what actually separates them; the ratio then guards the long items.
-STORY_MINIMUM_SHARED_TOKENS = 2
-# Only tokens shaped like an identity count: capitalised in the source, or carrying a version
-# number. A zh-TW digest leaves nothing but proper nouns in Latin script, so any Latin token was
-# identifying; a digest in a Latin-script language does not, and "OpenAI launches new AI model for
-# coding" then shares launches, new, ai, model and for with the same sentence about Google. Filtering
-# by document frequency was tried first and does not work: no cutoff both keeps gpt-5.6 and drops
-# model, because fifteen items are far too few to infer a stopword list. Shape separates them at
-# once - on the measured zh-TW items and on an English set, this takes every true pair and no false
-# one. Products that are lowercase in their own name are the known cost of that.
+# Capitalised in the source, or carrying a version number. This once tried to be a definition of
+# identity, which it cannot be - ordinary English vocabulary is capitalised in a Title Case headline.
+# It is now only a cost control on how many pairs reach the model: over real runs it holds the
+# shortlist to 0-15 pairs per digest, against 17-108 without it. Missing a product that is lowercase
+# in its own name costs a merge rather than causing a wrong one.
 STORY_IDENTITY_TOKEN = re.compile(r"^(?:[A-Z].*|.*\d.*)$")
-# Shape keeps ordinary vocabulary out but not a generic acronym: "AI" is capitalised, so two
-# unrelated OpenAI products shared "openai" and "ai" and merged at 0.5. Such a word is identifiable
-# by being everywhere - across a day's real candidates "ai" appeared in 28.8% of them while the next
-# token, a vendor name, appeared in 8.5%. The corpus has to be the whole ranked candidate set: over
-# the handful of entries that reach merging, the duplicates being looked for inflate their own
-# identifying tokens, and the same measurement inverts to "gpt-5.6" at 26.7% against "ai" at 6.7%.
-# The floor keeps a small corpus from treating a true pair's two mentions as common.
-STORY_COMMON_TOKEN_FRACTION = 0.15
-STORY_COMMON_TOKEN_MINIMUM = 3
-
-
-# The whole technique rests on one thing: Chinese prose leaves nothing but proper nouns in Latin
-# script, so a Latin token is an identity. DIGEST_LANGUAGE does not establish that - it is the
-# configuration, not the data. Title translation is instructed but never validated, and in the live
-# database 100 of 476 items carried a title with no CJK at all under DIGEST_LANGUAGE=zh-TW.
-#
-# One Chinese title is enough, because the comparison is an intersection: if either side offers only
-# proper nouns, the shared set holds only proper nouns. Measured over those 476 real items, pairs
-# reaching the default threshold split by title script as 130 Chinese-Chinese, 73 mixed, and 17
-# English-English - and every clear false merge was in the last group, such as "Claude Code sessions
-# can now talk to each other" against "A Claude Code skill was eating 200,000 tokens" at 0.667. The
-# mixed group is the opposite: it is mostly one story that one newsletter translated and another did
-# not, which is the repeat coverage this feature exists to find. So the requirement is one Chinese
-# title, not two - demanding both would discard 73 real pairs to remove 17.
-STORY_CJK = re.compile(r"[\u3400-\u9fff\uf900-\ufaff]")
-
-# Below this the document-frequency filter cannot fire at all: it needs a token to appear more than
-# max(3, 15% of the corpus) times, so on three or fewer candidates nothing is ever common, and a
-# generic token like "ai" identifies a pair on its own. A corpus that small cannot support the
-# measurement the filter depends on, so merging does not run on it.
-STORY_CORPUS_MINIMUM = 4
-
-
-def _is_cjk_prose(text: str) -> bool:
-    return bool(STORY_CJK.search(text))
 
 
 def _tokens(text: str) -> set[str]:
@@ -277,36 +242,27 @@ def story_tokens(entry: DigestEntry) -> set[str]:
     return _tokens(f"{entry.item.title} {entry.item.summary_zh_tw}")
 
 
-def common_story_tokens(entries: Sequence[DigestEntry]) -> frozenset[str]:
-    """Tokens too widespread in this run to identify anything, such as a domain's own topic word."""
-    counts: Counter[str] = Counter()
-    for entry in entries:
-        counts.update(story_tokens(entry))
-    limit = max(STORY_COMMON_TOKEN_MINIMUM, len(entries) * STORY_COMMON_TOKEN_FRACTION)
-    return frozenset(token for token, count in counts.items() if count > limit)
+def share_a_candidate_token(left: DigestEntry, right: DigestEntry) -> bool:
+    """Whether two entries are worth asking a model about. A shortlist, not a decision.
 
+    Token overlap cannot answer whether two items are the same story - six rounds of filtering it
+    established that the classes it gets wrong are unbounded, because the distinction is semantic
+    rather than lexical. "Claude Code sessions can now talk to each other" and "A Claude Code skill
+    was eating 200,000 tokens" share two proper nouns and are unrelated, and no rule over token
+    shape or frequency separates that from a real duplicate.
 
-def story_similarity(left: DigestEntry, right: DigestEntry, common: frozenset[str] = frozenset()) -> float:
-    if not (_is_cjk_prose(left.item.title) or _is_cjk_prose(right.item.title)):
-        return 0.0
-    shared = (story_tokens(left) & story_tokens(right)) - common
-    if len(shared) < STORY_MINIMUM_SHARED_TOKENS:
-        return 0.0
-    # A summary routinely names another story to compare against it: one run had Grok 4.6 described
-    # as "matching GPT-5.6 Sol", which shares both of that item's identifying tokens without being
-    # the same story at all. Merging them handed the GPT-5.6 headline the Grok article's link, and
-    # the headline rewrite then restated the whole item from it. A story's own subject is named in
-    # its title, so the titles have to overlap too, not merely the bodies.
-    if not ((_tokens(left.item.title) & _tokens(right.item.title)) - common):
-        return 0.0
-    return len(shared) / len((story_tokens(left) | story_tokens(right)) - common)
+    So overlap only decides which pairs get asked. Precision moved to the model, which frees this to
+    be loose: one shared identity-shaped token is enough. Measured over real runs that puts 0 to 15
+    pairs in front of the model per digest, typically 2 to 5. Dropping the shape requirement as well
+    would raise the worst case to 108, which is why it stays.
+    """
+    return bool(story_tokens(left) & story_tokens(right))
 
 
 def merge_related_entries(
     headlines: list[DigestEntry],
     mentions: list[DigestEntry],
-    threshold: float,
-    common: frozenset[str] = frozenset(),
+    same_story: Callable[[DigestEntry, DigestEntry], bool],
 ) -> tuple[list[DigestEntry], list[DigestEntry]]:
     """Fold repeat coverage of a headline story into that headline, then dedupe the mentions.
 
@@ -314,29 +270,37 @@ def merge_related_entries(
     the mention list and reappear under the headline they duplicate. Merging keeps the strongest
     entry and records the other sources, which is worth showing: several newsletters carrying one
     story is itself a signal.
+
+    Whether two entries are the same story is decided by `same_story`, which the pipeline backs with
+    a model. Token overlap only shortlists, so the first pair the model accepts wins rather than the
+    highest-scoring one - there is no longer a score to rank by, and a mention that is the same story
+    as two different headlines is a contradiction rather than a ranking problem.
     """
-    # story_similarity returns 0.0 as a sentinel for "these are not the same story" - it is what
-    # both the two-token and the title-overlap conditions report - so a zero can never be compared
-    # against the threshold. Leaving it to ">= threshold" made a threshold of 0 absorb every
-    # mention into some headline on no shared identity at all.
     merged = list(headlines)
     remaining: list[DigestEntry] = []
     for mention in mentions:
-        scores = [(story_similarity(mention, headline, common), index) for index, headline in enumerate(merged)]
-        best, index = max(scores, default=(0.0, -1))
-        if index >= 0 and best > 0 and best >= threshold:
-            merged[index] = _absorbed(merged[index], mention)
+        index = _first_match(mention, merged, same_story)
+        if index is None:
+            remaining.append(mention)
             continue
-        remaining.append(mention)
+        merged[index] = _absorbed(merged[index], mention)
     deduped: list[DigestEntry] = []
     for mention in remaining:
-        scores = [(story_similarity(mention, kept, common), index) for index, kept in enumerate(deduped)]
-        best, index = max(scores, default=(0.0, -1))
-        if index >= 0 and best > 0 and best >= threshold:
-            deduped[index] = _absorbed(deduped[index], mention)
+        index = _first_match(mention, deduped, same_story)
+        if index is None:
+            deduped.append(mention)
             continue
-        deduped.append(mention)
+        deduped[index] = _absorbed(deduped[index], mention)
     return merged, deduped
+
+
+def _first_match(
+    entry: DigestEntry, candidates: list[DigestEntry], same_story: Callable[[DigestEntry, DigestEntry], bool]
+) -> int | None:
+    for index, candidate in enumerate(candidates):
+        if share_a_candidate_token(entry, candidate) and same_story(entry, candidate):
+            return index
+    return None
 
 
 LANGUAGE_ALIASES = {
@@ -353,24 +317,6 @@ SUPPORTED_DIGEST_LANGUAGES = ("zh-tw", "zh-cn", "en")
 def digest_language_code(language: str) -> str:
     normalized = language.casefold().replace("_", "-")
     return LANGUAGE_ALIASES.get(normalized, normalized.split("-", maxsplit=1)[0])
-
-
-def merging_applies(language: str, corpus_size: int) -> bool:
-    """Whether repeat coverage can be identified at all in this digest language.
-
-    Merging identifies a story by the identity-shaped tokens its title and summary keep in Latin
-    script, which works because a Chinese digest leaves nothing else in Latin script. An English
-    digest leaves ordinary vocabulary there too, and no amount of shaping separates the two: lower
-    case was filtered by shape, a bare acronym by frequency, and Title Case defeats both, since
-    "OpenAI Launches New AI Model for Coding" and the same sentence about Search then share five
-    accepted tokens and score 0.714. Identifying stories across an English digest needs embeddings
-    or entity recognition, not another pattern, so merging stays off until that exists.
-
-    This is the coarse gate, on the setting. It cannot be the only one: title translation is
-    instructed but never validated, so a Chinese digest still carries English titles - 21% of them
-    in the live database - and story_similarity tests each pair's titles for itself.
-    """
-    return digest_language_code(language) in {"zh-tw", "zh-cn"} and corpus_size >= STORY_CORPUS_MINIMUM
 
 
 def _labels(language: str) -> dict[str, str]:

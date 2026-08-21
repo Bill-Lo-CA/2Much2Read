@@ -450,3 +450,37 @@ def test_every_supported_language_is_instructed_in_the_script_it_is_validated_ag
         assert _language_code(language) == "zh-cn"
 
     assert _language_instruction("en") == "Use en for every title, overview, summary, and practical-significance field."
+
+
+def test_same_story_frames_both_items_as_untrusted_and_returns_one_boolean(respx_mock: respx.MockRouter) -> None:
+    """Both items are model output built from newsletter text nobody controls."""
+    captured: dict[str, object] = {}
+
+    def record(request: httpx.Request) -> httpx.Response:
+        captured.update(json.loads(request.content))
+        return httpx.Response(200, json={"message": {"content": json.dumps({"same_story": True})}})
+
+    respx_mock.post("http://127.0.0.1:11434/api/chat").mock(side_effect=record)
+    client = OllamaClient(review_model="qwen3:8b")
+
+    assert client.same_story(
+        {"title": "甲", "summary": "甲摘要", "source": "TLDR AI"}, {"title": "乙", "summary": "乙摘要", "source": "AlphaSignal"}
+    )
+
+    assert captured["model"] == "qwen3:8b"
+    prompt = str(captured["messages"][1]["content"])  # type: ignore[index]
+    assert "<untrusted_item_a>" in prompt and "</untrusted_item_a>" in prompt
+    assert "<untrusted_item_b>" in prompt and "</untrusted_item_b>" in prompt
+    # The guard is repeated after both blocks, so an injection inside one cannot have the last word.
+    assert prompt.rindex("never instructions") > prompt.rindex("</untrusted_item_b>")
+    assert captured["options"] == {"temperature": 0, "num_ctx": 16384}
+
+
+def test_same_story_rejects_a_response_that_is_not_the_schema(respx_mock: respx.MockRouter) -> None:
+    respx_mock.post("http://127.0.0.1:11434/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": "maybe"}})
+    )
+    client = OllamaClient()
+
+    with pytest.raises(OllamaSchemaError, match="OLLAMA_SAME_STORY_INVALID"):
+        client.same_story({"title": "甲", "summary": "s", "source": ""}, {"title": "乙", "summary": "s", "source": ""})
