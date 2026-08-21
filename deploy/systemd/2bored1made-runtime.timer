@@ -1,0 +1,9 @@
+[Unit]
+Description=2bored1made Recurring Nudge Timer
+
+[Timer]
+OnCalendar=*-*-* *:*:00
+Persistent=true
+
+[Install]
+WantedBy=timers.target

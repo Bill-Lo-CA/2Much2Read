@@ -5,7 +5,8 @@ Three local-first tools that post only their final output to a private Discord d
 - `2much2read` reads configured Gmail newsletters, extracts candidates with local Ollama, reranks them locally, and records digests in SQLite.
 - `2busy1miss` syncs configured Google Calendar events into SQLite reminder jobs,
   then sends due reminders without repeatedly querying Google.
-- `2bored1made` sends a direct local notification, with optional whitelisted Discord user mentions.
+- `2bored1made` sends a direct local notification, and repeats a configured message on a daily
+  schedule until it has been delivered a fixed number of times.
 
 They are separate commands, OAuth clients, OAuth tokens, YAML files, SQLite databases, and environment files. They share only configuration-path resolution, Discord delivery, and a process lock implementation.
 
@@ -22,6 +23,7 @@ The commands use one private root with app-specific token and data directories, 
   calendar-client-secret.json
   sources.yaml
   reminders.yaml
+  nudges.yaml
   2much2read/
     gmail-token.json
   2busy1miss/
@@ -34,6 +36,9 @@ The commands use one private root with app-specific token and data directories, 
   2busy1miss/
     2busy1miss.sqlite3
     2busy1miss.lock
+  2bored1made/
+    2bored1made.sqlite3
+    2bored1made.lock
 ```
 
 The environment files may contain duplicate variable names because each command and systemd unit loads only its own file. Do not source them together. The installers set the shared config root and app directories to mode `0700`, repair managed environment/YAML/OAuth/token/database/sidecar/lock files to `0600`, and keep SQLite databases inside the matching protected data directory.
@@ -54,9 +59,11 @@ The service sandbox is intentionally compatible with local PyTorch/GPU use: it o
 systemd-analyze --user security 2much2read-runtime.service
 systemd-analyze --user security 2busy1miss-runtime.service
 systemd-analyze --user security 2busy1miss-runtime-agenda.service
+systemd-analyze --user security 2bored1made-runtime.service
 systemd-analyze --user verify ~/.config/systemd/user/2much2read-runtime.service
 systemd-analyze --user verify ~/.config/systemd/user/2busy1miss-runtime.service
 systemd-analyze --user verify ~/.config/systemd/user/2busy1miss-runtime-agenda.service
+systemd-analyze --user verify ~/.config/systemd/user/2bored1made-runtime.service
 ```
 
 ## Discord delivery
@@ -75,8 +82,9 @@ DISCORD_BOT_CHANNEL_ID=
 `webhook` requires `DISCORD_WEBHOOK_URL`; `bot` requires a bot token and numeric
 channel ID; `both` independently sends to each. Newsletter and Calendar deliveries
 persist one checkpoint per destination, so a retry sends only a failed destination.
-`2bored1made` intentionally remains stateless: it reports a partial result when one
-destination fails, and a manual resend is required.
+`2bored1made send` intentionally remains stateless: it reports a partial result when one
+destination fails, and a manual resend is required. Recurring nudges are the exception and
+have their own database, because a countdown has to remember how far it has counted.
 
 Webhook mode accepts only HTTPS Discord webhook URLs on official Discord hosts with
 the standard `/api/webhooks/{id}/{token}` path. For `2much2read`, Ollama is local by
@@ -345,7 +353,8 @@ Manual and next-day agendas use the same durable delivery record, de-duplicated 
 
 ## 2bored1made
 
-This is a direct notification skeleton: no database, retry queue, YAML hooks, or timer.
+Two ways to send: `send` posts one notification now, and `run` delivers whichever recurring
+nudges are due.
 
 ```bash
 uv sync --all-groups
@@ -360,6 +369,56 @@ uv run 2bored1made send --message "Build failed" --mention 123456789012345678
 Only user IDs listed in `DISCORD_ALLOWED_MENTION_IDS` can be tagged. Repeating
 `--mention` tags more than one configured user; all other `@` text is neutralized.
 Long notifications split only between complete mention tokens, never inside one.
+
+### Recurring nudges
+
+A nudge is a message, a set of times of day, and a total number of sends. It fires at those
+times and stops for good once it has been delivered that many times.
+
+```yaml
+# ~/.config/2much2read-runtime/nudges.yaml
+timezone: America/Montreal
+
+nudges:
+  - id: stretch
+    message: 起來動一動
+    at: ["09:00", "14:00", "21:00"]
+    total_sends: 30
+    user_id: "123456789012345678"   # optional; must also be in DISCORD_ALLOWED_MENTION_IDS
+    webhook_url: https://discord.com/api/webhooks/...   # optional; defaults to the env file
+    enabled: true
+```
+
+```bash
+uv run 2bored1made run --dry-run   # what is due right now
+uv run 2bored1made status          # delivered/total and the next slot per nudge
+uv run 2bored1made reset --nudge stretch
+```
+
+`2bored1made-runtime.timer` runs every minute and `run` decides what is due, so editing
+`nudges.yaml` takes effect without reinstalling units. Four decisions are worth knowing:
+
+**The count is of deliveries, not of elapsed slots.** A run that could not reach Discord
+records the failure and leaves the countdown where it was, so an outage costs a nudge nothing.
+This is also why there is no retry timer: a failed slot is retried a few times on the following
+minutes, and the real fallback is simply the next slot.
+
+**One slot fires per nudge per run.** A machine switched off all morning owes several slots by
+evening; sending them together would be a burst of identical messages, so the per-minute timer
+drains the backlog one message at a time. Slots from earlier days are dropped rather than
+delivered late.
+
+**A nudge has exactly one destination.** With two, a run that reached one and not the other
+would have no honest answer to whether it had spent one of the remaining sends. A nudge with
+its own `webhook_url` uses it; otherwise the configured webhook, falling back to the bot.
+
+**The message is sent verbatim.** No progress counter is appended to it — `status` is where the
+countdown lives. Only literal `@` is neutralized, exactly as in `send`.
+
+Editing `nudges.yaml` does not restart a countdown: raising `total_sends` from 10 to 20 asks for
+ten more sends, and rewording `message` keeps the history. Changing `id` creates a new nudge, and
+`reset --nudge` is the explicit way to start over. `run` exits non-zero when a delivery fails, so
+the timer's failure is visible to systemd.
 
 ## Delivery behavior
 

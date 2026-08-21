@@ -6,10 +6,22 @@ from pathlib import Path
 import pytest
 
 
+def _fake_systemctl(tmp_path: Path) -> Path:
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir(exist_ok=True)
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        '#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+    return fake_bin
+
+
 def test_2bored1made_installer_copies_the_env_file_once(tmp_path: Path) -> None:
     root = Path(__file__).parents[1]
     home = tmp_path / "home"
-    environment = os.environ | {"HOME": str(home)}
+    environment = os.environ | {"HOME": str(home), "PATH": f"{_fake_systemctl(tmp_path)}:{os.environ['PATH']}"}
 
     subprocess.run(
         ["sh", "scripts/install-2bored1made.sh"],
@@ -18,6 +30,7 @@ def test_2bored1made_installer_copies_the_env_file_once(tmp_path: Path) -> None:
         check=True,
         text=True,
         capture_output=True,
+        input="n\n",
     )
 
     installed_env = home / ".config" / "2much2read-runtime" / ".2bored1made.env"
@@ -33,6 +46,7 @@ def test_2bored1made_installer_copies_the_env_file_once(tmp_path: Path) -> None:
         check=True,
         text=True,
         capture_output=True,
+        input="n\n",
     )
 
     assert installed_env.read_text(encoding="utf-8") == "DISCORD_WEBHOOK_URL=https://configured.example\n"
@@ -94,6 +108,12 @@ def test_installers_refuse_managed_env_symlinks(tmp_path: Path, script: str, env
             "2busy1miss-runtime.service",
             ".2busy1miss.env",
             "AGENDA_SCHEDULE_TIME=21:00\n",
+        ),
+        (
+            "install-2bored1made.sh",
+            "2bored1made-runtime.service",
+            ".2bored1made.env",
+            "DISCORD_WEBHOOK_URL=\n",
         ),
     ],
 )
@@ -343,6 +363,12 @@ def test_newsletter_installer_rejects_invalid_schedule(tmp_path: Path, setting: 
             ],
             "disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer",
             "stop 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service",
+        ),
+        (
+            "uninstall-2bored1made.sh",
+            ["2bored1made-runtime.service", "2bored1made-runtime.timer"],
+            "disable --now 2bored1made-runtime.timer",
+            "stop 2bored1made-runtime.service",
         ),
     ],
 )
