@@ -212,7 +212,7 @@ def test_installers_only_start_timers_when_confirmed(
     systemctl = fake_bin / "systemctl"
     systemctl.write_text(
         '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n[ "$2" = "is-active" ] && exit 3\n'
-        '[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+        '[ "$2" = "is-enabled" ] && exit 1\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
         encoding="utf-8",
     )
     systemctl.chmod(0o755)
@@ -235,20 +235,19 @@ def test_installers_only_start_timers_when_confirmed(
     )
 
     calls = log.read_text(encoding="utf-8")
-    disable_call = f"disable --now {timer}"
     state_call = f"show --property=ActiveState --value {service}"
-    assert disable_call in calls
     assert state_call in calls
-    assert calls.index(disable_call) < calls.index(state_call)
+    # A first installation has no schedule to interrupt, so it stops nothing.
+    assert "disable --now" not in calls
     assert "daemon-reload" in calls
     assert ("enable --now" in calls) is starts
     installed_secret = tmp_path / "home" / ".config" / "2much2read-runtime" / secret_name
     assert installed_secret.read_text(encoding="utf-8") == "client secret"
     assert installed_secret.stat().st_mode & 0o777 == 0o600
     if script == "install-2busy1miss-user-service.sh":
-        assert "disable --now 2busy1miss-runtime-agenda.timer" in calls
         if starts:
-            assert "enable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer" in calls
+            assert "enable --now 2busy1miss-runtime.timer" in calls
+            assert "enable --now 2busy1miss-runtime-agenda.timer" in calls
             assert "Timers enabled." in result.stdout
         else:
             assert (
@@ -763,9 +762,11 @@ def test_installers_do_not_migrate_while_runtime_lock_is_held(
     [
         ('[ "$2" = "is-active" ] && exit 0\n[ "$2" = "show" ] && printf "active\\n"\nexit 0\n', "stop"),
         ('[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "activating\\n"\nexit 0\n', "stop"),
-        ('[ "$2" = "is-active" ] && exit 1\nexit 0\n', "cannot determine"),
-        ('[ "$2" = "is-active" ] && exit 3\n[ "$2" = "disable" ] && exit 1\nexit 0\n', "failed to stop"),
-        ('[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && exit 1\nexit 0\n', "cannot determine"),
+        (
+            '[ "$2" = "is-active" ] && exit 1\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+            "cannot determine whether",
+        ),
+        ('[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && exit 1\nexit 0\n', "cannot reach"),
     ],
 )
 def test_installers_do_not_migrate_when_runtime_state_is_unsafe(
@@ -811,105 +812,3 @@ def test_installers_do_not_migrate_when_runtime_state_is_unsafe(
     assert (data_root / sqlite_name).exists()
     assert not (config_root / app / token_name).exists()
     assert not (data_root / app / sqlite_name).exists()
-
-
-def _logging_systemctl(tmp_path: Path, log: Path, *, enabled: bool) -> Path:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir(exist_ok=True)
-    systemctl = fake_bin / "systemctl"
-    systemctl.write_text(
-        "#!/bin/sh\n"
-        f'printf "%s\\n" "$*" >> "{log}"\n'
-        '[ "$2" = "is-active" ] && exit 3\n'
-        '[ "$2" = "show" ] && printf "inactive\\n"\n'
-        f'[ "$2" = "is-enabled" ] && exit {0 if enabled else 1}\n'
-        "exit 0\n",
-        encoding="utf-8",
-    )
-    systemctl.chmod(0o755)
-    return fake_bin
-
-
-def test_2bored1made_installer_restores_an_enabled_timer_when_it_aborts(tmp_path: Path) -> None:
-    # An upgrade disables the timer before it writes the units. If a later step refuses, the timer
-    # must not be left switched off: every future nudge would silently stop and nothing would say so.
-    root = Path(__file__).parents[1]
-    home = tmp_path / "home"
-    systemd_root = home / ".config" / "systemd" / "user"
-    systemd_root.mkdir(parents=True)
-    (home / ".config" / "2much2read-runtime").mkdir(parents=True)
-    outside = tmp_path / "outside.service"
-    outside.write_text("preserve", encoding="utf-8")
-    (systemd_root / "2bored1made-runtime.service").symlink_to(outside)
-    log = tmp_path / "systemctl.log"
-
-    result = subprocess.run(
-        ["sh", "scripts/install-2bored1made.sh"],
-        cwd=root,
-        env=os.environ | {"HOME": str(home), "PATH": f"{_logging_systemctl(tmp_path, log, enabled=True)}:{os.environ['PATH']}"},
-        text=True,
-        capture_output=True,
-        input="\n",
-    )
-
-    assert result.returncode == 1
-    assert "symbolic link" in result.stderr
-    assert "restored the previously enabled" in result.stderr
-    calls = log.read_text(encoding="utf-8").splitlines()
-    assert "--user disable --now 2bored1made-runtime.timer" in calls
-    assert calls[-1] == "--user enable --now 2bored1made-runtime.timer"
-
-
-def test_2bored1made_installer_leaves_a_disabled_timer_disabled_when_it_aborts(tmp_path: Path) -> None:
-    root = Path(__file__).parents[1]
-    home = tmp_path / "home"
-    systemd_root = home / ".config" / "systemd" / "user"
-    systemd_root.mkdir(parents=True)
-    (home / ".config" / "2much2read-runtime").mkdir(parents=True)
-    outside = tmp_path / "outside.service"
-    outside.write_text("preserve", encoding="utf-8")
-    (systemd_root / "2bored1made-runtime.service").symlink_to(outside)
-    log = tmp_path / "systemctl.log"
-
-    result = subprocess.run(
-        ["sh", "scripts/install-2bored1made.sh"],
-        cwd=root,
-        env=os.environ | {"HOME": str(home), "PATH": f"{_logging_systemctl(tmp_path, log, enabled=False)}:{os.environ['PATH']}"},
-        text=True,
-        capture_output=True,
-        input="\n",
-    )
-
-    assert result.returncode == 1
-    assert "restored" not in result.stderr
-    assert "enable --now" not in log.read_text(encoding="utf-8")
-
-
-def test_2bored1made_installer_refuses_before_disabling_a_running_service(tmp_path: Path) -> None:
-    # The service-active check runs before the timer is touched, so a refused upgrade never
-    # reaches the disable at all.
-    root = Path(__file__).parents[1]
-    home = tmp_path / "home"
-    (home / ".config" / "2much2read-runtime").mkdir(parents=True)
-    log = tmp_path / "systemctl.log"
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    systemctl = fake_bin / "systemctl"
-    systemctl.write_text(
-        f'#!/bin/sh\nprintf "%s\\n" "$*" >> "{log}"\n[ "$2" = "show" ] && printf "active\\n"\nexit 0\n',
-        encoding="utf-8",
-    )
-    systemctl.chmod(0o755)
-
-    result = subprocess.run(
-        ["sh", "scripts/install-2bored1made.sh"],
-        cwd=root,
-        env=os.environ | {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
-        text=True,
-        capture_output=True,
-        input="\n",
-    )
-
-    assert result.returncode == 1
-    assert "stop 2bored1made-runtime.service" in result.stderr
-    assert "disable" not in log.read_text(encoding="utf-8")

@@ -45,7 +45,30 @@ The environment files may contain duplicate variable names because each command 
 
 ### Migration and custom paths
 
-On the first install after this layout change, each installer checks that its service is inactive, then moves its existing root-level token and SQLite database, `-wal`, `-shm`, `-journal`, and lock into the matching app directory. Environment/YAML/client-secret files remain at the shared config root. It never overwrites a new token or runtime file: if an old and new copy both exist, installation stops with both paths named. Stop the service, resolve the conflict, and rerun the installer. Timer prompts and their disabled-by-default behavior are unchanged.
+On the first install after this layout change, each installer checks that its service is inactive, then moves its existing root-level token and SQLite database, `-wal`, `-shm`, `-journal`, and lock into the matching app directory. Environment/YAML/client-secret files remain at the shared config root. It never overwrites a new token or runtime file: if an old and new copy both exist, installation stops with both paths named. Stop the service, resolve the conflict, and rerun the installer.
+
+### Upgrades do not interrupt a running schedule
+
+All three installers share `scripts/lib/systemd-units.sh`, which makes replacing unit files a
+transaction:
+
+- **Nothing is stopped until nothing else can refuse.** Service state, timer state, managed paths,
+  migrations, and schedule values are all checked while the timers are still running.
+- **Unit files are staged, then swapped.** Writing straight to a live unit path truncates the
+  working copy before the replacement exists, so a failure part-way through would leave a unit that
+  is empty rather than merely out of date. Each unit is rendered into a scratch directory beside the
+  live ones, validated with `systemd-analyze verify`, and moved into place only once all of them are
+  ready.
+- **A failure puts everything back.** The previous unit files and the previous timer state are both
+  restored, including when the installer is interrupted by a signal.
+- **Enabled and active are restored separately.** A timer that was enabled but deliberately stopped
+  is not restarted, and one that was started without being enabled is not left stopped.
+- **A timer that was already enabled stays enabled.** The prompt defaults to keeping it; a first
+  installation still defaults to leaving the timer off.
+
+`ExecStart` is written with the executable path quoted, and the substitution is done in the shell
+rather than with `sed`, so a repository path containing a space, `&`, or `|` installs correctly
+instead of silently producing the wrong command.
 
 The runtime itself only ever resolves the app-scoped paths. A token, database, or lock left at the
 pre-scoping root-level location is ignored, so run the installer to move it before the first run;
