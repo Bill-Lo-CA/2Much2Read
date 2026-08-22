@@ -226,15 +226,20 @@ def _dispatch(settings: Settings, database: Database, config: NudgesConfig, slot
     sent = 0
     message_ids: list[str] = []
     failed_by_error_code: dict[str, int] = {}
+    delivered_ids_by_nudge: list[str] = []
     for slot in slots:
         delivered_ids, error_code = _send_slot(settings, database, slot)
         if error_code is None:
             sent += 1
             message_ids.extend(delivered_ids)
+            delivered_ids_by_nudge.append(slot.nudge.id)
         else:
             failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
+    # Only what this run finished. Listing every already-finished nudge would repeat the same names
+    # in every result for as long as they stay in the configuration.
     counts = database.delivered_counts()
-    completed = [nudge.id for nudge in config.enabled_nudges if counts.get(nudge.id, 0) >= nudge.total_sends]
+    totals = {nudge.id: nudge.total_sends for nudge in config.nudges}
+    completed = [nudge_id for nudge_id in delivered_ids_by_nudge if counts.get(nudge_id, 0) >= totals.get(nudge_id, 0)]
     failed = sum(failed_by_error_code.values())
     return NudgeRunResult(
         status="failed" if failed and not sent else "partial" if failed else "ok",
@@ -280,13 +285,19 @@ def status(settings: Settings, *, now: datetime | None = None) -> NudgeStatusRes
 
 
 def reset(settings: Settings, nudge_id: str) -> NudgeResetResult:
+    """Clear one nudge's history, whether or not it is still in the configuration.
+
+    Deleting a nudge from the YAML leaves its rows behind, and refusing to clear them because the
+    configuration no longer mentions the id would make those rows unreachable: re-adding the same
+    id later would silently inherit a countdown that was already spent.
+    """
     config = load_nudges(settings.nudges_config_path)
-    if nudge_id not in {nudge.id for nudge in config.nudges}:
-        raise ValueError(f"unknown nudge id: {nudge_id}")
     with ProcessLock(settings.lock_path):
         database = Database(settings.database_path)
         try:
             cleared = database.reset_nudge(nudge_id)
+            if not cleared and nudge_id not in {nudge.id for nudge in config.nudges}:
+                raise ValueError(f"unknown nudge id: {nudge_id}")
         finally:
             database.close()
     return NudgeResetResult(nudge_id=nudge_id, cleared=cleared)

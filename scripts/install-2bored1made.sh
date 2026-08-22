@@ -54,10 +54,41 @@ repair_file() {
   fi
 }
 
+# Everything that can refuse the installation runs before the timer is touched, so a rejected
+# upgrade leaves a working schedule exactly as it found it.
+service_state=$(systemctl --user show --property=ActiveState --value 2bored1made-runtime.service) || {
+  printf '%s\n' "cannot determine whether 2bored1made-runtime.service is active" >&2
+  exit 1
+}
+case "$service_state" in
+  inactive|failed) ;;
+  *)
+    printf '%s\n' "stop 2bored1made-runtime.service before installing" >&2
+    exit 1
+    ;;
+esac
+
 timer_was_enabled=false
 if systemctl --user is-enabled --quiet 2bored1made-runtime.timer 2>/dev/null; then
   timer_was_enabled=true
 fi
+
+# The steps below still abort on a symlinked managed path, a held lock, or a failed daemon-reload,
+# and by then the timer is already disabled. Without this the upgrade would end with the schedule
+# silently switched off and nothing saying so, which is worse than the failure that caused it.
+restore_timer() {
+  restore_status=$?
+  trap - EXIT
+  if [ "$restore_status" -ne 0 ] && [ "$timer_was_enabled" = true ]; then
+    if systemctl --user enable --now 2bored1made-runtime.timer >/dev/null 2>&1; then
+      printf '%s\n' "installation failed; restored the previously enabled 2bored1made-runtime.timer" >&2
+    else
+      printf '%s\n' "installation failed and the timer could not be restored; re-enable it with: systemctl --user enable --now 2bored1made-runtime.timer" >&2
+    fi
+  fi
+  exit "$restore_status"
+}
+trap restore_timer EXIT INT TERM HUP
 
 timer_status=0
 systemctl --user is-active --quiet 2bored1made-runtime.timer || timer_status=$?
@@ -71,18 +102,6 @@ case "$timer_status" in
   4) ;;
   *)
     printf '%s\n' "cannot determine whether 2bored1made-runtime.timer is active" >&2
-    exit 1
-    ;;
-esac
-
-service_state=$(systemctl --user show --property=ActiveState --value 2bored1made-runtime.service) || {
-  printf '%s\n' "cannot determine whether 2bored1made-runtime.service is active" >&2
-  exit 1
-}
-case "$service_state" in
-  inactive|failed) ;;
-  *)
-    printf '%s\n' "stop 2bored1made-runtime.service before installing" >&2
     exit 1
     ;;
 esac

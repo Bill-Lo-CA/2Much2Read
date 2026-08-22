@@ -279,3 +279,64 @@ class TestDryRun:
         result = pipeline.run(settings(tmp_path), True, now=at(9, 30))
 
         assert result.due == ["stretch@09:00"]
+
+
+class TestCompleted:
+    def test_only_the_run_that_finished_a_nudge_reports_it(self, tmp_path, monkeypatch) -> None:
+        # Listing every already-finished nudge would repeat the same names in every result for as
+        # long as they stay in the configuration.
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00','14:00']\n    total_sends: 1\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+
+        assert pipeline.run(settings(tmp_path), False, now=at(9, 30)).completed == ["stretch"]
+        assert pipeline.run(settings(tmp_path), False, now=at(14, 30)).completed == []
+
+    def test_a_run_that_did_not_finish_a_nudge_reports_nothing(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+
+        assert pipeline.run(settings(tmp_path), False, now=at(9, 30)).completed == []
+
+
+class TestRemovedNudges:
+    def test_a_nudge_deleted_from_the_configuration_can_still_be_reset(self, tmp_path, monkeypatch) -> None:
+        # Otherwise its rows are unreachable, and re-adding the same id later would inherit a
+        # countdown that was already spent.
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+        write_nudges(tmp_path, "nudges: []\n")
+
+        assert pipeline.reset(settings(tmp_path), "stretch").cleared == 1
+
+    def test_an_id_with_neither_configuration_nor_history_is_still_an_error(self, tmp_path) -> None:
+        write_nudges(tmp_path, "nudges: []\n")
+
+        with pytest.raises(ValueError, match="unknown nudge id"):
+            pipeline.reset(settings(tmp_path), "ghost")
+
+
+class TestDaylightSaving:
+    def test_the_repeated_hour_still_sends_only_once(self, tmp_path, monkeypatch) -> None:
+        # America/Montreal runs 01:30 twice on 2026-11-01. The slot is keyed on the local date and
+        # wall-clock time, so the second 01:30 finds the slot already delivered.
+        write_nudges(tmp_path, "nudges:\n  - id: night\n    message: hi\n    at: ['01:30']\n    total_sends: 5\n")
+        sends: list[str] = []
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: sends.append("x") or ["message-id"])
+        first = datetime(2026, 11, 1, 1, 45, tzinfo=MONTREAL, fold=0)
+        second = datetime(2026, 11, 1, 1, 45, tzinfo=MONTREAL, fold=1)
+        assert first.utcoffset() != second.utcoffset()
+
+        pipeline.run(settings(tmp_path), False, now=first)
+        pipeline.run(settings(tmp_path), False, now=second)
+
+        assert sends == ["x"]
+
+    def test_a_slot_inside_the_skipped_hour_still_fires_that_day(self, tmp_path, monkeypatch) -> None:
+        # 02:30 does not exist on 2026-03-08; the nudge must not be silently lost for the day.
+        write_nudges(tmp_path, "nudges:\n  - id: spring\n    message: hi\n    at: ['02:30']\n    total_sends: 5\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+
+        result = pipeline.run(settings(tmp_path), False, now=datetime(2026, 3, 8, 9, 0, tzinfo=MONTREAL))
+
+        assert result.sent == 1
