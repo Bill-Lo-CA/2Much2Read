@@ -41,6 +41,7 @@ class NudgeView(BaseModel):
     remaining: int
     at: list[str]
     next_slot: datetime | None = None
+    overdue: bool = False
     last_delivered_at: str | None = None
     done: bool
 
@@ -119,12 +120,27 @@ def due_slots(
     return due
 
 
-def _next_slot(nudge: NudgeConfig, now: datetime) -> datetime:
+def _next_slot(
+    nudge: NudgeConfig,
+    delivered_counts: dict[str, int],
+    slot_states: dict[tuple[str, str], tuple[str, int]],
+    now: datetime,
+) -> tuple[datetime, bool]:
+    """When the next delivery happens, and whether that slot is already owed.
+
+    A report that disagrees with the thing it reports on is worse than no report. The next firing is
+    whatever the next run would send, so this asks `due_slots` rather than restating its rules:
+    today's owed slot if there is one - at 21:05 an untouched nudge is still owed its 09:00 - and
+    only otherwise the next time of day that has not arrived yet.
+    """
+    owed = due_slots(NudgesConfig(nudges=[nudge]), delivered_counts, slot_states, now)
+    if owed:
+        return datetime.combine(owed[0].slot_date, owed[0].slot_time, now.tzinfo), True
     for moment in nudge.at:
         candidate = datetime.combine(now.date(), moment, now.tzinfo)
         if candidate > now:
-            return candidate
-    return datetime.combine(now.date() + timedelta(days=1), nudge.at[0], now.tzinfo)
+            return candidate, False
+    return datetime.combine(now.date() + timedelta(days=1), nudge.at[0], now.tzinfo), False
 
 
 def _mention_ids(settings: Settings, nudge: NudgeConfig) -> list[str]:
@@ -252,15 +268,22 @@ def status(settings: Settings, *, now: datetime | None = None) -> NudgeStatusRes
     timezone = _timezone(config, settings)
     now = (now or datetime.now(timezone)).astimezone(timezone)
     counts: dict[str, int] = {}
+    states: dict[tuple[str, str], tuple[str, int]] = {}
     last_delivered: dict[str, str | None] = {}
+    # The same three inputs a run works from, so the report and the run cannot disagree.
     with snapshot(settings.database_path) as database:
         if database is not None:
             counts = database.delivered_counts()
+            states = database.slot_states(now.date())
             last_delivered = {nudge.id: database.last_delivery(nudge.id) for nudge in config.nudges}
     views: list[NudgeView] = []
     for nudge in config.nudges:
         delivered = counts.get(nudge.id, 0)
         done = delivered >= nudge.total_sends
+        next_slot: datetime | None = None
+        overdue = False
+        if not done and nudge.enabled:
+            next_slot, overdue = _next_slot(nudge, counts, states, now)
         views.append(
             NudgeView(
                 id=nudge.id,
@@ -269,7 +292,8 @@ def status(settings: Settings, *, now: datetime | None = None) -> NudgeStatusRes
                 total_sends=nudge.total_sends,
                 remaining=max(nudge.total_sends - delivered, 0),
                 at=[moment.isoformat("minutes") for moment in nudge.at],
-                next_slot=None if done or not nudge.enabled else _next_slot(nudge, now),
+                next_slot=next_slot,
+                overdue=overdue,
                 last_delivered_at=last_delivered.get(nudge.id),
                 done=done,
             )

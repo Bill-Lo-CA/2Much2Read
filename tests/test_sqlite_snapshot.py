@@ -1,8 +1,9 @@
 """Reading a SQLite database without changing it.
 
-A dry run has to be possible whatever else is happening, and has to leave the data directory
-exactly as it found it. A plain read-only connection gives neither on its own: SQLite creates the
--wal and -shm sidecars when they are missing, even through mode=ro.
+A dry run has to be possible whatever else is happening, and has to leave the data directory exactly
+as it found it. A read-only connection to the live file gives neither: where the -wal and -shm
+sidecars are missing SQLite creates them, and where they are present a query updates the reader
+marks inside -shm without changing its name, size, or mtime.
 """
 
 import sqlite3
@@ -11,6 +12,7 @@ import sys
 from pathlib import Path
 
 import pytest
+from conftest import directory_digest as listing
 
 from two_read_runtime.sqlite_snapshot import reading_connection
 
@@ -22,10 +24,6 @@ def written(path: Path) -> None:
     connection.execute("INSERT INTO t VALUES(1)")
     connection.commit()
     connection.close()
-
-
-def listing(path: Path) -> dict[str, tuple[int, int]]:
-    return {entry.name: (entry.stat().st_size, entry.stat().st_mtime_ns) for entry in path.iterdir()}
 
 
 def source_file(connection: sqlite3.Connection) -> str:
@@ -51,9 +49,10 @@ def test_a_cleanly_closed_database_is_read_from_a_copy(tmp_path: Path) -> None:
     assert listing(tmp_path) == before
 
 
-def test_a_database_with_its_sidecars_is_read_in_place(tmp_path: Path) -> None:
-    # The sidecars exist, so opening the live file creates nothing - and reading it directly avoids
-    # copying a database and a write-ahead log that a writer is still moving.
+def test_a_database_with_a_live_writer_is_still_read_from_a_copy(tmp_path: Path) -> None:
+    # Opening the live file would create nothing here, because the sidecars already exist - but a
+    # query through it updates the reader marks inside -shm, which is a change to the data
+    # directory even though the file keeps its size and its mtime.
     path = tmp_path / "db.sqlite3"
     written(path)
     writer = sqlite3.connect(path)
@@ -64,8 +63,9 @@ def test_a_database_with_its_sidecars_is_read_in_place(tmp_path: Path) -> None:
 
         with reading_connection(path) as connection:
             assert connection is not None
+            # The second row is committed but still only in the write-ahead log.
             assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 2
-            assert source_file(connection) == str(path)
+            assert source_file(connection) != str(path)
 
         assert listing(tmp_path) == before
     finally:
@@ -163,3 +163,24 @@ def test_the_connection_is_closed_when_the_context_ends(tmp_path: Path) -> None:
 
     with pytest.raises(sqlite3.ProgrammingError):
         opened.execute("SELECT 1")
+
+
+def test_reading_beside_a_committing_writer_moves_no_bytes(tmp_path: Path) -> None:
+    # Separate from the assertion about which file is opened: this one only weighs the bytes, and
+    # is the check that fails if a reader ever attaches to the live WAL index again. The reader
+    # marks it would move live inside -shm, at the same size and the same mtime.
+    path = tmp_path / "db.sqlite3"
+    written(path)
+    writer = sqlite3.connect(path)
+    writer.execute("INSERT INTO t VALUES(2)")
+    writer.commit()
+    try:
+        before = listing(tmp_path)
+
+        with reading_connection(path) as connection:
+            assert connection is not None
+            connection.execute("SELECT count(*) FROM t").fetchone()
+
+        assert listing(tmp_path) == before
+    finally:
+        writer.close()

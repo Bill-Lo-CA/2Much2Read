@@ -1,3 +1,4 @@
+import hashlib
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -7,6 +8,20 @@ from two_busy_one_miss.config import Settings as CalendarSettings
 from two_busy_one_miss.storage import Database as CalendarDatabase
 from two_much_two_read.config import Settings as NewsletterSettings
 from two_much_two_read.storage import Database as NewsletterDatabase
+
+
+def directory_digest(path: Path) -> dict[str, tuple[int, str]]:
+    """Every file in a directory, by content.
+
+    Assertions that a command changed nothing have to read the bytes. A read-only SQLite connection
+    updates the reader marks inside a live -shm file in place, leaving its name, its size, and even
+    its mtime alone, so a listing built from any of those reports no change where there was one.
+    """
+    return {
+        entry.name: (entry.stat().st_size, hashlib.sha256(entry.read_bytes()).hexdigest())
+        for entry in path.iterdir()
+        if entry.is_file()
+    }
 
 
 @pytest.fixture

@@ -1,7 +1,9 @@
-from datetime import datetime, time
+import sqlite3
+from datetime import date, datetime, time
 from zoneinfo import ZoneInfo
 
 import pytest
+from conftest import directory_digest
 
 from two_bored_one_made import pipeline
 from two_bored_one_made.config import NudgeConfig, NudgesConfig, Settings, load_nudges
@@ -254,14 +256,6 @@ class TestReset:
 
 
 class TestStatus:
-    def test_next_slot_rolls_over_to_tomorrow_after_the_last_one(self, tmp_path) -> None:
-        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
-
-        view = pipeline.status(settings(tmp_path), now=at(23, 0)).nudges[0]
-
-        assert view.next_slot is not None
-        assert view.next_slot.date() == at(9, 0).date().replace(day=22)
-
     def test_a_finished_nudge_reports_no_next_slot(self, tmp_path, monkeypatch) -> None:
         write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 1\n")
         monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
@@ -350,7 +344,7 @@ class TestReadsDoNotWrite:
         pipeline.run(settings(tmp_path), False, now=at(9, 30))
         # A clean close removes the write-ahead log, which is the state a read has to preserve.
         assert not (tmp_path / "2bored1made.sqlite3-wal").exists()
-        return {entry.name for entry in tmp_path.iterdir()}
+        return directory_digest(tmp_path)
 
     def test_a_dry_run_against_an_existing_database_writes_nothing(self, tmp_path, monkeypatch) -> None:
         # SQLite recreates the -wal and -shm sidecars to read a WAL database, even through a
@@ -359,14 +353,14 @@ class TestReadsDoNotWrite:
 
         pipeline.run(settings(tmp_path), True, now=at(9, 30))
 
-        assert {entry.name for entry in tmp_path.iterdir()} == before
+        assert directory_digest(tmp_path) == before
 
     def test_status_against_an_existing_database_writes_nothing(self, tmp_path, monkeypatch) -> None:
         before = self._existing_history(tmp_path, monkeypatch)
 
         pipeline.status(settings(tmp_path), now=at(9, 30))
 
-        assert {entry.name for entry in tmp_path.iterdir()} == before
+        assert directory_digest(tmp_path) == before
 
     def test_a_read_still_sees_what_the_last_run_recorded(self, tmp_path, monkeypatch) -> None:
         self._existing_history(tmp_path, monkeypatch)
@@ -384,33 +378,132 @@ class TestReadsDoNotWrite:
             assert pipeline.status(configured, now=at(9, 30)).nudges[0].delivered == 1
             assert pipeline.run(configured, True, now=at(9, 30)).due == []
 
-        assert {entry.name for entry in tmp_path.iterdir()} == before
+        assert directory_digest(tmp_path) == before
 
     def test_a_read_works_while_a_writer_holds_the_database_open(self, tmp_path, monkeypatch) -> None:
-        # An open writer leaves the -wal and -shm sidecars in place, which is the branch that reads
-        # the live database directly instead of copying it.
+        # A writer that has committed leaves frames in the -wal and marks in the -shm. Reading the
+        # live database there creates no file, but moves the reader marks inside the -shm - same
+        # name, same size, same mtime, different bytes - so only a digest sees it.
         self._existing_history(tmp_path, monkeypatch)
         writer = Database(tmp_path / "2bored1made.sqlite3")
         try:
+            writer.record_send("stretch", date(2026, 8, 21), time(14), message="hi", destination_key="k", delivered=True)
             assert (tmp_path / "2bored1made.sqlite3-wal").exists()
-            before = {entry.name for entry in tmp_path.iterdir()}
+            assert (tmp_path / "2bored1made.sqlite3-shm").exists()
+            before = directory_digest(tmp_path)
 
             view = pipeline.status(settings(tmp_path), now=at(9, 30)).nudges[0]
 
-            assert view.delivered == 1
-            assert {entry.name for entry in tmp_path.iterdir()} == before
+            assert view.delivered == 2
+            assert directory_digest(tmp_path) == before
         finally:
             writer.close()
+
+    def test_a_read_never_opens_the_live_database(self, tmp_path, monkeypatch) -> None:
+        # The digest catches what a read changed; this catches what it touched at all, which does
+        # not depend on the write-ahead log happening to be in a state that shows the difference.
+        self._existing_history(tmp_path, monkeypatch)
+        # With the sidecars present a read-only connection to the live file would create nothing,
+        # so this is the state the assertion has to be made in.
+        writer = Database(tmp_path / "2bored1made.sqlite3")
+        writer.record_send("stretch", date(2026, 8, 21), time(14), message="hi", destination_key="k", delivered=True)
+        opened: list[str] = []
+        real_connect = sqlite3.connect
+
+        def recording_connect(target, *args, **kwargs):  # type: ignore[no-untyped-def]
+            opened.append(str(target))
+            return real_connect(target, *args, **kwargs)
+
+        monkeypatch.setattr(sqlite3, "connect", recording_connect)
+        try:
+            pipeline.status(settings(tmp_path), now=at(9, 30))
+            pipeline.run(settings(tmp_path), True, now=at(9, 30))
+        finally:
+            monkeypatch.undo()
+            writer.close()
+
+        live = str(tmp_path / "2bored1made.sqlite3")
+        assert opened, "the reads should have opened something"
+        assert not [target for target in opened if live in target]
 
     def test_a_read_does_not_even_create_the_lock_file(self, tmp_path, monkeypatch) -> None:
         # Taking the lock creates the lock file when it is missing, which is itself a change to the
         # data directory; a missing lock file also means no writer has ever run here.
         write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
         Database(tmp_path / "2bored1made.sqlite3").close()
-        before = {entry.name for entry in tmp_path.iterdir()}
+        before = directory_digest(tmp_path)
         assert "2bored1made.lock" not in before
 
         pipeline.status(settings(tmp_path), now=at(9, 30))
         pipeline.run(settings(tmp_path), True, now=at(9, 30))
 
-        assert {entry.name for entry in tmp_path.iterdir()} == before
+        assert directory_digest(tmp_path) == before
+
+
+class TestNextSlotAgreesWithRun:
+    """What status reports as the next firing has to be what the next run actually sends."""
+
+    def _config(self, tmp_path) -> str:
+        return "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00','14:00','21:00']\n    total_sends: 3\n"
+
+    @pytest.mark.parametrize("hour", [9, 14, 21])
+    def test_an_owed_slot_is_the_next_firing_not_tomorrow(self, tmp_path, hour) -> None:
+        # At 21:05 an untouched nudge is still owed its 09:00, and the next per-minute run delivers
+        # it; reporting tomorrow's 09:00 would describe a different program.
+        write_nudges(tmp_path, self._config(tmp_path))
+        now = at(hour, 5)
+
+        view = pipeline.status(settings(tmp_path), now=now).nudges[0]
+        due = pipeline.run(settings(tmp_path), True, now=now).due
+
+        assert due == ["stretch@09:00"]
+        assert view.next_slot == at(9, 0)
+        assert view.overdue is True
+
+    def test_nothing_owed_reports_the_next_time_of_day(self, tmp_path) -> None:
+        write_nudges(tmp_path, self._config(tmp_path))
+
+        view = pipeline.status(settings(tmp_path), now=at(8, 0)).nudges[0]
+
+        assert (view.next_slot, view.overdue) == (at(9, 0), False)
+        assert pipeline.run(settings(tmp_path), True, now=at(8, 0)).due == []
+
+    def test_a_delivered_slot_moves_the_report_on(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, self._config(tmp_path))
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+
+        view = pipeline.status(settings(tmp_path), now=at(9, 31)).nudges[0]
+
+        assert (view.next_slot, view.overdue) == (at(14, 0), False)
+
+    def test_an_exhausted_slot_is_not_reported_as_owed(self, tmp_path, monkeypatch) -> None:
+        # A slot that has spent its attempts will not be retried today, so it is not what fires next.
+        write_nudges(tmp_path, self._config(tmp_path))
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: (_ for _ in ()).throw(DiscordDeliveryError()))
+        for minute in range(pipeline.MAX_SLOT_ATTEMPTS):
+            pipeline.run(settings(tmp_path), False, now=at(9, 30 + minute))
+
+        view = pipeline.status(settings(tmp_path), now=at(9, 40)).nudges[0]
+
+        assert (view.next_slot, view.overdue) == (at(14, 0), False)
+        assert pipeline.run(settings(tmp_path), True, now=at(9, 40)).due == []
+
+    def test_the_last_day_rolls_over_to_tomorrow(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+
+        view = pipeline.status(settings(tmp_path), now=at(23, 0)).nudges[0]
+
+        assert view.next_slot is not None
+        assert (view.next_slot.date(), view.overdue) == (at(9, 0).date().replace(day=22), False)
+
+    def test_a_finished_nudge_reports_neither(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 1\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+
+        view = pipeline.status(settings(tmp_path), now=at(21, 0)).nudges[0]
+
+        assert (view.done, view.next_slot, view.overdue) == (True, None, False)

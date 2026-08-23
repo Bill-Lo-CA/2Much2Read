@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, call
 from zoneinfo import ZoneInfo
 
 import pytest
+from conftest import directory_digest
 
 from two_busy_one_miss import pipeline
 from two_busy_one_miss.config import EventMatch, RemindersConfig, ReminderSpec, RuleConfig, Settings
@@ -757,7 +758,7 @@ def _reminder_history(tmp_path: Path) -> tuple[Settings, set[str]]:
     database.close()
     # A clean close removes the write-ahead log, which is the state a read has to preserve.
     assert not (tmp_path / "reminders.sqlite3-wal").exists()
-    return settings, {entry.name for entry in tmp_path.iterdir()}
+    return settings, directory_digest(tmp_path)
 
 
 def test_a_reminder_dry_run_leaves_the_data_directory_alone(tmp_path: Path) -> None:
@@ -768,7 +769,7 @@ def test_a_reminder_dry_run_leaves_the_data_directory_alone(tmp_path: Path) -> N
     result = pipeline.run(settings, dry_run=True, now=datetime(2026, 7, 9, 9, 0, tzinfo=ZoneInfo("America/Montreal")))
 
     assert result.due == ["standup reminder"]
-    assert {entry.name for entry in tmp_path.iterdir()} == before
+    assert directory_digest(tmp_path) == before
 
 
 def test_a_reminder_dry_run_works_while_the_lock_is_held(tmp_path: Path) -> None:
@@ -779,11 +780,11 @@ def test_a_reminder_dry_run_works_while_the_lock_is_held(tmp_path: Path) -> None
 
     with ProcessLock(settings.lock_path):
         # Taking the lock is what creates the lock file here, so the comparison starts after it.
-        before = {entry.name for entry in tmp_path.iterdir()}
+        before = directory_digest(tmp_path)
 
         assert pipeline.run(settings, dry_run=True, now=now).due == ["standup reminder"]
 
-        assert {entry.name for entry in tmp_path.iterdir()} == before
+        assert directory_digest(tmp_path) == before
 
 
 def test_a_reminder_dry_run_without_a_database_reports_nothing_due(tmp_path: Path) -> None:

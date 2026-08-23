@@ -11,7 +11,6 @@ from tempfile import TemporaryDirectory
 # unclean exit, the statements that created the tables - so a copy that leaves it behind is not the
 # same database.
 COPIED = ("", "-wal")
-LIVE_SIDECARS = ("-wal", "-shm")
 COPY_ATTEMPTS = 3
 
 
@@ -27,41 +26,35 @@ def _stamps(path: Path) -> tuple[tuple[int, int] | None, ...]:
     return tuple(_stamp(Path(f"{path}{suffix}")) for suffix in COPIED)
 
 
-def _readable_in_place(path: Path) -> bool:
-    return all(Path(f"{path}{suffix}").exists() for suffix in LIVE_SIDECARS)
-
-
 @contextmanager
 def reading_connection(path: Path) -> Iterator[sqlite3.Connection | None]:
     """Open a database for reporting only, or yield None when there is nothing to read yet.
 
     A dry run has to be possible whatever else is happening, and has to leave the data directory
-    exactly as it found it. Neither falls out of a plain read-only connection, so which of the two
-    ways in is safe depends on what is already on disk.
+    exactly as it found it. A read-only connection to the live file gives neither, in two different
+    ways. Where the -wal and -shm sidecars are missing, SQLite creates them, because a database in
+    WAL mode cannot be read without them. Where they are present, nothing is created - but running a
+    query attaches the reader to the live WAL index and updates its marks inside -shm, leaving the
+    file the same size with the same mtime and different contents. That is the shape of change a
+    directory listing cannot see, so the reader never touches the live database at all.
 
-    A database in WAL mode needs its -wal and -shm sidecars to be read, and SQLite creates them if
-    they are missing - a mode=ro connection included. Where both already exist, opening one changes
-    no file at all and never waits for the writer, because concurrent reading is what WAL is for.
+    It reads a private copy instead. The write-ahead log is copied with it when there is one, since
+    it can hold committed rows that the main file does not - after an unclean exit, up to and
+    including the statements that created the tables. The -shm index is deliberately not copied: it
+    describes the live database's readers and writers, and SQLite rebuilds it beside the copy.
 
-    Otherwise the database is read from a private copy. The write-ahead log is copied with it when
-    there is one: it can hold committed rows that the main file does not, and SQLite rebuilds the
-    -shm index beside the copy. No writer is running when the -shm is absent, and one that starts
-    appends to a new log rather than rewriting the file being copied; the copy is still re-taken if
-    the source moves underneath it.
-
-    Neither path takes the lock. A reader that waited for the writer would be a dry run that cannot
-    run during the thing it exists to describe, and a reader that took the lock for itself would
-    create the lock file when it was missing.
+    Copying takes no lock. A reader that waited for the writer would be a dry run that cannot run
+    during the thing it exists to describe, and a reader that took the lock for itself would create
+    the lock file when it was missing. It does not need one: a writer appends to the log rather than
+    rewriting the file being copied, and the copy is re-taken anyway if the source moves underneath
+    it.
     """
     if not path.exists():
         yield None
         return
     with ExitStack() as stack:
-        if _readable_in_place(path):
-            connection = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
-        else:
-            directory = Path(stack.enter_context(TemporaryDirectory()))
-            connection = sqlite3.connect(_copied(path, directory / path.name))
+        directory = Path(stack.enter_context(TemporaryDirectory()))
+        connection = sqlite3.connect(_copied(path, directory / path.name))
         # A connection is its own transaction context manager, not a closing one, so closing it is
         # registered here; the stack unwinds it before the directory holding the copy goes away.
         stack.callback(connection.close)

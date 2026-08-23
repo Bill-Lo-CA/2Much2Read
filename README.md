@@ -419,6 +419,11 @@ uv run 2bored1made status          # delivered/total and the next slot per nudge
 uv run 2bored1made reset --nudge stretch
 ```
 
+`status` reports the slot that will actually be delivered next, which is not always in the future:
+a nudge whose 09:00 has not been sent is still owed it at 21:05, and the next per-minute run
+delivers that slot rather than waiting for tomorrow. `overdue` says which of the two a `next_slot`
+is, so the report and the run can never describe different programs.
+
 `2bored1made-runtime.timer` runs every minute and `run` decides what is due, so editing
 `nudges.yaml` takes effect without reinstalling units. Four decisions are worth knowing:
 
@@ -445,20 +450,22 @@ ten more sends, and rewording `message` keeps the history. Changing `id` creates
 the timer's failure is visible to systemd.
 
 A dry run runs whatever else is happening, and leaves the data directory exactly as it found it.
-That takes some care with SQLite: a database in WAL mode needs its `-wal` and `-shm` sidecars to be
-read, and SQLite creates them when they are missing, a `mode=ro` connection included. So
-`2bored1made run --dry-run`, `2bored1made status`, and `2busy1miss run --dry-run` choose how to
-open the database from what is already on disk. Where both sidecars exist, the live database is read
-directly: opening it changes no file, and concurrent reading is what WAL is for. Otherwise it is
-read from a private copy, taken with the write-ahead log when there is one - after an unclean exit
-that log holds committed rows, and the statements that created the tables holding them, which the
-main file does not.
+That takes some care with SQLite, because a read-only connection to the live file gives neither.
+A database in WAL mode needs its `-wal` and `-shm` sidecars to be read: where they are missing
+SQLite creates them, and where they are present a query attaches the reader to the live WAL index
+and moves its marks inside `-shm` — same name, same size, same mtime, different bytes.
 
-Neither path takes the lock. A reader that waited for the writer would be a dry run that cannot run
-during the thing it exists to describe, and a reader that took the lock for itself would create the
-lock file when it was missing. `2much2read run --dry-run` reaches the same result differently, by
-working entirely in an in-memory database, and `2busy1miss agenda --dry-run` returns before it
-opens anything.
+So `2bored1made run --dry-run`, `2bored1made status`, and `2busy1miss run --dry-run` never open the
+live database at all. They read a private copy, taken with the write-ahead log when there is one:
+after an unclean exit that log holds committed rows, and the statements that created the tables
+holding them, which the main file does not. The `-shm` index is deliberately left behind, because it
+describes the live database's readers and writers; SQLite rebuilds it beside the copy.
+
+Copying takes no lock. A reader that waited for the writer would be a dry run that cannot run during
+the thing it exists to describe, and a reader that took the lock for itself would create the lock
+file when it was missing. `2much2read run --dry-run` reaches the same result differently, by working
+entirely in an in-memory database, and `2busy1miss agenda --dry-run` returns before it opens
+anything.
 
 ## Delivery behavior
 
