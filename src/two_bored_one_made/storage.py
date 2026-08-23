@@ -1,16 +1,14 @@
 from __future__ import annotations
 
 import json
-import shutil
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, time
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
-from two_read_runtime.locking import ProcessLock
 from two_read_runtime.permissions import prepare_private_file, repair_sqlite_files
+from two_read_runtime.sqlite_snapshot import snapshot_path
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS nudge_sends(
@@ -138,33 +136,13 @@ class Database:
 
 @contextmanager
 def snapshot(path: Path, lock_path: Path) -> Iterator[Database | None]:
-    """Read the history without writing anything next to the live database.
-
-    SQLite has to create the -wal and -shm sidecars to read a database in WAL mode, and opening it
-    with mode=ro is no exception: reading a cleanly closed database puts both files back. A command
-    that promises to change nothing therefore reads a copy. The copy is taken while holding the
-    lock the writer holds, because a database and its write-ahead log copied while a write is in
-    flight are not a consistent pair.
-    """
-    if not path.exists():
-        yield None
-        return
-    try:
-        lock = ProcessLock(lock_path)
-        lock.__enter__()
-    except RuntimeError:
-        raise ValueError("a run is writing to the history right now; try again in a moment") from None
-    try:
-        with TemporaryDirectory() as directory:
-            copy = Path(directory) / path.name
-            for suffix in ("", "-wal", "-shm"):
-                source = Path(f"{path}{suffix}")
-                if source.exists():
-                    shutil.copy2(source, f"{copy}{suffix}")
-            database = Database(copy)
-            try:
-                yield database
-            finally:
-                database.close()
-    finally:
-        lock.__exit__(None, None, None)
+    """Read the history without writing anything next to the live database."""
+    with snapshot_path(path, lock_path) as copy:
+        if copy is None:
+            yield None
+            return
+        database = Database(copy)
+        try:
+            yield database
+        finally:
+            database.close()

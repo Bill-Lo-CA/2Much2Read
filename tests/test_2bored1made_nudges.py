@@ -385,3 +385,16 @@ class TestReadsDoNotWrite:
                 pipeline.status(configured, now=at(9, 30))
             with pytest.raises(ValueError, match="try again"):
                 pipeline.run(configured, True, now=at(9, 30))
+
+    def test_a_read_does_not_even_create_the_lock_file(self, tmp_path, monkeypatch) -> None:
+        # Taking the lock creates the lock file when it is missing, which is itself a change to the
+        # data directory; a missing lock file also means no writer has ever run here.
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
+        Database(tmp_path / "2bored1made.sqlite3").close()
+        before = {entry.name for entry in tmp_path.iterdir()}
+        assert "2bored1made.lock" not in before
+
+        pipeline.status(settings(tmp_path), now=at(9, 30))
+        pipeline.run(settings(tmp_path), True, now=at(9, 30))
+
+        assert {entry.name for entry in tmp_path.iterdir()} == before

@@ -16,6 +16,7 @@ from two_read_runtime.discord import (
     legacy_destination,
 )
 from two_read_runtime.locking import ProcessLock
+from two_read_runtime.sqlite_snapshot import snapshot_path
 
 from .config import RemindersConfig, Settings, load_reminders
 from .google_calendar import CalendarClient, CalendarEvent, credentials
@@ -491,16 +492,26 @@ def reset_agenda_checkpoint(settings: Settings, delivery_id: int) -> AgendaCheck
     return AgendaCheckpointResetResult(delivery_id=delivery_id)
 
 
+def _dry_run_due(settings: Settings, now: datetime) -> ReminderDryRunResult:
+    """What a real run would send, read from a copy so the data directory is left alone."""
+    with snapshot_path(settings.database_path, settings.lock_path) as copy:
+        if copy is None:
+            return ReminderDryRunResult(due=[])
+        database = Database(copy)
+        try:
+            return ReminderDryRunResult(due=[str(row["content"]) for row in database.due_attempts(now)])
+        finally:
+            database.close()
+
+
 def run(settings: Settings, dry_run: bool, *, now: datetime | None = None) -> ReminderRunResult | ReminderDryRunResult:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
     now = (now or datetime.now(timezone)).astimezone(timezone)
-    if dry_run and not settings.database_path.exists():
-        return ReminderDryRunResult(due=[])
-    database = Database(settings.database_path, read_only=dry_run)
+    if dry_run:
+        return _dry_run_due(settings, now)
+    database = Database(settings.database_path)
     try:
-        if dry_run:
-            return ReminderDryRunResult(due=[str(row["content"]) for row in database.due_attempts(now)])
         with ProcessLock(settings.lock_path):
             sent, failed, expired, failed_by_error_code = _dispatch_due_reminders(database, settings, now)
     finally:

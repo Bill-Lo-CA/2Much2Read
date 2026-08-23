@@ -16,6 +16,7 @@ from two_busy_one_miss.renderer import render_agenda
 from two_busy_one_miss.rules import ReminderCandidate
 from two_busy_one_miss.storage import Database
 from two_read_runtime.discord import DiscordDeliveryError
+from two_read_runtime.locking import ProcessLock
 
 
 class FakeReminderDatabase:
@@ -732,3 +733,57 @@ def test_run_expires_started_events_without_discord_config(tmp_path: Path, monke
     database = Database(settings.database_path)
     assert database.attempt_state(attempt_id) == "expired"
     database.close()
+
+
+def _reminder_history(tmp_path: Path) -> tuple[Settings, set[str]]:
+    settings = Settings(
+        reminders_config_path=tmp_path / "reminders.yaml",
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
+    )
+    (tmp_path / "reminders.yaml").write_text("calendars:\n  - id: primary\n", encoding="utf-8")
+    start = datetime(2026, 7, 9, 9, 0, tzinfo=ZoneInfo("America/Montreal"))
+    database = Database(settings.database_path)
+    database.create_attempt(
+        ReminderCandidate(
+            CalendarEvent("primary", "Main", "e1", "i1", "Standup", "", start, start + timedelta(minutes=30), False),
+            "default-5m",
+            "5m",
+            start - timedelta(minutes=5),
+        ),
+        "standup reminder",
+    )
+    database.close()
+    # A clean close removes the write-ahead log, which is the state a read has to preserve.
+    assert not (tmp_path / "reminders.sqlite3-wal").exists()
+    return settings, {entry.name for entry in tmp_path.iterdir()}
+
+
+def test_a_reminder_dry_run_leaves_the_data_directory_alone(tmp_path: Path) -> None:
+    # SQLite recreates the -wal and -shm sidecars to read a WAL database, even through a mode=ro
+    # connection, so reading the live file in place is not the same as changing nothing.
+    settings, before = _reminder_history(tmp_path)
+
+    result = pipeline.run(settings, dry_run=True, now=datetime(2026, 7, 9, 9, 0, tzinfo=ZoneInfo("America/Montreal")))
+
+    assert result.due == ["standup reminder"]
+    assert {entry.name for entry in tmp_path.iterdir()} == before
+
+
+def test_a_reminder_dry_run_during_a_run_says_so(tmp_path: Path) -> None:
+    settings, _ = _reminder_history(tmp_path)
+
+    with ProcessLock(settings.lock_path), pytest.raises(ValueError, match="try again"):
+        pipeline.run(settings, dry_run=True)
+
+
+def test_a_reminder_dry_run_without_a_database_reports_nothing_due(tmp_path: Path) -> None:
+    settings = Settings(
+        reminders_config_path=tmp_path / "reminders.yaml",
+        database_path=tmp_path / "absent.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+    )
+    (tmp_path / "reminders.yaml").write_text("calendars:\n  - id: primary\n", encoding="utf-8")
+
+    assert pipeline.run(settings, dry_run=True).due == []
