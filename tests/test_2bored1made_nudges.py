@@ -7,6 +7,7 @@ from two_bored_one_made import pipeline
 from two_bored_one_made.config import NudgeConfig, NudgesConfig, Settings, load_nudges
 from two_bored_one_made.storage import Database
 from two_read_runtime.discord import DiscordDeliveryError
+from two_read_runtime.locking import ProcessLock
 
 MONTREAL = ZoneInfo("America/Montreal")
 WEBHOOK = "https://discord.com/api/webhooks/123456789012345678/test-webhook-token"
@@ -340,3 +341,47 @@ class TestDaylightSaving:
         result = pipeline.run(settings(tmp_path), False, now=datetime(2026, 3, 8, 9, 0, tzinfo=MONTREAL))
 
         assert result.sent == 1
+
+
+class TestReadsDoNotWrite:
+    def _existing_history(self, tmp_path, monkeypatch) -> set[str]:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+        # A clean close removes the write-ahead log, which is the state a read has to preserve.
+        assert not (tmp_path / "2bored1made.sqlite3-wal").exists()
+        return {entry.name for entry in tmp_path.iterdir()}
+
+    def test_a_dry_run_against_an_existing_database_writes_nothing(self, tmp_path, monkeypatch) -> None:
+        # SQLite recreates the -wal and -shm sidecars to read a WAL database, even through a
+        # mode=ro connection, so reading the live file is not the same as not writing.
+        before = self._existing_history(tmp_path, monkeypatch)
+
+        pipeline.run(settings(tmp_path), True, now=at(9, 30))
+
+        assert {entry.name for entry in tmp_path.iterdir()} == before
+
+    def test_status_against_an_existing_database_writes_nothing(self, tmp_path, monkeypatch) -> None:
+        before = self._existing_history(tmp_path, monkeypatch)
+
+        pipeline.status(settings(tmp_path), now=at(9, 30))
+
+        assert {entry.name for entry in tmp_path.iterdir()} == before
+
+    def test_a_read_still_sees_what_the_last_run_recorded(self, tmp_path, monkeypatch) -> None:
+        self._existing_history(tmp_path, monkeypatch)
+
+        assert pipeline.status(settings(tmp_path), now=at(9, 30)).nudges[0].delivered == 1
+        assert pipeline.run(settings(tmp_path), True, now=at(14, 0)).due == []
+
+    def test_a_read_during_a_run_says_so_instead_of_reading_a_moving_database(self, tmp_path, monkeypatch) -> None:
+        # The copy is only a consistent pair while no write is in flight, so a contended lock is
+        # reported rather than worked around.
+        self._existing_history(tmp_path, monkeypatch)
+        configured = settings(tmp_path)
+
+        with ProcessLock(configured.lock_path):
+            with pytest.raises(ValueError, match="try again"):
+                pipeline.status(configured, now=at(9, 30))
+            with pytest.raises(ValueError, match="try again"):
+                pipeline.run(configured, True, now=at(9, 30))

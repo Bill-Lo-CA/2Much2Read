@@ -443,6 +443,12 @@ ten more sends, and rewording `message` keeps the history. Changing `id` creates
 `reset --nudge` is the explicit way to start over. `run` exits non-zero when a delivery fails, so
 the timer's failure is visible to systemd.
 
+`run --dry-run` and `status` read a copy of the history rather than the live database. SQLite has
+to recreate the `-wal` and `-shm` sidecars to read a database in WAL mode, and opening it read-only
+is no exception, so reading the file in place would leave changes behind. The copy is taken while
+holding the same lock the writer holds; if a nudge is being delivered at that moment, both commands
+say so instead of reading a database that is moving under them.
+
 ## Delivery behavior
 
 Newsletter digests contain only items extracted in that run, so a source-specific

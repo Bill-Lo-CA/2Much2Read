@@ -16,7 +16,7 @@ from two_read_runtime.discord import (
 from two_read_runtime.locking import ProcessLock
 
 from .config import NudgeConfig, NudgesConfig, Settings, load_nudges
-from .storage import Database
+from .storage import Database, snapshot
 
 # A slot that keeps failing is retried on the next timer firing, but not forever. The real fallback
 # is the next slot, so a handful of attempts is enough to ride out a brief Discord outage without
@@ -208,13 +208,9 @@ def run(settings: Settings, dry_run: bool, *, now: datetime | None = None) -> Nu
 
 def _dry_run(settings: Settings, config: NudgesConfig, timezone: ZoneInfo, now: datetime) -> NudgeDryRunResult:
     """What a real run would send, without creating or writing to anything."""
-    database = Database(settings.database_path, read_only=True) if settings.database_path.exists() else None
-    try:
+    with snapshot(settings.database_path, settings.lock_path) as database:
         counts = database.delivered_counts() if database else {}
         states = database.slot_states(now.date()) if database else {}
-    finally:
-        if database:
-            database.close()
     slots = due_slots(config, counts, states, now)
     return NudgeDryRunResult(
         timezone=str(timezone),
@@ -257,13 +253,10 @@ def status(settings: Settings, *, now: datetime | None = None) -> NudgeStatusRes
     now = (now or datetime.now(timezone)).astimezone(timezone)
     counts: dict[str, int] = {}
     last_delivered: dict[str, str | None] = {}
-    if settings.database_path.exists():
-        database = Database(settings.database_path, read_only=True)
-        try:
+    with snapshot(settings.database_path, settings.lock_path) as database:
+        if database is not None:
             counts = database.delivered_counts()
             last_delivered = {nudge.id: database.last_delivery(nudge.id) for nudge in config.nudges}
-        finally:
-            database.close()
     views: list[NudgeView] = []
     for nudge in config.nudges:
         delivered = counts.get(nudge.id, 0)
