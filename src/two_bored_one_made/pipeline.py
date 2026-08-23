@@ -208,7 +208,7 @@ def run(settings: Settings, dry_run: bool, *, now: datetime | None = None) -> Nu
 
 def _dry_run(settings: Settings, config: NudgesConfig, timezone: ZoneInfo, now: datetime) -> NudgeDryRunResult:
     """What a real run would send, without creating or writing to anything."""
-    with snapshot(settings.database_path, settings.lock_path) as database:
+    with snapshot(settings.database_path) as database:
         counts = database.delivered_counts() if database else {}
         states = database.slot_states(now.date()) if database else {}
     slots = due_slots(config, counts, states, now)
@@ -253,7 +253,7 @@ def status(settings: Settings, *, now: datetime | None = None) -> NudgeStatusRes
     now = (now or datetime.now(timezone)).astimezone(timezone)
     counts: dict[str, int] = {}
     last_delivered: dict[str, str | None] = {}
-    with snapshot(settings.database_path, settings.lock_path) as database:
+    with snapshot(settings.database_path) as database:
         if database is not None:
             counts = database.delivered_counts()
             last_delivered = {nudge.id: database.last_delivery(nudge.id) for nudge in config.nudges}

@@ -374,17 +374,33 @@ class TestReadsDoNotWrite:
         assert pipeline.status(settings(tmp_path), now=at(9, 30)).nudges[0].delivered == 1
         assert pipeline.run(settings(tmp_path), True, now=at(14, 0)).due == []
 
-    def test_a_read_during_a_run_says_so_instead_of_reading_a_moving_database(self, tmp_path, monkeypatch) -> None:
-        # The copy is only a consistent pair while no write is in flight, so a contended lock is
-        # reported rather than worked around.
-        self._existing_history(tmp_path, monkeypatch)
+    def test_a_read_works_while_the_lock_is_held(self, tmp_path, monkeypatch) -> None:
+        # A dry run that cannot run during the thing it exists to describe is not much of a dry
+        # run, and a reader has no reason to wait for a writer: it only reads.
+        before = self._existing_history(tmp_path, monkeypatch)
         configured = settings(tmp_path)
 
         with ProcessLock(configured.lock_path):
-            with pytest.raises(ValueError, match="try again"):
-                pipeline.status(configured, now=at(9, 30))
-            with pytest.raises(ValueError, match="try again"):
-                pipeline.run(configured, True, now=at(9, 30))
+            assert pipeline.status(configured, now=at(9, 30)).nudges[0].delivered == 1
+            assert pipeline.run(configured, True, now=at(9, 30)).due == []
+
+        assert {entry.name for entry in tmp_path.iterdir()} == before
+
+    def test_a_read_works_while_a_writer_holds_the_database_open(self, tmp_path, monkeypatch) -> None:
+        # An open writer leaves the -wal and -shm sidecars in place, which is the branch that reads
+        # the live database directly instead of copying it.
+        self._existing_history(tmp_path, monkeypatch)
+        writer = Database(tmp_path / "2bored1made.sqlite3")
+        try:
+            assert (tmp_path / "2bored1made.sqlite3-wal").exists()
+            before = {entry.name for entry in tmp_path.iterdir()}
+
+            view = pipeline.status(settings(tmp_path), now=at(9, 30)).nudges[0]
+
+            assert view.delivered == 1
+            assert {entry.name for entry in tmp_path.iterdir()} == before
+        finally:
+            writer.close()
 
     def test_a_read_does_not_even_create_the_lock_file(self, tmp_path, monkeypatch) -> None:
         # Taking the lock creates the lock file when it is missing, which is itself a change to the

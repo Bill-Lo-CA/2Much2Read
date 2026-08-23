@@ -6,9 +6,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from datetime import UTC, date, datetime, time
 from pathlib import Path
+from typing import Self
 
 from two_read_runtime.permissions import prepare_private_file, repair_sqlite_files
-from two_read_runtime.sqlite_snapshot import snapshot_path
+from two_read_runtime.sqlite_snapshot import reading_connection
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS nudge_sends(
@@ -46,6 +47,17 @@ class Database:
         except Exception:
             self.connection.close()
             raise
+
+    @classmethod
+    def reading(cls, connection: sqlite3.Connection) -> Self:
+        """Wrap a connection opened elsewhere for reporting only.
+
+        The reporting commands must not create or migrate anything, so they skip the constructor
+        and reuse the read methods below against a connection they were handed.
+        """
+        database = cls.__new__(cls)
+        database.connection = connection
+        return database
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -135,14 +147,7 @@ class Database:
 
 
 @contextmanager
-def snapshot(path: Path, lock_path: Path) -> Iterator[Database | None]:
-    """Read the history without writing anything next to the live database."""
-    with snapshot_path(path, lock_path) as copy:
-        if copy is None:
-            yield None
-            return
-        database = Database(copy)
-        try:
-            yield database
-        finally:
-            database.close()
+def snapshot(path: Path) -> Iterator[Database | None]:
+    """Read the history without changing anything on disk."""
+    with reading_connection(path) as connection:
+        yield None if connection is None else Database.reading(connection)

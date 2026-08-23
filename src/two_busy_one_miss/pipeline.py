@@ -16,7 +16,7 @@ from two_read_runtime.discord import (
     legacy_destination,
 )
 from two_read_runtime.locking import ProcessLock
-from two_read_runtime.sqlite_snapshot import snapshot_path
+from two_read_runtime.sqlite_snapshot import reading_connection
 
 from .config import RemindersConfig, Settings, load_reminders
 from .google_calendar import CalendarClient, CalendarEvent, credentials
@@ -493,15 +493,12 @@ def reset_agenda_checkpoint(settings: Settings, delivery_id: int) -> AgendaCheck
 
 
 def _dry_run_due(settings: Settings, now: datetime) -> ReminderDryRunResult:
-    """What a real run would send, read from a copy so the data directory is left alone."""
-    with snapshot_path(settings.database_path, settings.lock_path) as copy:
-        if copy is None:
+    """What a real run would send, read without changing anything on disk."""
+    with reading_connection(settings.database_path) as connection:
+        if connection is None:
             return ReminderDryRunResult(due=[])
-        database = Database(copy)
-        try:
-            return ReminderDryRunResult(due=[str(row["content"]) for row in database.due_attempts(now)])
-        finally:
-            database.close()
+        rows = Database.reading(connection).due_attempts(now)
+        return ReminderDryRunResult(due=[str(row["content"]) for row in rows])
 
 
 def run(settings: Settings, dry_run: bool, *, now: datetime | None = None) -> ReminderRunResult | ReminderDryRunResult:

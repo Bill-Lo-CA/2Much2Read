@@ -771,11 +771,19 @@ def test_a_reminder_dry_run_leaves_the_data_directory_alone(tmp_path: Path) -> N
     assert {entry.name for entry in tmp_path.iterdir()} == before
 
 
-def test_a_reminder_dry_run_during_a_run_says_so(tmp_path: Path) -> None:
+def test_a_reminder_dry_run_works_while_the_lock_is_held(tmp_path: Path) -> None:
+    # The every-minute reminder run holds this lock while it delivers. A dry run only reads, so it
+    # has no reason to wait for it, and no reason to fail.
     settings, _ = _reminder_history(tmp_path)
+    now = datetime(2026, 7, 9, 9, 0, tzinfo=ZoneInfo("America/Montreal"))
 
-    with ProcessLock(settings.lock_path), pytest.raises(ValueError, match="try again"):
-        pipeline.run(settings, dry_run=True)
+    with ProcessLock(settings.lock_path):
+        # Taking the lock is what creates the lock file here, so the comparison starts after it.
+        before = {entry.name for entry in tmp_path.iterdir()}
+
+        assert pipeline.run(settings, dry_run=True, now=now).due == ["standup reminder"]
+
+        assert {entry.name for entry in tmp_path.iterdir()} == before
 
 
 def test_a_reminder_dry_run_without_a_database_reports_nothing_due(tmp_path: Path) -> None:

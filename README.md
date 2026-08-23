@@ -443,14 +443,20 @@ ten more sends, and rewording `message` keeps the history. Changing `id` creates
 `reset --nudge` is the explicit way to start over. `run` exits non-zero when a delivery fails, so
 the timer's failure is visible to systemd.
 
-`run --dry-run` and `status` read a copy of the history rather than the live database, and so does
-`2busy1miss run --dry-run`. SQLite has to recreate the `-wal` and `-shm` sidecars to read a database
-in WAL mode, and opening it read-only is no exception, so reading the file in place would leave
-changes behind. The copy is taken while holding the same lock the writer holds; if a delivery is in
-flight at that moment the command says so, rather than reporting on a database that is moving under
-it. A read never creates the lock file either: a database with no lock beside it has never had a
-writer, so there is nothing to coordinate with. `2much2read run --dry-run` reaches the same result
-differently, by working entirely in an in-memory database.
+A dry run runs whatever else is happening, and leaves the data directory exactly as it found it.
+That takes some care with SQLite: a database in WAL mode needs its `-wal` and `-shm` sidecars to be
+read, and SQLite creates them when they are missing, a `mode=ro` connection included. So
+`2bored1made run --dry-run`, `2bored1made status`, and `2busy1miss run --dry-run` choose how to
+open the database from what is already on disk. Where the sidecars exist, the live database is read
+directly: opening it changes no file, and concurrent reading is what WAL is for. Where they are
+missing, the database was closed cleanly and holds everything written to it, so it is read from a
+private copy instead.
+
+Neither path takes the lock. A reader that waited for the writer would be a dry run that cannot run
+during the thing it exists to describe, and a reader that took the lock for itself would create the
+lock file when it was missing. `2much2read run --dry-run` reaches the same result differently, by
+working entirely in an in-memory database, and `2busy1miss agenda --dry-run` returns before it
+opens anything.
 
 ## Delivery behavior
 
