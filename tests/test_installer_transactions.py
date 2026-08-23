@@ -179,16 +179,15 @@ def test_declining_leaves_the_timer_disabled(tmp_path: Path, enabled: str, activ
 
 
 @pytest.mark.parametrize(("enabled", "active"), STATES)
-def test_a_blank_answer_keeps_an_enabled_timer_and_does_not_enable_a_disabled_one(
-    tmp_path: Path, enabled: str, active: str
-) -> None:
+def test_a_blank_answer_changes_nothing_at_all(tmp_path: Path, enabled: str, active: str) -> None:
+    # Including a timer started without being enabled: that is still a schedule the operator is
+    # running, and an upgrade nobody answered must not be what stops it.
     harness = Harness(tmp_path, enabled, active)
 
     result = harness.run(answer="\n")
 
     assert result.returncode == 0
-    expected = (enabled, active) if enabled == "enabled" else ("disabled", "inactive")
-    assert harness.timer_state == expected
+    assert harness.timer_state == (enabled, active)
 
 
 def test_a_refusal_before_the_timer_is_touched_never_stops_it(tmp_path: Path) -> None:

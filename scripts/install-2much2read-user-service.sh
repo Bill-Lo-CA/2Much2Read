@@ -214,25 +214,31 @@ exec 9>&-
 # upgrade offers to keep it and a first installation still defaults to leaving it off.
 if [ "$timer_was_enabled" = enabled ]; then
   printf '%s' "Keep the 2much2read timer enabled? [Y/n] "
-  default_enable=true
 else
   printf '%s' "Enable 2much2read timer now? [y/N] "
-  default_enable=false
 fi
-if ! IFS= read -r enable_timer; then
-  enable_timer=""
+if ! IFS= read -r answer; then
+  answer=""
 fi
-case "$enable_timer" in
-  y | Y) enable_timer=true ;;
-  n | N) enable_timer=false ;;
-  *) enable_timer=$default_enable ;;
+# Only an explicit answer changes anything. Both bits are restored otherwise, because a timer that
+# was started without being enabled is still a schedule the operator is running.
+case "$answer" in
+  y | Y)
+    desired_enabled=enabled
+    desired_active=active
+    [ "$timer_was_enabled" = enabled ] && desired_active=$timer_was_active
+    ;;
+  n | N)
+    desired_enabled=disabled
+    desired_active=inactive
+    ;;
+  *)
+    desired_enabled=$timer_was_enabled
+    desired_active=$timer_was_active
+    ;;
 esac
-if [ "$enable_timer" = true ]; then
-  if [ "$timer_was_enabled" = enabled ]; then
-    units_apply_timer_state 2much2read-runtime.timer enabled "$timer_was_active"
-  else
-    units_apply_timer_state 2much2read-runtime.timer enabled active
-  fi
+units_apply_timer_state 2much2read-runtime.timer "$desired_enabled" "$desired_active"
+if [ "$desired_enabled" = enabled ]; then
   timer_status="Timer enabled."
 else
   timer_status="Timer remains disabled. Enable when ready: systemctl --user enable --now 2much2read-runtime.timer"

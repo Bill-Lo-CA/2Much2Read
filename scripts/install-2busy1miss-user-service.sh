@@ -212,38 +212,41 @@ exec 9>&-
 # upgrade offers to keep them and a first installation still defaults to leaving them off.
 if [ "$reminder_was_enabled" = enabled ] || [ "$agenda_was_enabled" = enabled ]; then
   printf '%s' "Keep the reminder and agenda timers enabled? [Y/n] "
-  default_enable=true
 else
   printf '%s' "Enable reminder and agenda timers now? [y/N] "
-  default_enable=false
 fi
-if ! IFS= read -r enable_timers; then
-  enable_timers=""
+if ! IFS= read -r answer; then
+  answer=""
 fi
-case "$enable_timers" in
-  y | Y) enable_timers=true ;;
-  n | N) enable_timers=false ;;
-  *) enable_timers=$default_enable ;;
+
+# Only an explicit answer changes anything. Both bits of both timers are restored otherwise,
+# because a timer that was started without being enabled is still a schedule the operator is
+# running, and an upgrade that quietly stopped it would be making a change nobody asked for.
+apply_answer() {
+  case "$answer" in
+    y | Y)
+      desired_active=active
+      # Enabling a timer that was already enabled must not restart one deliberately stopped.
+      [ "$2" = enabled ] && desired_active=$3
+      units_apply_timer_state "$1" enabled "$desired_active"
+      ;;
+    n | N) : ;;
+    *) units_apply_timer_state "$1" "$2" "$3" ;;
+  esac
+}
+apply_answer 2busy1miss-runtime.timer "$reminder_was_enabled" "$reminder_was_active"
+apply_answer 2busy1miss-runtime-agenda.timer "$agenda_was_enabled" "$agenda_was_active"
+
+case "$answer" in
+  y | Y)
+    timer_status="Timers enabled."
+    agenda_status=""
+    ;;
+  *)
+    timer_status="Timers remain disabled. Enable reminders when ready: systemctl --user enable --now 2busy1miss-runtime.timer"
+    agenda_status="Enable agenda when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer"
+    ;;
 esac
-if [ "$enable_timers" = true ]; then
-  # Each timer keeps the state it had. Enabling one that was deliberately stopped would restart a
-  # schedule the operator had paused; enabling one that was off should start it.
-  if [ "$reminder_was_enabled" = enabled ]; then
-    units_apply_timer_state 2busy1miss-runtime.timer enabled "$reminder_was_active"
-  else
-    units_apply_timer_state 2busy1miss-runtime.timer enabled active
-  fi
-  if [ "$agenda_was_enabled" = enabled ]; then
-    units_apply_timer_state 2busy1miss-runtime-agenda.timer enabled "$agenda_was_active"
-  else
-    units_apply_timer_state 2busy1miss-runtime-agenda.timer enabled active
-  fi
-  timer_status="Timers enabled."
-  agenda_status=""
-else
-  timer_status="Timers remain disabled. Enable reminders when ready: systemctl --user enable --now 2busy1miss-runtime.timer"
-  agenda_status="Enable agenda when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer"
-fi
 
 printf '%s\n' \
   "Config: $config_dir" \

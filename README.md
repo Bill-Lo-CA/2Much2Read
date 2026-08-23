@@ -63,8 +63,9 @@ transaction:
   restored, including when the installer is interrupted by a signal.
 - **Enabled and active are restored separately.** A timer that was enabled but deliberately stopped
   is not restarted, and one that was started without being enabled is not left stopped.
-- **A timer that was already enabled stays enabled.** The prompt defaults to keeping it; a first
-  installation still defaults to leaving the timer off.
+- **Only an explicit answer changes anything.** The prompt asks whether to enable the timer, and a
+  blank answer restores exactly the enabled and active state the installer found - a first
+  installation therefore still ends with the timer off.
 
 `ExecStart` is written with the executable path quoted, and the substitution is done in the shell
 rather than with `sed`, so a repository path containing a space, `&`, or `|` installs correctly
@@ -447,10 +448,11 @@ A dry run runs whatever else is happening, and leaves the data directory exactly
 That takes some care with SQLite: a database in WAL mode needs its `-wal` and `-shm` sidecars to be
 read, and SQLite creates them when they are missing, a `mode=ro` connection included. So
 `2bored1made run --dry-run`, `2bored1made status`, and `2busy1miss run --dry-run` choose how to
-open the database from what is already on disk. Where the sidecars exist, the live database is read
-directly: opening it changes no file, and concurrent reading is what WAL is for. Where they are
-missing, the database was closed cleanly and holds everything written to it, so it is read from a
-private copy instead.
+open the database from what is already on disk. Where both sidecars exist, the live database is read
+directly: opening it changes no file, and concurrent reading is what WAL is for. Otherwise it is
+read from a private copy, taken with the write-ahead log when there is one - after an unclean exit
+that log holds committed rows, and the statements that created the tables holding them, which the
+main file does not.
 
 Neither path takes the lock. A reader that waited for the writer would be a dry run that cannot run
 during the thing it exists to describe, and a reader that took the lock for itself would create the

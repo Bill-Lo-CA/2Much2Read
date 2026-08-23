@@ -6,7 +6,11 @@ exactly as it found it. A plain read-only connection gives neither on its own: S
 """
 
 import sqlite3
+import subprocess
+import sys
 from pathlib import Path
+
+import pytest
 
 from two_read_runtime.sqlite_snapshot import reading_connection
 
@@ -104,3 +108,58 @@ def test_a_write_during_the_copy_is_retaken(tmp_path: Path, monkeypatch) -> None
         assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 2
 
     assert len(copies) == 2
+
+
+def crashed(path: Path) -> None:
+    """Leave a database whose committed rows, and its schema, are still only in the -wal file."""
+    statements = (
+        "import os, sqlite3;"
+        f"c = sqlite3.connect({str(path)!r});"
+        "c.execute('PRAGMA journal_mode=WAL');"
+        "c.execute('CREATE TABLE t(x)');"
+        "c.execute('INSERT INTO t VALUES(1)');c.commit();"
+        "c.execute('INSERT INTO t VALUES(2)');c.commit();"
+        "os._exit(0)"
+    )
+    subprocess.run([sys.executable, "-c", statements], check=True)
+
+
+def test_a_database_whose_rows_are_only_in_the_wal_is_read_in_full(tmp_path: Path) -> None:
+    # -shm is an index SQLite rebuilds, so its absence must not mean the write-ahead log is left
+    # behind: after an unclean exit the log holds the rows, and the CREATE TABLE that made them.
+    path = tmp_path / "db.sqlite3"
+    crashed(path)
+    Path(f"{path}-shm").unlink()
+    before = listing(tmp_path)
+
+    with reading_connection(path) as connection:
+        assert connection is not None
+        assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 2
+        assert source_file(connection) != str(path)
+
+    assert listing(tmp_path) == before
+
+
+def test_a_lone_wal_is_not_left_behind_by_the_copy(tmp_path: Path) -> None:
+    path = tmp_path / "db.sqlite3"
+    crashed(path)
+    Path(f"{path}-shm").unlink()
+
+    with reading_connection(path) as connection:
+        assert connection is not None
+        copy = Path(source_file(connection))
+        assert Path(f"{copy}-wal").exists()
+
+
+def test_the_connection_is_closed_when_the_context_ends(tmp_path: Path) -> None:
+    # sqlite3.Connection is a transaction context manager, not a closing one, so handing it to an
+    # ExitStack does not close it; the copy's directory would then outlive nothing.
+    path = tmp_path / "db.sqlite3"
+    written(path)
+
+    with reading_connection(path) as connection:
+        assert connection is not None
+        opened = connection
+
+    with pytest.raises(sqlite3.ProgrammingError):
+        opened.execute("SELECT 1")

@@ -114,30 +114,34 @@ exec 9>&-
 # An upgrade must not silently switch a working schedule off, so a timer that was already enabled
 # stays enabled unless the answer says otherwise. A first installation still defaults to disabled.
 if [ "$timer_was_enabled" = enabled ]; then
-  prompt="Keep the nudge timer enabled? [Y/n] "
-  default_enable=true
+  printf '%s' "Keep the nudge timer enabled? [Y/n] "
 else
-  prompt="Enable the nudge timer now? [y/N] "
-  default_enable=false
+  printf '%s' "Enable the nudge timer now? [y/N] "
 fi
-printf '%s' "$prompt"
 if ! IFS= read -r answer; then
   answer=""
 fi
+# Only an explicit answer changes anything. Both bits are restored otherwise, because a timer that
+# was started without being enabled is still a schedule the operator is running, and an upgrade
+# that quietly stopped it would be making a change nobody asked for.
 case "$answer" in
-  y | Y) enable_timer=true ;;
-  n | N) enable_timer=false ;;
-  *) enable_timer=$default_enable ;;
+  y | Y)
+    desired_enabled=enabled
+    desired_active=active
+    # Enabling a timer that was already enabled must not restart one deliberately stopped.
+    [ "$timer_was_enabled" = enabled ] && desired_active=$timer_was_active
+    ;;
+  n | N)
+    desired_enabled=disabled
+    desired_active=inactive
+    ;;
+  *)
+    desired_enabled=$timer_was_enabled
+    desired_active=$timer_was_active
+    ;;
 esac
-
-if [ "$enable_timer" = true ]; then
-  # Keeping an enabled timer must not restart one the operator had deliberately stopped, while a
-  # newly enabled timer should start now.
-  if [ "$timer_was_enabled" = enabled ]; then
-    units_apply_timer_state 2bored1made-runtime.timer enabled "$timer_was_active"
-  else
-    units_apply_timer_state 2bored1made-runtime.timer enabled active
-  fi
+units_apply_timer_state 2bored1made-runtime.timer "$desired_enabled" "$desired_active"
+if [ "$desired_enabled" = enabled ]; then
   timer_message="Timer enabled."
 else
   timer_message="Timer disabled. Enable when ready: systemctl --user enable --now 2bored1made-runtime.timer"
