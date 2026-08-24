@@ -36,7 +36,11 @@ case "$*" in
   *show*Version*) printf '255\\n'; exit 0 ;;
   *show*ActiveState*) printf 'inactive\\n'; exit 0 ;;
   *"disable --now"*) printf 'disabled\\n' > "$state/$unit.enabled"; printf 'inactive\\n' > "$state/$unit.active"; exit 0 ;;
-  *"enable --now"*) printf 'enabled\\n' > "$state/$unit.enabled"; printf 'active\\n' > "$state/$unit.active"; exit 0 ;;
+  *"enable --now"*)
+    # One timer of two can be made to refuse, which is how a post-commit failure is reached with
+    # nothing for the commit itself to have stopped.
+    [ -f "$state/fail-enable.$unit" ] && exit 1
+    printf 'enabled\\n' > "$state/$unit.enabled"; printf 'active\\n' > "$state/$unit.active"; exit 0 ;;
   *daemon-reload*)
     if [ -f "$state/signal" ]; then
       signal=$(cat "$state/signal")
@@ -61,6 +65,12 @@ case "$*" in
     fi
     [ -f "$state/fail-reload" ] && exit 1
     exit 0 ;;
+  *disable*)
+    # Records whether the unit file was still on disk when the timer was disabled. A rollback that
+    # deleted the units first would leave nothing to disable, and this is how that ordering is
+    # measured without asserting what real systemd does with a missing unit.
+    [ -f "$HOME/.config/systemd/user/$unit" ] && printf 'unit-present %s\\n' "$unit" >> "{log}"
+    printf 'disabled\\n' > "$state/$unit.enabled"; exit 0 ;;
   *enable*) printf 'enabled\\n' > "$state/$unit.enabled"; exit 0 ;;
   *start*) printf 'active\\n' > "$state/$unit.active"; exit 0 ;;
   *stop*) printf 'inactive\\n' > "$state/$unit.active"; exit 0 ;;
@@ -117,6 +127,9 @@ class Harness:
 
     def truncate_recorded_state_then_fail_reload(self) -> None:
         (self.state / "truncate-state").touch()
+
+    def fail_enable(self, timer: str) -> None:
+        (self.state / f"fail-enable.{timer}").touch()
 
     def signal_during_reload(self, signal: str) -> None:
         (self.state / "signal").write_text(signal, encoding="utf-8")
@@ -425,6 +438,27 @@ def test_the_calendar_installer_reports_the_state_it_actually_left(tmp_path: Pat
     assert "Reminder timer: enabled, active" in result.stdout
     assert "Agenda timer: disabled, inactive" in result.stdout
     assert "Timers remain disabled" not in result.stdout
+
+
+def test_a_timer_enabled_after_the_commit_is_brought_back_down(tmp_path: Path) -> None:
+    # Both timers start disabled, so the commit has nothing to stop. The operator answers yes, the
+    # first timer is enabled, the second refuses, and the installation fails - leaving a timer
+    # enabled and running against unit files the rollback is about to delete.
+    #
+    # Three separate defects had to hold for this to come back: the restore was guarded on whether
+    # the commit had stopped a timer, applying a state could only ever move a timer up, and the
+    # units were deleted before the timers were put right.
+    harness = Harness(tmp_path, "disabled", "inactive", **CALENDAR)
+    harness.fail_enable(AGENDA_TIMER)
+
+    result = harness.run(answer="y\n")
+
+    assert result.returncode != 0, "an installation that could not finish must not report success"
+    assert harness.state_of(REMINDER_TIMER) == ("disabled", "inactive")
+    assert harness.state_of(AGENDA_TIMER) == ("disabled", "inactive")
+    log = harness.log.read_text(encoding="utf-8")
+    assert f"unit-present {REMINDER_TIMER}" in log, "the timer has to come down while its unit is still there"
+    assert "could NOT be restored" not in result.stderr
 
 
 def test_the_calendar_installer_enables_both_when_confirmed(tmp_path: Path) -> None:

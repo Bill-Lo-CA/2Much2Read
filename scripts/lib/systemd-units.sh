@@ -20,7 +20,7 @@ units_systemd_dir=""
 units_timers=""
 units_files=""
 units_replaced=false
-units_stopped=false
+units_timers_touched=false
 units_newline=$(printf '\nx')
 units_newline=${units_newline%x}
 
@@ -81,13 +81,35 @@ units_require_inactive_service() {
 # Enabled and active are independent: a timer can be enabled but stopped for maintenance, or
 # started for this session without being enabled. Restoring only the enable bit would silently
 # start a timer the operator had stopped, or leave a running one stopped for good.
+#
+# Every pair is stated, including the two that used to be a no-op. Moving a timer only upwards was
+# sound while the sole caller restored timers that units_stop_timers had already put at the bottom;
+# a timer enabled after the commit, by this same function applying an operator's answer, sits above
+# its recorded state instead, and asking for "disabled inactive" has to bring it down rather than
+# quietly report success. An unrecognised pair fails for the same reason.
+#
+# "enable --now" is kept for the one pair that means it, and "disable --now" deliberately is not:
+# that stays the signature of units_stop_timers having interrupted a running schedule.
 units_apply_timer_state() {
+  units_timers_touched=true
+  units_apply_failed=0
   case "$2 $3" in
-    "enabled active") systemctl --user enable --now "$1" ;;
-    "enabled inactive") systemctl --user enable "$1" ;;
-    "disabled active") systemctl --user start "$1" ;;
-    *) : ;;
+    "enabled active") systemctl --user enable --now "$1" || units_apply_failed=1 ;;
+    "enabled inactive")
+      systemctl --user enable "$1" || units_apply_failed=1
+      systemctl --user stop "$1" || units_apply_failed=1
+      ;;
+    "disabled active")
+      systemctl --user disable "$1" || units_apply_failed=1
+      systemctl --user start "$1" || units_apply_failed=1
+      ;;
+    "disabled inactive")
+      systemctl --user disable "$1" || units_apply_failed=1
+      systemctl --user stop "$1" || units_apply_failed=1
+      ;;
+    *) return 1 ;;
   esac
+  return "$units_apply_failed"
 }
 
 # Reports whether every timer came back. Each step swallows its own failure so one timer that
@@ -119,7 +141,7 @@ units_stop_timers() {
   for timer in $units_timers; do
     read -r enabled active < "$units_dir/state.$timer" || continue
     [ "$enabled" = enabled ] || [ "$active" = active ] || continue
-    units_stopped=true
+    units_timers_touched=true
     systemctl --user disable --now "$timer" || units_fail "failed to stop and disable $timer"
   done
 }
@@ -233,20 +255,28 @@ units_cleanup() {
   trap - EXIT INT TERM HUP
   units_incomplete=false
   if [ "$units_status" -ne 0 ]; then
+    # The timers come back first. A first installation has no backups, so the rollback below deletes
+    # the unit files outright, and a timer cannot be disabled once the file naming it is gone - so
+    # the state is put right while those files are still on disk. The rollback's own daemon-reload
+    # then follows, as it always did.
+    #
+    # The guard is "was any timer touched", not "did the commit stop one": applying the operator's
+    # answer changes timers too, and after a failure part way through that the commit had nothing
+    # to stop, so a guard asking about the commit skips the restore exactly when it is needed.
+    if [ "$units_timers_touched" = true ]; then
+      if units_restore_timers; then
+        printf '%s\n' "installation failed; the previous timer state was restored" >&2
+      else
+        units_incomplete=true
+        printf '%s\n' "installation failed and these timers could NOT be restored:$units_timers_lost" >&2
+      fi
+    fi
     if [ "$units_replaced" = true ]; then
       if units_rollback; then
         printf '%s\n' "installation failed; the previous unit files were restored" >&2
       else
         units_incomplete=true
         printf '%s\n' "installation failed and these unit files could NOT be restored:$units_units_lost" >&2
-      fi
-    fi
-    if [ "$units_stopped" = true ]; then
-      if units_restore_timers; then
-        printf '%s\n' "installation failed; the previous timer state was restored" >&2
-      else
-        units_incomplete=true
-        printf '%s\n' "installation failed and these timers could NOT be restored:$units_timers_lost" >&2
       fi
     fi
   fi
