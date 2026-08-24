@@ -9,7 +9,9 @@ from tempfile import TemporaryDirectory
 
 # -shm is an index SQLite rebuilds from -wal, but -wal holds committed rows - including, after an
 # unclean exit, the statements that created the tables - so a copy that leaves it behind is not the
-# same database.
+# same database. -journal is left out too: every database here sets journal_mode=WAL on open, so a
+# rollback journal only survives from a version that predates that, and copying one would need the
+# rollback replayed rather than the log.
 COPIED = ("", "-wal")
 COPY_ATTEMPTS = 3
 
@@ -19,6 +21,13 @@ class SnapshotError(ValueError):
 
 
 def _stamp(path: Path) -> tuple[int, int] | None:
+    """Enough of a file to tell whether it moved: its size and its modification time.
+
+    This is a change detector, not a content check - the same measurement that proved blind to a
+    byte rewritten in place inside -shm, which keeps its name, size and mtime. It is trustworthy
+    here for a different reason: the timestamp is nanosecond-resolution, and the writer these
+    stamps are watching appends to the log rather than editing what was already copied.
+    """
     try:
         status = path.stat()
     except OSError:

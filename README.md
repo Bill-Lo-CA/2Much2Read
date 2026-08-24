@@ -425,8 +425,9 @@ uv run 2bored1made doctor          # including whether each nudge could actually
 
 `doctor` checks more than that the YAML parses: it asks the send path's own questions of every
 enabled nudge, so a `user_id` missing from `DISCORD_ALLOWED_MENTION_IDS`, or a destination the
-global settings cannot resolve, is named in `nudges_deliverable` rather than discovered at the
-moment a message was due to go out.
+global settings cannot resolve, turns `nudges_deliverable` into `unusable` rather than being
+discovered at the moment a message was due to go out. Which nudge and which error code appear
+beside the checks, in `nudges_unusable`, so the report stays fixable without a second run.
 
 `status` reports the slot that will actually be delivered next, which is not always in the future:
 a nudge whose 09:00 has not been sent is still owed it at 21:05, and the next per-minute run

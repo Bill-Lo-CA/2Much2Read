@@ -58,6 +58,7 @@ def main() -> None:
 @app.command()
 def doctor() -> None:
     settings = Settings()
+    problems: dict[str, str] = {}
     checks: dict[str, str] = {"env_file": private_file_status(env_file("2bored1made"))}
     try:
         settings.discord_destinations()
@@ -71,8 +72,12 @@ def doctor() -> None:
         checks["nudges"] = "ok"
         # Loading is not enough: a nudge can name a user the environment file does not allow, or
         # inherit a destination that will not resolve, and neither shows up until it is too late.
+        #
+        # Every value in `checks` is a status word from a closed vocabulary, because that is what
+        # the healthy/warning verdict reads. Nudge ids are the operator's, and "bot", "ok" and
+        # "both" are all valid ones, so naming them here would let a broken nudge read as healthy.
         problems = unusable_nudges(settings, config)
-        checks["nudges_deliverable"] = "ok" if not problems else ",".join(sorted(problems))
+        checks["nudges_deliverable"] = "ok" if not problems else "unusable"
     except (OSError, ValueError) as error:
         checks["nudges"] = _config_error_status(error)
         checks["nudges_deliverable"] = "unknown"
@@ -82,7 +87,12 @@ def doctor() -> None:
     checks["lock_file"] = private_file_status(settings.lock_path, missing_ok=True)
     checks["database_directory"] = "ok" if directory_is_creatable(settings.database_path.parent) else "not_writable"
     status = "ok" if all(value in _HEALTHY_CHECKS for value in checks.values()) else "warning"
-    typer.echo(json.dumps({"status": status, "checks": checks}))
+    payload: dict[str, object] = {"status": status, "checks": checks}
+    # Which nudge, and why. The check above only says that something is wrong; an operator fixing it
+    # needs the id and the error code the send path would have raised.
+    if problems:
+        payload["nudges_unusable"] = problems
+    typer.echo(json.dumps(payload))
 
 
 @app.command("run")

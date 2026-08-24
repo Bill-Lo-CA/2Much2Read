@@ -253,8 +253,38 @@ def test_doctor_reports_a_nudge_whose_mention_is_not_allowed(tmp_path, monkeypat
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["checks"]["nudges"] == "ok"
-    assert payload["checks"]["nudges_deliverable"] == "stretch"
+    assert payload["checks"]["nudges_deliverable"] == "unusable"
+    assert payload["nudges_unusable"] == {"stretch": "NUDGE_MENTION_NOT_ALLOWED"}
     assert payload["status"] == "warning"
+
+
+def test_doctor_does_not_read_a_nudge_id_as_a_verdict(tmp_path, monkeypatch) -> None:
+    # Nudge ids are the operator's, and "bot" is as valid an id as "stretch". Naming the failing
+    # nudge in the check itself put that word into the vocabulary the healthy/warning verdict reads,
+    # so this nudge - which can never be delivered - was reported as a healthy installation.
+    #
+    # Every other input is deliberately healthy. A missing env file or a world-readable YAML would
+    # make this a warning on its own, and the test would then pass without the bug being fixed.
+    env_path = tmp_path / ".2bored1made.env"
+    env_path.write_text("DISCORD_WEBHOOK_URL=ignored\n", encoding="utf-8")
+    env_path.chmod(0o600)
+    monkeypatch.setattr(cli, "env_file", lambda _: env_path)
+    body = NUDGE_WITH_MENTION.replace("id: stretch", "id: bot")
+    # Written and tightened here so the rewrite inside the settings factory inherits the mode.
+    (tmp_path / "nudges.yaml").write_text(body, encoding="utf-8")
+    (tmp_path / "nudges.yaml").chmod(0o600)
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: _nudge_settings(tmp_path, body, discord_allowed_mention_ids="123"),
+    )
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["nudges_deliverable"] == "unusable"
+    assert payload["nudges_unusable"] == {"bot": "NUDGE_MENTION_NOT_ALLOWED"}
+    assert payload["status"] == "warning", f"the only unhealthy input is the nudge: {payload['checks']}"
 
 
 def test_doctor_is_happy_once_the_mention_is_allowed(tmp_path, monkeypatch) -> None:
@@ -270,7 +300,9 @@ def test_doctor_is_happy_once_the_mention_is_allowed(tmp_path, monkeypatch) -> N
 
     result = CliRunner().invoke(cli.app, ["doctor"])
 
-    assert json.loads(result.stdout)["checks"]["nudges_deliverable"] == "ok"
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["nudges_deliverable"] == "ok"
+    assert "nudges_unusable" not in payload, "nothing to report is reported by saying nothing"
 
 
 def test_doctor_ignores_a_disabled_nudge(tmp_path, monkeypatch) -> None:

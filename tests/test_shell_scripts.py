@@ -5,7 +5,6 @@ status non-zero under `set -e`, a misparsed assignment. Those have each cost a r
 repository, so they are checked here rather than found by reading.
 """
 
-import shutil
 import subprocess
 from pathlib import Path
 
@@ -29,8 +28,10 @@ def test_the_script_parses_as_posix_shell(script: Path) -> None:
     assert result.returncode == 0, result.stderr
 
 
-@pytest.mark.skipif(shutil.which("shellcheck") is None, reason="shellcheck is not installed")
 def test_shellcheck_is_clean() -> None:
+    # Deliberately not guarded by a which() check. shellcheck is a pinned dev dependency, so it is
+    # on PATH under `uv run`; skipping when it is missing would turn the one check that reads this
+    # shell for a living into a green result on a machine that never ran it.
     result = subprocess.run(
         ["shellcheck", "-s", "sh", *[str(path) for path in shell_scripts()]],
         capture_output=True,

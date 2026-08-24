@@ -99,7 +99,10 @@ units_restore_timers() {
   units_timers_lost=""
   for timer in $units_timers; do
     [ -f "$units_dir/state.$timer" ] || continue
-    if ! read -r enabled active < "$units_dir/state.$timer"; then
+    # Both words or nothing. "read" only fails on an empty file, so a line holding one word would
+    # otherwise succeed with an empty "active", fall through units_apply_timer_state's case to the
+    # no-op, and be counted as a timer restored - the exact false report this rollback exists to end.
+    if ! read -r enabled active < "$units_dir/state.$timer" || [ -z "$enabled" ] || [ -z "$active" ]; then
       units_timers_restored=false
       units_timers_lost="$units_timers_lost $timer"
       continue

@@ -51,6 +51,14 @@ case "$*" in
       chmod 000 "$state/../home/.config/systemd/user"/.install.*/backup.* 2>/dev/null || true
       exit 1
     fi
+    if [ -f "$state/truncate-state" ]; then
+      # Leave one word where a timer's recorded state should be, so the restore has nothing to
+      # apply. "read" still succeeds on a line like this, which is what made it look restored.
+      for recorded in "$state/../home/.config/systemd/user"/.install.*/state.*; do
+        printf 'enabled\\n' > "$recorded"
+      done
+      exit 1
+    fi
     [ -f "$state/fail-reload" ] && exit 1
     exit 0 ;;
   *enable*) printf 'enabled\\n' > "$state/$unit.enabled"; exit 0 ;;
@@ -106,6 +114,9 @@ class Harness:
 
     def wreck_backups_then_fail_reload(self) -> None:
         (self.state / "wreck-backups").touch()
+
+    def truncate_recorded_state_then_fail_reload(self) -> None:
+        (self.state / "truncate-state").touch()
 
     def signal_during_reload(self, signal: str) -> None:
         (self.state / "signal").write_text(signal, encoding="utf-8")
@@ -289,6 +300,22 @@ def test_a_rollback_that_could_not_finish_says_so_and_keeps_the_backups(tmp_path
     backups = [entry for directory in kept for entry in directory.iterdir() if entry.name.startswith("backup.")]
     assert backups, "the backups must still be there to recover from"
     assert any(entry.read_text(encoding="utf-8").startswith("# previous") for entry in backups)
+
+
+def test_a_timer_state_that_cannot_be_read_is_not_called_restored(tmp_path: Path) -> None:
+    # A recorded state holding one word reads successfully with the second half empty, and applying
+    # that pair is a no-op that returns success. The timer stays stopped and the run says it came
+    # back, which is the false report the whole rollback exists to prevent.
+    harness = Harness(tmp_path, "enabled", "active")
+    harness.seed_units("previous")
+    harness.truncate_recorded_state_then_fail_reload()
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert "the previous timer state was restored" not in result.stderr
+    assert f"could NOT be restored: {TIMER}" in result.stderr
+    assert harness.timer_state == ("disabled", "inactive"), "the timer really is still stopped"
 
 
 def test_a_rollback_that_finished_reports_it_and_cleans_up(tmp_path: Path) -> None:
