@@ -14,6 +14,10 @@ COPIED = ("", "-wal")
 COPY_ATTEMPTS = 3
 
 
+class SnapshotError(ValueError):
+    """The database would not hold still long enough to be copied whole."""
+
+
 def _stamp(path: Path) -> tuple[int, int] | None:
     try:
         status = path.stat()
@@ -54,7 +58,7 @@ def reading_connection(path: Path) -> Iterator[sqlite3.Connection | None]:
         return
     with ExitStack() as stack:
         directory = Path(stack.enter_context(TemporaryDirectory()))
-        connection = sqlite3.connect(_copied(path, directory / path.name))
+        connection = sqlite3.connect(_copied(path, directory))
         # A connection is its own transaction context manager, not a closing one, so closing it is
         # registered here; the stack unwinds it before the directory holding the copy goes away.
         stack.callback(connection.close)
@@ -62,13 +66,36 @@ def reading_connection(path: Path) -> Iterator[sqlite3.Connection | None]:
         yield connection
 
 
-def _copied(path: Path, destination: Path) -> Path:
+def _copy_once(path: Path, destination: Path) -> bool:
+    """Copy the database and its log, reporting whether the source held still throughout.
+
+    Only what was there when the stamps were taken is copied, so a log that has since been
+    checkpointed away is not silently skipped: it disappeared mid-copy, which means the source moved
+    and this attempt is worthless, not that there was never a log.
+    """
+    before = _stamps(path)
+    for suffix, stamp in zip(COPIED, before, strict=True):
+        if stamp is None:
+            continue
+        try:
+            shutil.copy2(f"{path}{suffix}", f"{destination}{suffix}")
+        except FileNotFoundError:
+            return False
+    return _stamps(path) == before
+
+
+def _copied(path: Path, directory: Path) -> Path:
+    """A copy of the database that is whole, or an error.
+
+    Every attempt gets its own directory. Reusing one would leave the previous attempt's write-ahead
+    log in place when the next attempt finds none to copy, and replaying a stale log over a database
+    that has since been checkpointed silently rolls rows back - a wrong answer with nothing to
+    signal it. The last attempt gets no exemption either, for the same reason: a report built from a
+    copy known to be inconsistent is worse than one that says it could not be taken.
+    """
     for attempt in range(COPY_ATTEMPTS):
-        before = _stamps(path)
-        for suffix in COPIED:
-            source = Path(f"{path}{suffix}")
-            if source.exists():
-                shutil.copy2(source, f"{destination}{suffix}")
-        if _stamps(path) == before or attempt == COPY_ATTEMPTS - 1:
-            break
-    return destination
+        destination = directory / str(attempt) / path.name
+        destination.parent.mkdir()
+        if _copy_once(path, destination):
+            return destination
+    raise SnapshotError(f"{path} kept changing while it was being copied; try again in a moment")

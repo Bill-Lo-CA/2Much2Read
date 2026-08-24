@@ -90,12 +90,26 @@ units_apply_timer_state() {
   esac
 }
 
+# Reports whether every timer came back. Each step swallows its own failure so one timer that
+# cannot be restored does not abort the loop and leave the rest untouched, but the failure is
+# carried out rather than discarded: a rollback that cannot say whether it worked is one the
+# caller has to assume worked.
 units_restore_timers() {
+  units_timers_restored=true
+  units_timers_lost=""
   for timer in $units_timers; do
     [ -f "$units_dir/state.$timer" ] || continue
-    read -r enabled active < "$units_dir/state.$timer" || continue
-    units_apply_timer_state "$timer" "$enabled" "$active" >/dev/null 2>&1 || true
+    if ! read -r enabled active < "$units_dir/state.$timer"; then
+      units_timers_restored=false
+      units_timers_lost="$units_timers_lost $timer"
+      continue
+    fi
+    if ! units_apply_timer_state "$timer" "$enabled" "$active" >/dev/null 2>&1; then
+      units_timers_restored=false
+      units_timers_lost="$units_timers_lost $timer"
+    fi
   done
+  [ "$units_timers_restored" = true ]
 }
 
 units_stop_timers() {
@@ -152,34 +166,44 @@ units_render() {
 # path itself has no safe rendering, so it is refused instead.
 units_stage_executable() {
   case "$1" in
-    *'"'* | *'\'* | *"$units_newline"*)
+    *'"'* | *\\* | *"$units_newline"*)
       units_fail "executable path must not contain quotes, backslashes, or newlines: $1"
       ;;
   esac
   printf '"%s"' "$1"
 }
 
+# Timers are checked too. A schedule value that reaches the template malformed produces a unit
+# systemd refuses to load, and finding that out here means the live files have not been touched.
 units_verify() {
   command -v systemd-analyze >/dev/null 2>&1 || return 0
   for unit in $units_files; do
-    case "$unit" in
-      *.service) ;;
-      *) continue ;;
-    esac
     systemd-analyze --user verify "$units_dir/$unit" >/dev/null 2>&1 ||
       units_fail "the rendered $unit is not a valid unit file"
   done
 }
 
+# Reports whether every unit came back. The backup is copied to a scratch name and moved into
+# place rather than copied over the live path: units_dir sits inside units_systemd_dir, so the move
+# is atomic, and a restore interrupted half way cannot leave a truncated unit behind - which is the
+# very state the rollback exists to undo.
 units_rollback() {
+  units_units_restored=true
+  units_units_lost=""
   for unit in $units_files; do
     if [ -f "$units_dir/backup.$unit" ]; then
-      cp "$units_dir/backup.$unit" "$units_systemd_dir/$unit" 2>/dev/null || true
-    else
-      rm -f "$units_systemd_dir/$unit"
+      if cp "$units_dir/backup.$unit" "$units_dir/restore.$unit" 2>/dev/null &&
+        mv "$units_dir/restore.$unit" "$units_systemd_dir/$unit" 2>/dev/null; then
+        continue
+      fi
+    elif rm -f "$units_systemd_dir/$unit" 2>/dev/null; then
+      continue
     fi
+    units_units_restored=false
+    units_units_lost="$units_units_lost $unit"
   done
   systemctl --user daemon-reload >/dev/null 2>&1 || true
+  [ "$units_units_restored" = true ]
 }
 
 units_commit() {
@@ -204,17 +228,32 @@ units_commit() {
 units_cleanup() {
   units_status=$1
   trap - EXIT INT TERM HUP
+  units_incomplete=false
   if [ "$units_status" -ne 0 ]; then
     if [ "$units_replaced" = true ]; then
-      units_rollback
-      printf '%s\n' "installation failed; the previous unit files were restored" >&2
+      if units_rollback; then
+        printf '%s\n' "installation failed; the previous unit files were restored" >&2
+      else
+        units_incomplete=true
+        printf '%s\n' "installation failed and these unit files could NOT be restored:$units_units_lost" >&2
+      fi
     fi
     if [ "$units_stopped" = true ]; then
-      units_restore_timers
-      printf '%s\n' "installation failed; the previous timer state was restored" >&2
+      if units_restore_timers; then
+        printf '%s\n' "installation failed; the previous timer state was restored" >&2
+      else
+        units_incomplete=true
+        printf '%s\n' "installation failed and these timers could NOT be restored:$units_timers_lost" >&2
+      fi
     fi
   fi
-  [ -n "$units_dir" ] && rm -rf "$units_dir"
+  # Deleting the staging directory after a rollback that did not finish would take the backups with
+  # it, and after a failed restore those are the only remaining copies of the working units.
+  if [ "$units_incomplete" = true ]; then
+    printf '%s\n' "the previous unit files are kept for recovery in: $units_dir" >&2
+  elif [ -n "$units_dir" ]; then
+    rm -rf "$units_dir"
+  fi
   exit "$units_status"
 }
 

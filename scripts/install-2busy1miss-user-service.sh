@@ -1,7 +1,7 @@
 #!/bin/sh
 set -eu
 
-repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
+repo_dir=$(unset CDPATH; cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_dir"
 
 . "$repo_dir/scripts/lib/systemd-units.sh"
@@ -222,31 +222,50 @@ fi
 # Only an explicit answer changes anything. Both bits of both timers are restored otherwise,
 # because a timer that was started without being enabled is still a schedule the operator is
 # running, and an upgrade that quietly stopped it would be making a change nobody asked for.
-apply_answer() {
+#
+# The state is decided once, into variables, and both the systemctl calls and the closing report
+# read those. Deriving the report from the answer instead would let a blank answer that restored
+# two running timers print that they remain disabled.
+desired_state() {
   case "$answer" in
     y | Y)
-      desired_active=active
-      # Enabling a timer that was already enabled must not restart one deliberately stopped.
-      [ "$2" = enabled ] && desired_active=$3
-      units_apply_timer_state "$1" enabled "$desired_active"
+      desired_enabled=enabled
+      # Enabling a timer that was already enabled must not restart one deliberately stopped. This
+      # is an if rather than a trailing &&, which would return non-zero here and, under set -e,
+      # abort the installation for the ordinary case of a timer that was not enabled before.
+      if [ "$1" = enabled ]; then
+        desired_active=$2
+      else
+        desired_active=active
+      fi
       ;;
-    n | N) : ;;
-    *) units_apply_timer_state "$1" "$2" "$3" ;;
+    n | N)
+      desired_enabled=disabled
+      desired_active=inactive
+      ;;
+    *)
+      desired_enabled=$1
+      desired_active=$2
+      ;;
   esac
 }
-apply_answer 2busy1miss-runtime.timer "$reminder_was_enabled" "$reminder_was_active"
-apply_answer 2busy1miss-runtime-agenda.timer "$agenda_was_enabled" "$agenda_was_active"
 
-case "$answer" in
-  y | Y)
-    timer_status="Timers enabled."
-    agenda_status=""
-    ;;
-  *)
-    timer_status="Timers remain disabled. Enable reminders when ready: systemctl --user enable --now 2busy1miss-runtime.timer"
-    agenda_status="Enable agenda when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer"
-    ;;
-esac
+desired_state "$reminder_was_enabled" "$reminder_was_active"
+reminder_enabled=$desired_enabled
+reminder_active=$desired_active
+desired_state "$agenda_was_enabled" "$agenda_was_active"
+agenda_enabled=$desired_enabled
+agenda_active=$desired_active
+
+units_apply_timer_state 2busy1miss-runtime.timer "$reminder_enabled" "$reminder_active"
+units_apply_timer_state 2busy1miss-runtime-agenda.timer "$agenda_enabled" "$agenda_active"
+
+timer_status="Reminder timer: $reminder_enabled, $reminder_active"
+agenda_status="Agenda timer: $agenda_enabled, $agenda_active"
+[ "$reminder_enabled" = enabled ] ||
+  timer_status="$timer_status. Enable when ready: systemctl --user enable --now 2busy1miss-runtime.timer"
+[ "$agenda_enabled" = enabled ] ||
+  agenda_status="$agenda_status. Enable when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer"
 
 printf '%s\n' \
   "Config: $config_dir" \
@@ -256,5 +275,5 @@ printf '%s\n' \
   "Dry run: cd $repo_dir && uv run 2busy1miss run --dry-run" \
   "Agenda dry run: cd $repo_dir && uv run 2busy1miss agenda-next-day --dry-run" \
   "$timer_status"
-[ -z "$agenda_status" ] || printf '%s\n' "$agenda_status"
+printf '%s\n' "$agenda_status"
 printf '%s\n' "Logs: journalctl --user -u 2busy1miss-runtime.service"

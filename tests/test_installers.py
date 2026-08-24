@@ -245,16 +245,18 @@ def test_installers_only_start_timers_when_confirmed(
     assert installed_secret.read_text(encoding="utf-8") == "client secret"
     assert installed_secret.stat().st_mode & 0o777 == 0o600
     if script == "install-2busy1miss-user-service.sh":
+        # Each timer reports the state it was actually left in, rather than one line derived from
+        # the answer for both of them.
         if starts:
             assert "enable --now 2busy1miss-runtime.timer" in calls
             assert "enable --now 2busy1miss-runtime-agenda.timer" in calls
-            assert "Timers enabled." in result.stdout
+            assert "Reminder timer: enabled, active" in result.stdout
+            assert "Agenda timer: enabled, active" in result.stdout
         else:
-            assert (
-                "Timers remain disabled. Enable reminders when ready: systemctl --user enable --now 2busy1miss-runtime.timer"
-                in result.stdout
-            )
-            assert "Enable agenda when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer" in result.stdout
+            assert "Reminder timer: disabled, inactive" in result.stdout
+            assert "Agenda timer: disabled, inactive" in result.stdout
+            assert "systemctl --user enable --now 2busy1miss-runtime.timer" in result.stdout
+            assert "systemctl --user enable --now 2busy1miss-runtime-agenda.timer" in result.stdout
         agenda_timer = tmp_path / "home" / ".config" / "systemd" / "user" / "2busy1miss-runtime-agenda.timer"
         assert "OnCalendar=*-*-* 21:00:00" in agenda_timer.read_text(encoding="utf-8")
         (tmp_path / "home" / ".config" / "2much2read-runtime" / ".2busy1miss.env").write_text(

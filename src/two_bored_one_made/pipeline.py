@@ -151,6 +151,24 @@ def _mention_ids(settings: Settings, nudge: NudgeConfig) -> list[str]:
     return [nudge.user_id]
 
 
+def unusable_nudges(settings: Settings, config: NudgesConfig) -> dict[str, str]:
+    """Enabled nudges that would fail when their time came, by id and error code.
+
+    A configuration that loads is not a configuration that works: a user_id the environment file
+    does not allow, or a destination the global settings cannot resolve, only shows up at the moment
+    the message was supposed to go out. This asks the same two questions the send path asks, through
+    the same functions, so `doctor` cannot drift into approving what a run would reject.
+    """
+    problems: dict[str, str] = {}
+    for nudge in config.enabled_nudges:
+        try:
+            nudge_destination(settings, nudge)
+            _mention_ids(settings, nudge)
+        except DiscordDeliveryError as error:
+            problems[nudge.id] = delivery_error_code(error) if error.code != MENTION_NOT_ALLOWED else MENTION_NOT_ALLOWED
+    return problems
+
+
 def nudge_content(nudge: NudgeConfig) -> str:
     """The configured message, verbatim apart from neutralising literal at-signs.
 

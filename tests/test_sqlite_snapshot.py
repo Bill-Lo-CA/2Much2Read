@@ -184,3 +184,90 @@ def test_reading_beside_a_committing_writer_moves_no_bytes(tmp_path: Path) -> No
         assert listing(tmp_path) == before
     finally:
         writer.close()
+
+
+def checkpointed_away(path: Path) -> None:
+    """Fold the log into the database and remove it, the way a checkpoint does."""
+    connection = sqlite3.connect(path)
+    connection.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()
+    connection.close()
+    assert not Path(f"{path}-wal").exists()
+
+
+def test_a_log_checkpointed_away_between_attempts_is_not_mixed_in(tmp_path: Path, monkeypatch) -> None:
+    # The first attempt copies a database whose rows are still in the log. The source then gains a
+    # row and is checkpointed, so the second attempt finds no log to copy. Reusing one destination
+    # would leave the first attempt's log beside the second attempt's newer database, and replaying
+    # it rolls the newer rows back with nothing to signal it.
+    import two_read_runtime.sqlite_snapshot as module
+
+    path = tmp_path / "db.sqlite3"
+    crashed(path)
+    Path(f"{path}-shm").unlink()
+    real_copy = module.shutil.copy2
+    moved: list[int] = []
+
+    def advance_the_source_after_the_first_log_copy(source, destination, *args, **kwargs):  # type: ignore[no-untyped-def]
+        result = real_copy(source, destination, *args, **kwargs)
+        if str(source).endswith("-wal") and not moved:
+            moved.append(1)
+            connection = sqlite3.connect(path)
+            connection.execute("INSERT INTO t VALUES(3)")
+            connection.commit()
+            connection.close()
+            checkpointed_away(path)
+        return result
+
+    monkeypatch.setattr(module.shutil, "copy2", advance_the_source_after_the_first_log_copy)
+
+    with reading_connection(path) as connection:
+        assert connection is not None
+        assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 3
+    assert moved == [1], "the source should have moved underneath the first attempt"
+
+
+def test_a_log_that_vanishes_mid_copy_is_retried_not_raised(tmp_path: Path, monkeypatch) -> None:
+    # shutil.copy2 raises FileNotFoundError if the log went away between the stat and the read. That
+    # is the source moving, not an error the reporting command should die of; the retry finds the
+    # rows in the main file, where the checkpoint put them.
+    import two_read_runtime.sqlite_snapshot as module
+
+    path = tmp_path / "db.sqlite3"
+    crashed(path)
+    Path(f"{path}-shm").unlink()
+    real_copy = module.shutil.copy2
+    removed: list[int] = []
+
+    def checkpoint_before_copying_the_log(source, destination, *args, **kwargs):  # type: ignore[no-untyped-def]
+        if str(source).endswith("-wal") and not removed:
+            removed.append(1)
+            checkpointed_away(path)
+        return real_copy(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(module.shutil, "copy2", checkpoint_before_copying_the_log)
+
+    with reading_connection(path) as connection:
+        assert connection is not None
+        assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 2
+    assert removed == [1], "the log should have gone away underneath the first attempt"
+
+
+def test_a_source_that_never_settles_is_an_error_not_a_wrong_answer(tmp_path: Path, monkeypatch) -> None:
+    import two_read_runtime.sqlite_snapshot as module
+
+    path = tmp_path / "db.sqlite3"
+    written(path)
+    real_copy = module.shutil.copy2
+
+    def write_after_every_copy(source, destination, *args, **kwargs):  # type: ignore[no-untyped-def]
+        result = real_copy(source, destination, *args, **kwargs)
+        connection = sqlite3.connect(path)
+        connection.execute("INSERT INTO t VALUES(9)")
+        connection.commit()
+        connection.close()
+        return result
+
+    monkeypatch.setattr(module.shutil, "copy2", write_after_every_copy)
+
+    with pytest.raises(module.SnapshotError, match="kept changing"), reading_connection(path):
+        pass

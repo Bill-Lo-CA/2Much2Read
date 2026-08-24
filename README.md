@@ -57,10 +57,13 @@ transaction:
 - **Unit files are staged, then swapped.** Writing straight to a live unit path truncates the
   working copy before the replacement exists, so a failure part-way through would leave a unit that
   is empty rather than merely out of date. Each unit is rendered into a scratch directory beside the
-  live ones, validated with `systemd-analyze verify`, and moved into place only once all of them are
-  ready.
-- **A failure puts everything back.** The previous unit files and the previous timer state are both
-  restored, including when the installer is interrupted by a signal.
+  live ones, validated with `systemd-analyze verify` — timers included, so a malformed schedule is
+  caught while the live files are still untouched — and moved into place only once all are ready.
+- **A failure puts everything back, and says so honestly.** The previous unit files and the previous
+  timer state are both restored, including when the installer is interrupted by a signal. A rollback
+  that could not finish reports which units or timers are still wrong and keeps the staging
+  directory, naming it — deleting it would take the backups, which after a failed restore are the
+  only remaining copies of the working units.
 - **Enabled and active are restored separately.** A timer that was enabled but deliberately stopped
   is not restarted, and one that was started without being enabled is not left stopped.
 - **Only an explicit answer changes anything.** The prompt asks whether to enable the timer, and a
@@ -417,7 +420,13 @@ nudges:
 uv run 2bored1made run --dry-run   # what is due right now
 uv run 2bored1made status          # delivered/total and the next slot per nudge
 uv run 2bored1made reset --nudge stretch
+uv run 2bored1made doctor          # including whether each nudge could actually be delivered
 ```
+
+`doctor` checks more than that the YAML parses: it asks the send path's own questions of every
+enabled nudge, so a `user_id` missing from `DISCORD_ALLOWED_MENTION_IDS`, or a destination the
+global settings cannot resolve, is named in `nudges_deliverable` rather than discovered at the
+moment a message was due to go out.
 
 `status` reports the slot that will actually be delivered next, which is not always in the future:
 a nudge whose 09:00 has not been sent is still owed it at 21:05, and the next per-minute run
@@ -460,6 +469,12 @@ live database at all. They read a private copy, taken with the write-ahead log w
 after an unclean exit that log holds committed rows, and the statements that created the tables
 holding them, which the main file does not. The `-shm` index is deliberately left behind, because it
 describes the live database's readers and writers; SQLite rebuilds it beside the copy.
+
+Each attempt copies into a fresh directory and is accepted only if the source did not move while it
+was being read. Sharing one directory would leave an earlier attempt's log next to a later attempt's
+database, and replaying a stale log over one that has since been checkpointed rolls committed rows
+back silently. A database that will not hold still for any attempt is reported as such rather than
+answered from a copy known to be inconsistent.
 
 Copying takes no lock. A reader that waited for the writer would be a dry run that cannot run during
 the thing it exists to describe, and a reader that took the lock for itself would create the lock

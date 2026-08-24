@@ -233,3 +233,68 @@ def test_doctor_reports_a_missing_nudges_file_without_failing(tmp_path, monkeypa
     payload = json.loads(result.stdout)
     assert payload["checks"]["nudges"] == "missing"
     assert payload["status"] == "warning"
+
+
+NUDGE_WITH_MENTION = "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 3\n    user_id: '456'\n"
+
+
+def test_doctor_reports_a_nudge_whose_mention_is_not_allowed(tmp_path, monkeypatch) -> None:
+    # A configuration that loads is not one that works: this nudge raises NUDGE_MENTION_NOT_ALLOWED
+    # the moment its time comes, and doctor used to call the whole thing healthy.
+    monkeypatch.setattr(cli, "env_file", lambda _: tmp_path / "absent.env")
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: _nudge_settings(tmp_path, NUDGE_WITH_MENTION, discord_allowed_mention_ids="123"),
+    )
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["nudges"] == "ok"
+    assert payload["checks"]["nudges_deliverable"] == "stretch"
+    assert payload["status"] == "warning"
+
+
+def test_doctor_is_happy_once_the_mention_is_allowed(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".2bored1made.env"
+    env_path.write_text("DISCORD_WEBHOOK_URL=ignored\n", encoding="utf-8")
+    env_path.chmod(0o600)
+    monkeypatch.setattr(cli, "env_file", lambda _: env_path)
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: _nudge_settings(tmp_path, NUDGE_WITH_MENTION, discord_allowed_mention_ids="456"),
+    )
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    assert json.loads(result.stdout)["checks"]["nudges_deliverable"] == "ok"
+
+
+def test_doctor_ignores_a_disabled_nudge(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".2bored1made.env"
+    env_path.write_text("DISCORD_WEBHOOK_URL=ignored\n", encoding="utf-8")
+    env_path.chmod(0o600)
+    monkeypatch.setattr(cli, "env_file", lambda _: env_path)
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: _nudge_settings(tmp_path, NUDGE_WITH_MENTION.replace("total_sends: 3", "total_sends: 3\n    enabled: false")),
+    )
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    assert json.loads(result.stdout)["checks"]["nudges_deliverable"] == "ok"
+
+
+def test_doctor_cannot_judge_nudges_it_could_not_load(tmp_path, monkeypatch) -> None:
+    monkeypatch.setattr(cli, "env_file", lambda _: tmp_path / "absent.env")
+    monkeypatch.setattr(cli, "Settings", lambda: _nudge_settings(tmp_path, "nudges:\n  - id: broken\n"))
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["nudges"] == "invalid"
+    assert payload["checks"]["nudges_deliverable"] == "unknown"

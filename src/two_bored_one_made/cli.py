@@ -15,6 +15,7 @@ from .config import Settings, load_nudges
 from .pipeline import reset as reset_nudge
 from .pipeline import run as run_nudges
 from .pipeline import status as nudge_status
+from .pipeline import unusable_nudges
 
 app = typer.Typer(no_args_is_help=True)
 _HEALTHY_CHECKS = {"ok", "webhook", "bot", "both", "not_created"}
@@ -66,10 +67,15 @@ def doctor() -> None:
             "missing" if settings.discord_delivery_mode == "webhook" and not settings.discord_webhook_url else "invalid"
         )
     try:
-        load_nudges(settings.nudges_config_path)
+        config = load_nudges(settings.nudges_config_path)
         checks["nudges"] = "ok"
+        # Loading is not enough: a nudge can name a user the environment file does not allow, or
+        # inherit a destination that will not resolve, and neither shows up until it is too late.
+        problems = unusable_nudges(settings, config)
+        checks["nudges_deliverable"] = "ok" if not problems else ",".join(sorted(problems))
     except (OSError, ValueError) as error:
         checks["nudges"] = _config_error_status(error)
+        checks["nudges_deliverable"] = "unknown"
     checks["nudges_file"] = private_file_status(settings.nudges_config_path, missing_ok=True)
     checks["data_dir"] = private_directory_status(settings.database_path.parent, missing_ok=True)
     checks["database"] = sqlite_files_status(settings.database_path)
