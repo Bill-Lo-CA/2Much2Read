@@ -311,7 +311,7 @@ units_teardown() {
     [ -e "$units_systemd_dir/$unit" ] || continue
     case "$unit" in
       *.timer)
-        systemctl --user disable --now "$unit" || {
+        units_apply_timer_state "$unit" disabled inactive || {
           printf '%s\n' "failed to stop and disable $unit" >&2
           units_teardown_failed=true
         }

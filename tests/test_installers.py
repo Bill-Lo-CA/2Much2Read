@@ -375,14 +375,42 @@ def test_uninstallers_remove_only_their_unit_files(tmp_path: Path, script: str, 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     log = tmp_path / "systemctl.log"
+    state = tmp_path / "systemctl-state"
+    state.mkdir()
+    timers = [unit for unit in units if unit.endswith(".timer")]
+    for timer in timers:
+        (state / f"{timer}.enabled").write_text("enabled-runtime\n", encoding="utf-8")
+        (state / f"{timer}.active").write_text("active\n", encoding="utf-8")
     systemctl = fake_bin / "systemctl"
-    systemctl.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n', encoding="utf-8")
+    systemctl.write_text(
+        """#!/bin/sh
+printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
+for argument in "$@"; do unit=$argument; done
+case "$*" in
+  *"disable --runtime"*) printf 'disabled\n' > "$SYSTEMCTL_STATE/$unit.enabled" ;;
+  *disable*)
+    if [ "$(cat "$SYSTEMCTL_STATE/$unit.enabled")" = enabled ]; then
+      printf 'disabled\n' > "$SYSTEMCTL_STATE/$unit.enabled"
+    fi
+    ;;
+  *stop*) printf 'inactive\n' > "$SYSTEMCTL_STATE/$unit.active" ;;
+esac
+exit 0
+""",
+        encoding="utf-8",
+    )
     systemctl.chmod(0o755)
 
     subprocess.run(
         ["sh", f"scripts/{script}"],
         cwd=root,
-        env=os.environ | {"HOME": str(tmp_path / "home"), "PATH": f"{fake_bin}:{os.environ['PATH']}", "SYSTEMCTL_LOG": str(log)},
+        env=os.environ
+        | {
+            "HOME": str(tmp_path / "home"),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SYSTEMCTL_LOG": str(log),
+            "SYSTEMCTL_STATE": str(state),
+        },
         check=True,
         text=True,
         capture_output=True,
@@ -390,13 +418,18 @@ def test_uninstallers_remove_only_their_unit_files(tmp_path: Path, script: str, 
 
     assert all(not (systemd_dir / unit).exists() for unit in units)
     assert preserved.read_text(encoding="utf-8") == "keep"
-    calls = log.read_text(encoding="utf-8")
+    for timer in timers:
+        assert (state / f"{timer}.enabled").read_text(encoding="utf-8") == "disabled\n"
+        assert (state / f"{timer}.active").read_text(encoding="utf-8") == "inactive\n"
+    calls = log.read_text(encoding="utf-8").splitlines()
     # One call per unit, because "there was nothing installed to stop" and "systemd would not stop
     # it" have to be told apart per unit rather than for a whole batch at once.
     for unit in units:
-        expected = f"disable --now {unit}" if unit.endswith(".timer") else f"stop {unit}"
-        assert expected in calls
-    assert "daemon-reload" in calls
+        if unit.endswith(".timer"):
+            assert f"--user disable {unit}" in calls
+            assert f"--user disable --runtime {unit}" in calls
+        assert f"--user stop {unit}" in calls
+    assert "--user daemon-reload" in calls
 
 
 @pytest.mark.parametrize(("script", "units"), UNINSTALLERS)
@@ -409,22 +442,23 @@ def test_uninstallers_keep_the_files_of_a_unit_they_could_not_stop(tmp_path: Pat
     systemd_dir.mkdir(parents=True)
     for unit in units:
         (systemd_dir / unit).write_text("owned", encoding="utf-8")
+    failed_timer = next(unit for unit in reversed(units) if unit.endswith(".timer"))
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     systemctl = fake_bin / "systemctl"
-    systemctl.write_text('#!/bin/sh\ncase "$*" in *daemon-reload*) exit 0 ;; esac\nexit 1\n', encoding="utf-8")
+    systemctl.write_text('#!/bin/sh\n[ "$*" = "--user disable --runtime $FAIL_TIMER" ] && exit 1\nexit 0\n', encoding="utf-8")
     systemctl.chmod(0o755)
 
     result = subprocess.run(
         ["sh", f"scripts/{script}"],
         cwd=root,
-        env=os.environ | {"HOME": str(tmp_path / "home"), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        env=os.environ | {"HOME": str(tmp_path / "home"), "PATH": f"{fake_bin}:{os.environ['PATH']}", "FAIL_TIMER": failed_timer},
         text=True,
         capture_output=True,
     )
 
     assert result.returncode != 0, "a teardown systemd refused must not report success"
-    assert "failed to stop" in result.stderr
+    assert f"failed to stop and disable {failed_timer}" in result.stderr
     assert all((systemd_dir / unit).exists() for unit in units), "the files of a running unit stay"
 
 
