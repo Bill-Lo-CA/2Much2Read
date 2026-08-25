@@ -210,7 +210,7 @@ exec 9>&-
 
 # Disabling schedules that were already running is a change the operator did not ask for, so an
 # upgrade offers to keep them and a first installation still defaults to leaving them off.
-if [ "$reminder_was_enabled" = enabled ] || [ "$agenda_was_enabled" = enabled ]; then
+if units_enabled_like "$reminder_was_enabled" || units_enabled_like "$agenda_was_enabled"; then
   printf '%s' "Keep the reminder and agenda timers enabled? [Y/n] "
 else
   printf '%s' "Enable reminder and agenda timers now? [y/N] "
@@ -229,13 +229,15 @@ fi
 desired_state() {
   case "$answer" in
     y | Y)
-      desired_enabled=enabled
-      # Enabling a timer that was already enabled must not restart one deliberately stopped. This
-      # is an if rather than a trailing &&, which would return non-zero here and, under set -e,
+      # Enabling a timer that was already enabled must not restart one deliberately stopped, and
+      # must not promote a --runtime enablement, meant to be gone at reboot, into a permanent one.
+      # This is an if rather than a trailing &&, which would return non-zero here and, under set -e,
       # abort the installation for the ordinary case of a timer that was not enabled before.
-      if [ "$1" = enabled ]; then
+      if units_enabled_like "$1"; then
+        desired_enabled=$1
         desired_active=$2
       else
+        desired_enabled=enabled
         desired_active=active
       fi
       ;;
@@ -262,9 +264,9 @@ units_apply_timer_state 2busy1miss-runtime-agenda.timer "$agenda_enabled" "$agen
 
 timer_status="Reminder timer: $reminder_enabled, $reminder_active"
 agenda_status="Agenda timer: $agenda_enabled, $agenda_active"
-[ "$reminder_enabled" = enabled ] ||
+units_enabled_like "$reminder_enabled" ||
   timer_status="$timer_status. Enable when ready: systemctl --user enable --now 2busy1miss-runtime.timer"
-[ "$agenda_enabled" = enabled ] ||
+units_enabled_like "$agenda_enabled" ||
   agenda_status="$agenda_status. Enable when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer"
 
 printf '%s\n' \

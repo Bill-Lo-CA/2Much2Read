@@ -302,8 +302,11 @@ def test_installers_only_start_timers_when_confirmed(
         assert "OnCalendar=*-*-* 09:45:00 America/Toronto" in newsletter_timer.read_text(encoding="utf-8")
         if starts:
             assert f"enable --now {timer}" in calls
+        # Both bits, so a timer left running without being enabled cannot be reported as simply off.
         expected = (
-            "Timer enabled." if starts else f"Timer remains disabled. Enable when ready: systemctl --user enable --now {timer}"
+            "Timer: enabled, active"
+            if starts
+            else f"Timer: disabled, inactive. Enable when ready: systemctl --user enable --now {timer}"
         )
         assert expected in result.stdout
 
@@ -345,37 +348,23 @@ def test_newsletter_installer_rejects_invalid_schedule(tmp_path: Path, setting: 
     assert not (home / ".config" / "systemd" / "user" / "2much2read-runtime.timer").exists()
 
 
-@pytest.mark.parametrize(
-    ("script", "units", "disable_call", "stop_call"),
-    [
-        (
-            "uninstall-2much2read-user-service.sh",
-            ["2much2read-runtime.service", "2much2read-runtime.timer"],
-            "disable --now 2much2read-runtime.timer",
-            None,
-        ),
-        (
-            "uninstall-2busy1miss-user-service.sh",
-            [
-                "2busy1miss-runtime.service",
-                "2busy1miss-runtime.timer",
-                "2busy1miss-runtime-agenda.service",
-                "2busy1miss-runtime-agenda.timer",
-            ],
-            "disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer",
-            "stop 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service",
-        ),
-        (
-            "uninstall-2bored1made.sh",
-            ["2bored1made-runtime.service", "2bored1made-runtime.timer"],
-            "disable --now 2bored1made-runtime.timer",
-            "stop 2bored1made-runtime.service",
-        ),
-    ],
-)
-def test_uninstallers_remove_only_their_unit_files(
-    tmp_path: Path, script: str, units: list[str], disable_call: str, stop_call: str | None
-) -> None:
+UNINSTALLERS = [
+    ("uninstall-2much2read-user-service.sh", ["2much2read-runtime.service", "2much2read-runtime.timer"]),
+    (
+        "uninstall-2busy1miss-user-service.sh",
+        [
+            "2busy1miss-runtime.service",
+            "2busy1miss-runtime.timer",
+            "2busy1miss-runtime-agenda.service",
+            "2busy1miss-runtime-agenda.timer",
+        ],
+    ),
+    ("uninstall-2bored1made.sh", ["2bored1made-runtime.service", "2bored1made-runtime.timer"]),
+]
+
+
+@pytest.mark.parametrize(("script", "units"), UNINSTALLERS)
+def test_uninstallers_remove_only_their_unit_files(tmp_path: Path, script: str, units: list[str]) -> None:
     root = Path(__file__).parents[1]
     systemd_dir = tmp_path / "home" / ".config" / "systemd" / "user"
     systemd_dir.mkdir(parents=True)
@@ -402,10 +391,41 @@ def test_uninstallers_remove_only_their_unit_files(
     assert all(not (systemd_dir / unit).exists() for unit in units)
     assert preserved.read_text(encoding="utf-8") == "keep"
     calls = log.read_text(encoding="utf-8")
-    assert disable_call in calls
-    if stop_call is not None:
-        assert stop_call in calls
+    # One call per unit, because "there was nothing installed to stop" and "systemd would not stop
+    # it" have to be told apart per unit rather than for a whole batch at once.
+    for unit in units:
+        expected = f"disable --now {unit}" if unit.endswith(".timer") else f"stop {unit}"
+        assert expected in calls
     assert "daemon-reload" in calls
+
+
+@pytest.mark.parametrize(("script", "units"), UNINSTALLERS)
+def test_uninstallers_keep_the_files_of_a_unit_they_could_not_stop(tmp_path: Path, script: str, units: list[str]) -> None:
+    # A unit that is not installed is nothing to stop, and saying so is not the same as systemd
+    # refusing to stop one that is. Swallowing both alike removed the unit files of a timer that was
+    # still running, leaving the files and the service manager disagreeing.
+    root = Path(__file__).parents[1]
+    systemd_dir = tmp_path / "home" / ".config" / "systemd" / "user"
+    systemd_dir.mkdir(parents=True)
+    for unit in units:
+        (systemd_dir / unit).write_text("owned", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text('#!/bin/sh\ncase "$*" in *daemon-reload*) exit 0 ;; esac\nexit 1\n', encoding="utf-8")
+    systemctl.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", f"scripts/{script}"],
+        cwd=root,
+        env=os.environ | {"HOME": str(tmp_path / "home"), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode != 0, "a teardown systemd refused must not report success"
+    assert "failed to stop" in result.stderr
+    assert all((systemd_dir / unit).exists() for unit in units), "the files of a running unit stay"
 
 
 def test_2busy1miss_agenda_timer_is_an_installer_template() -> None:

@@ -54,7 +54,17 @@ units_record_timer() {
   enabled_code=0
   systemctl --user is-enabled --quiet "$timer" >/dev/null 2>&1 || enabled_code=$?
   case "$enabled_code" in
-    0) enabled=enabled ;;
+    0)
+      enabled=enabled
+      # "enabled" and "enabled-runtime" share exit code 0, so the status alone cannot tell a
+      # permanent enablement from one meant to disappear at reboot. Restoring the second as the
+      # first would quietly make it permanent, so the word decides. This is an if rather than a
+      # trailing &&, which as the last command of a branch in a function returns non-zero when the
+      # test fails and, under set -e, aborts the installation.
+      if [ "$(systemctl --user is-enabled "$timer" 2>/dev/null)" = "enabled-runtime" ]; then
+        enabled="enabled-runtime"
+      fi
+      ;;
     1 | 4) enabled=disabled ;;
     *) units_fail "cannot determine whether $timer is enabled" ;;
   esac
@@ -78,6 +88,22 @@ units_require_inactive_service() {
   esac
 }
 
+# A timer enabled with --runtime is enabled now and gone at reboot. It counts as enabled wherever
+# the question is "is a schedule running", and only its restoration has to keep the two apart.
+units_enabled_like() {
+  case "$1" in
+    enabled | enabled-runtime) return 0 ;;
+  esac
+  return 1
+}
+
+units_disable_both() {
+  units_disable_failed=0
+  systemctl --user disable "$1" || units_disable_failed=1
+  systemctl --user disable --runtime "$1" || units_disable_failed=1
+  return "$units_disable_failed"
+}
+
 # Enabled and active are independent: a timer can be enabled but stopped for maintenance, or
 # started for this session without being enabled. Restoring only the enable bit would silently
 # start a timer the operator had stopped, or leave a running one stopped for good.
@@ -99,12 +125,24 @@ units_apply_timer_state() {
       systemctl --user enable "$1" || units_apply_failed=1
       systemctl --user stop "$1" || units_apply_failed=1
       ;;
+    "enabled-runtime active")
+      systemctl --user enable --runtime "$1" || units_apply_failed=1
+      systemctl --user start "$1" || units_apply_failed=1
+      ;;
+    "enabled-runtime inactive")
+      systemctl --user enable --runtime "$1" || units_apply_failed=1
+      systemctl --user stop "$1" || units_apply_failed=1
+      ;;
+    # Both scopes are cleared. "disable" removes symlinks from the unit configuration directory,
+    # which --runtime selects, so a plain disable need not reach a runtime enablement. Settling
+    # that either way would mean enabling a unit in the live user manager, so instead both are
+    # cleared; whichever was not there is a no-op.
     "disabled active")
-      systemctl --user disable "$1" || units_apply_failed=1
+      units_disable_both "$1" || units_apply_failed=1
       systemctl --user start "$1" || units_apply_failed=1
       ;;
     "disabled inactive")
-      systemctl --user disable "$1" || units_apply_failed=1
+      units_disable_both "$1" || units_apply_failed=1
       systemctl --user stop "$1" || units_apply_failed=1
       ;;
     *) return 1 ;;
@@ -140,9 +178,12 @@ units_restore_timers() {
 units_stop_timers() {
   for timer in $units_timers; do
     read -r enabled active < "$units_dir/state.$timer" || continue
-    [ "$enabled" = enabled ] || [ "$active" = active ] || continue
+    units_enabled_like "$enabled" || [ "$active" = active ] || continue
     units_timers_touched=true
     systemctl --user disable --now "$timer" || units_fail "failed to stop and disable $timer"
+    # The runtime scope too, for the same reason units_apply_timer_state clears both.
+    [ "$enabled" = enabled-runtime ] || continue
+    systemctl --user disable --runtime "$timer" || units_fail "failed to disable $timer"
   done
 }
 
@@ -189,13 +230,32 @@ units_render() {
 # systemd splits a command line on whitespace, so an unquoted path containing a space becomes a
 # different executable and a stray argument. Quoting fixes that; a quote or newline inside the
 # path itself has no safe rendering, so it is refused instead.
+#
+# Quoting does not stop specifier expansion: "%h" inside ExecStart becomes the home directory
+# whether or not it is in quotes, so a checkout under a directory named with a percent would run
+# something else entirely. "%%" is systemd's literal percent, and escaping is done here rather than
+# by refusing the path, because a percent in a directory name is legal and not the operator's fault.
 units_stage_executable() {
   case "$1" in
     *'"'* | *\\* | *"$units_newline"*)
       units_fail "executable path must not contain quotes, backslashes, or newlines: $1"
       ;;
   esac
-  printf '"%s"' "$1"
+  units_escaped=""
+  units_rest=$1
+  while :; do
+    case "$units_rest" in
+      *%*)
+        units_escaped="$units_escaped${units_rest%%%*}%%"
+        units_rest=${units_rest#*%}
+        ;;
+      *)
+        units_escaped="$units_escaped$units_rest"
+        break
+        ;;
+    esac
+  done
+  printf '"%s"' "$units_escaped"
 }
 
 # Timers are checked too. A schedule value that reaches the template malformed produces a unit
@@ -215,6 +275,7 @@ units_verify() {
 units_rollback() {
   units_units_restored=true
   units_units_lost=""
+  units_reload_failed=false
   for unit in $units_files; do
     if [ -f "$units_dir/backup.$unit" ]; then
       if cp "$units_dir/backup.$unit" "$units_dir/restore.$unit" 2>/dev/null &&
@@ -227,8 +288,43 @@ units_rollback() {
     units_units_restored=false
     units_units_lost="$units_units_lost $unit"
   done
-  systemctl --user daemon-reload >/dev/null 2>&1 || true
+  # A rollback is not finished when the files are back: systemd is still running the definitions it
+  # loaded from the units that have just been replaced. Files on disk and service-manager state
+  # disagreeing is a worse place to be than either failure alone, so the reload counts.
+  if ! systemctl --user daemon-reload >/dev/null 2>&1; then
+    units_units_restored=false
+    units_reload_failed=true
+  fi
   [ "$units_units_restored" = true ]
+}
+
+# Stops units before an uninstaller removes them, telling "there is nothing installed to stop" apart
+# from "systemd would not stop it". The installed file is the test, because these are paths we own;
+# any failure from systemctl itself is then a real service-manager problem rather than the ordinary
+# case of uninstalling something that was never there. Callers set units_systemd_dir first and must
+# not remove anything unless this returns success: deleting the unit file of a timer still running
+# leaves the files and the service manager disagreeing, which is the state a rollback exists to
+# prevent.
+units_teardown() {
+  units_teardown_failed=false
+  for unit in "$@"; do
+    [ -e "$units_systemd_dir/$unit" ] || continue
+    case "$unit" in
+      *.timer)
+        systemctl --user disable --now "$unit" || {
+          printf '%s\n' "failed to stop and disable $unit" >&2
+          units_teardown_failed=true
+        }
+        ;;
+      *)
+        systemctl --user stop "$unit" || {
+          printf '%s\n' "failed to stop $unit" >&2
+          units_teardown_failed=true
+        }
+        ;;
+    esac
+  done
+  [ "$units_teardown_failed" = false ]
 }
 
 units_commit() {
@@ -276,7 +372,14 @@ units_cleanup() {
         printf '%s\n' "installation failed; the previous unit files were restored" >&2
       else
         units_incomplete=true
-        printf '%s\n' "installation failed and these unit files could NOT be restored:$units_units_lost" >&2
+        if [ -n "$units_units_lost" ]; then
+          printf '%s\n' "installation failed and these unit files could NOT be restored:$units_units_lost" >&2
+        fi
+        if [ "$units_reload_failed" = true ]; then
+          printf '%s\n' \
+            "installation failed; the previous unit files are back on disk but systemd did not reload them," \
+            "so it may still be running the replaced definitions - recover with: systemctl --user daemon-reload" >&2
+        fi
       fi
     fi
   fi

@@ -113,7 +113,7 @@ exec 9>&-
 
 # An upgrade must not silently switch a working schedule off, so a timer that was already enabled
 # stays enabled unless the answer says otherwise. A first installation still defaults to disabled.
-if [ "$timer_was_enabled" = enabled ]; then
+if units_enabled_like "$timer_was_enabled"; then
   printf '%s' "Keep the nudge timer enabled? [Y/n] "
 else
   printf '%s' "Enable the nudge timer now? [y/N] "
@@ -126,10 +126,15 @@ fi
 # that quietly stopped it would be making a change nobody asked for.
 case "$answer" in
   y | Y)
-    desired_enabled=enabled
-    desired_active=active
-    # Enabling a timer that was already enabled must not restart one deliberately stopped.
-    [ "$timer_was_enabled" = enabled ] && desired_active=$timer_was_active
+    # Enabling a timer that was already enabled must not restart one deliberately stopped, and must
+    # not promote a --runtime enablement, which is meant to be gone at reboot, into a permanent one.
+    if units_enabled_like "$timer_was_enabled"; then
+      desired_enabled=$timer_was_enabled
+      desired_active=$timer_was_active
+    else
+      desired_enabled=enabled
+      desired_active=active
+    fi
     ;;
   n | N)
     desired_enabled=disabled
@@ -141,10 +146,11 @@ case "$answer" in
     ;;
 esac
 units_apply_timer_state 2bored1made-runtime.timer "$desired_enabled" "$desired_active"
-if [ "$desired_enabled" = enabled ]; then
-  timer_message="Timer enabled."
-else
-  timer_message="Timer disabled. Enable when ready: systemctl --user enable --now 2bored1made-runtime.timer"
+# Both bits, because either one alone can describe a state the timer is not in: a timer left
+# disabled but running would otherwise be reported as simply off.
+timer_message="Timer: $desired_enabled, $desired_active"
+if ! units_enabled_like "$desired_enabled"; then
+  timer_message="$timer_message. Enable when ready: systemctl --user enable --now 2bored1made-runtime.timer"
 fi
 
 printf '%s\n' \

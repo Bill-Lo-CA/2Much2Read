@@ -31,7 +31,13 @@ state="{state}"
 # two-timer installer can be driven into mixed states.
 for argument in $*; do unit="$argument"; done
 case "$*" in
-  *is-enabled*) [ "$(cat "$state/$unit.enabled")" = enabled ] && exit 0 || exit 1 ;;
+  *is-enabled*)
+    # The word is printed as well as encoded in the status, because "enabled" and "enabled-runtime"
+    # share exit code 0 and only the word tells them apart.
+    word=$(cat "$state/$unit.enabled")
+    printf '%s\\n' "$word"
+    case "$word" in enabled | enabled-runtime) exit 0 ;; esac
+    exit 1 ;;
   *is-active*)  [ "$(cat "$state/$unit.active")" = active ] && exit 0 || exit 3 ;;
   *show*Version*) printf '255\\n'; exit 0 ;;
   *show*ActiveState*) printf 'inactive\\n'; exit 0 ;;
@@ -63,8 +69,16 @@ case "$*" in
       done
       exit 1
     fi
-    [ -f "$state/fail-reload" ] && exit 1
+    [ -f "$state/fail-every-reload" ] && exit 1
+    if [ -f "$state/fail-reload" ]; then
+      # Once: this is the commit's reload. The rollback reloads too, and failing that as well is a
+      # different scenario - one where the files are back but systemd never picked them up.
+      rm -f "$state/fail-reload"
+      exit 1
+    fi
     exit 0 ;;
+  *"disable --runtime"*) printf 'disabled\\n' > "$state/$unit.enabled"; exit 0 ;;
+  *"enable --runtime"*) printf 'enabled-runtime\\n' > "$state/$unit.enabled"; exit 0 ;;
   *disable*)
     # Records whether the unit file was still on disk when the timer was disabled. A rollback that
     # deleted the units first would leave nothing to disable, and this is how that ordering is
@@ -120,7 +134,12 @@ class Harness:
         (self.state / f"{timer}.active").write_text(f"{active}\n", encoding="utf-8")
 
     def fail_reload(self) -> None:
+        """Fail the commit's reload only, leaving the rollback's own reload able to succeed."""
         (self.state / "fail-reload").touch()
+
+    def fail_every_reload(self) -> None:
+        """Fail the rollback's reload too, so the files come back but systemd never sees them."""
+        (self.state / "fail-every-reload").touch()
 
     def wreck_backups_then_fail_reload(self) -> None:
         (self.state / "wreck-backups").touch()
@@ -276,6 +295,41 @@ def test_a_repository_path_needing_quoting_renders_a_correct_execstart(tmp_path:
     assert f'ExecStart="{executable}" run' in harness.unit(SERVICE)
 
 
+@pytest.mark.parametrize("fragment", ["%h", "%n", "100%test"])
+def test_a_repository_path_containing_a_percent_is_not_expanded_by_systemd(tmp_path: Path, fragment: str) -> None:
+    # Quoting does not stop specifier expansion: inside ExecStart, "%h" becomes the home directory
+    # whether or not it is quoted, so a checkout under such a directory would run something else.
+    repo = _repo_copy(tmp_path, f"repo {fragment}")
+    executable = repo / ".venv" / "bin" / "2bored1made"
+    harness = Harness(tmp_path, "disabled", "inactive")
+
+    result = harness.run(answer="n\n", cwd=repo)
+
+    assert result.returncode == 0, result.stderr
+    escaped = str(executable).replace("%", "%%")
+    assert f'ExecStart="{escaped}" run' in harness.unit(SERVICE)
+    if shutil.which("systemd-analyze") is None:
+        return
+    # systemd resolves specifiers and complains when the resulting command does not exist, and it
+    # says nothing when it does. Silence alone would be a weak assertion - a check that never runs
+    # is also silent - so the same unit is verified with the path left unescaped as a control. That
+    # one must complain, and about a path that is not the real one. Note that verify exits 0 in both
+    # cases: an unresolvable ExecStart is only a warning, so a test reading the status would pass
+    # with the bug still in place.
+    unescaped = tmp_path / "unescaped.service"
+    unescaped.write_text(harness.unit(SERVICE).replace(escaped, str(executable)), encoding="utf-8")
+    control = _verify_output(unescaped)
+
+    assert str(executable) not in control, "the control must show systemd resolving the path away"
+    assert "not executable" in control, "the check only has teeth if the unescaped path is rejected"
+    assert "not executable" not in _verify_output(harness.systemd / SERVICE)
+
+
+def _verify_output(unit: Path) -> str:
+    result = subprocess.run(["systemd-analyze", "--user", "verify", str(unit)], capture_output=True, text=True)
+    return result.stdout + result.stderr
+
+
 def test_an_executable_path_that_cannot_be_quoted_is_refused(tmp_path: Path) -> None:
     repo = _repo_copy(tmp_path, 'repo "quote"')
     harness = Harness(tmp_path, "enabled", "active")
@@ -329,6 +383,27 @@ def test_a_timer_state_that_cannot_be_read_is_not_called_restored(tmp_path: Path
     assert "the previous timer state was restored" not in result.stderr
     assert f"could NOT be restored: {TIMER}" in result.stderr
     assert harness.timer_state == ("disabled", "inactive"), "the timer really is still stopped"
+
+
+def test_a_rollback_systemd_never_reloaded_is_not_reported_as_finished(tmp_path: Path) -> None:
+    # Putting the files back is half of it. Until systemd reloads them it is still running the
+    # definitions it read from the units that were just replaced, so disk and service manager
+    # disagree - and reporting that as a completed rollback hides exactly that.
+    harness = Harness(tmp_path, "enabled", "active")
+    harness.seed_units("previous")
+    harness.fail_every_reload()
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert "the previous unit files were restored" not in result.stderr
+    assert "did not reload them" in result.stderr
+    assert "systemctl --user daemon-reload" in result.stderr, "the recovery command has to be named"
+    # The files really are back; it is only systemd that has not caught up.
+    assert harness.unit(SERVICE) == f"# previous {SERVICE}\n"
+    kept = _staging_directories(harness)
+    assert kept, "an incomplete rollback keeps the staging directory"
+    assert str(kept[0]) in result.stderr
 
 
 def test_a_rollback_that_finished_reports_it_and_cleans_up(tmp_path: Path) -> None:
@@ -409,6 +484,22 @@ def test_the_newsletter_installer_keeps_the_state_a_blank_answer_did_not_change(
     assert harness.timer_state == (enabled, active)
 
 
+NUDGE = {"script": "install-2bored1made.sh", "timers": (TIMER,), "units": (SERVICE, TIMER)}
+
+
+@pytest.mark.parametrize("installer", [NUDGE, NEWSLETTER], ids=["2bored1made", "2much2read"])
+def test_a_single_timer_installer_reports_both_bits(tmp_path: Path, installer: dict[str, object]) -> None:
+    # A timer started for this session without being enabled is running. Reporting only the enable
+    # bit called that "disabled. Enable when ready", over a schedule that was firing.
+    harness = Harness(tmp_path, "disabled", "active", **installer)
+
+    result = harness.run(answer="\n")
+
+    assert result.returncode == 0, result.stderr
+    assert harness.timer_state == ("disabled", "active")
+    assert "Timer: disabled, active" in result.stdout
+
+
 def test_the_calendar_installer_keeps_two_timers_in_different_states(tmp_path: Path) -> None:
     # One schedule paused for maintenance and one started for the session only. A blank answer must
     # leave each exactly as it was, rather than deciding for both from whichever it looked at.
@@ -438,6 +529,50 @@ def test_the_calendar_installer_reports_the_state_it_actually_left(tmp_path: Pat
     assert "Reminder timer: enabled, active" in result.stdout
     assert "Agenda timer: disabled, inactive" in result.stdout
     assert "Timers remain disabled" not in result.stdout
+
+
+RUNTIME_STATES = [("enabled-runtime", "active"), ("enabled-runtime", "inactive")]
+
+
+@pytest.mark.parametrize(("enabled", "active"), RUNTIME_STATES)
+def test_a_blank_answer_keeps_a_runtime_only_enablement(tmp_path: Path, enabled: str, active: str) -> None:
+    # "systemctl enable --runtime" is enabled now and gone at reboot. It shares its exit status with
+    # an ordinary enable, so recording only the status and restoring with a plain "enable" would
+    # quietly turn a deliberately temporary schedule into a permanent one.
+    harness = Harness(tmp_path, enabled, active)
+
+    result = harness.run(answer="\n")
+
+    assert result.returncode == 0, result.stderr
+    assert harness.timer_state == (enabled, active)
+    log = harness.log.read_text(encoding="utf-8")
+    assert f"--user enable --runtime {TIMER}" in log
+    assert f"--user enable {TIMER}" not in log, "restoring must not create a permanent enablement"
+
+
+@pytest.mark.parametrize(("enabled", "active"), RUNTIME_STATES)
+def test_answering_yes_does_not_promote_a_runtime_enablement(tmp_path: Path, enabled: str, active: str) -> None:
+    # The prompt reads "Keep the timer enabled?" for a runtime-enabled timer, and keeping it means
+    # keeping the mode it had, not upgrading it.
+    harness = Harness(tmp_path, enabled, active)
+
+    result = harness.run(answer="y\n")
+
+    assert result.returncode == 0, result.stderr
+    assert harness.timer_state == (enabled, active)
+    assert f"--user enable {TIMER}" not in harness.log.read_text(encoding="utf-8")
+
+
+def test_a_failed_upgrade_restores_a_runtime_only_enablement(tmp_path: Path) -> None:
+    harness = Harness(tmp_path, "enabled-runtime", "active")
+    harness.seed_units("previous")
+    harness.fail_reload()
+
+    result = harness.run()
+
+    assert result.returncode != 0
+    assert harness.timer_state == ("enabled-runtime", "active")
+    assert f"--user enable {TIMER}" not in harness.log.read_text(encoding="utf-8")
 
 
 def test_a_timer_enabled_after_the_commit_is_brought_back_down(tmp_path: Path) -> None:
