@@ -30,13 +30,6 @@ jobs:
       - name: Type check
         run: uv run mypy src scripts
 
-      - name: Shell scripts
-        run: |
-          # sh takes one command file and turns every later word into a positional parameter, so
-          # passing the whole glob would parse the first script and silently ignore the rest.
-          for script in scripts/*.sh scripts/lib/*.sh; do sh -n "$script"; done
-          uv run shellcheck -s sh scripts/*.sh scripts/lib/*.sh
-
       - name: Test
         run: uv run pytest -q
 

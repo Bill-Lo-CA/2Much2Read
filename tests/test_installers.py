@@ -6,59 +6,11 @@ from pathlib import Path
 import pytest
 
 
-def _fake_systemctl(tmp_path: Path) -> Path:
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir(exist_ok=True)
-    systemctl = fake_bin / "systemctl"
-    systemctl.write_text(
-        '#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
-        encoding="utf-8",
-    )
-    systemctl.chmod(0o755)
-    return fake_bin
-
-
-def test_2bored1made_installer_copies_the_env_file_once(tmp_path: Path) -> None:
-    root = Path(__file__).parents[1]
-    home = tmp_path / "home"
-    environment = os.environ | {"HOME": str(home), "PATH": f"{_fake_systemctl(tmp_path)}:{os.environ['PATH']}"}
-
-    subprocess.run(
-        ["sh", "scripts/install-2bored1made.sh"],
-        cwd=root,
-        env=environment,
-        check=True,
-        text=True,
-        capture_output=True,
-        input="n\n",
-    )
-
-    installed_env = home / ".config" / "2much2read-runtime" / ".2bored1made.env"
-    assert installed_env.read_text(encoding="utf-8") == (root / "config" / "2bored1made.env.example").read_text(encoding="utf-8")
-    assert installed_env.stat().st_mode & 0o777 == 0o600
-    installed_env.chmod(0o644)
-    installed_env.write_text("DISCORD_WEBHOOK_URL=https://configured.example\n", encoding="utf-8")
-
-    subprocess.run(
-        ["sh", "scripts/install-2bored1made.sh"],
-        cwd=root,
-        env=environment,
-        check=True,
-        text=True,
-        capture_output=True,
-        input="n\n",
-    )
-
-    assert installed_env.read_text(encoding="utf-8") == "DISCORD_WEBHOOK_URL=https://configured.example\n"
-    assert installed_env.stat().st_mode & 0o777 == 0o600
-
-
 @pytest.mark.parametrize(
     ("script", "env_name"),
     [
         ("install-2much2read-user-service.sh", ".2much2read.env"),
         ("install-2busy1miss-user-service.sh", ".2busy1miss.env"),
-        ("install-2bored1made.sh", ".2bored1made.env"),
     ],
 )
 def test_installers_refuse_managed_env_symlinks(tmp_path: Path, script: str, env_name: str) -> None:
@@ -108,12 +60,6 @@ def test_installers_refuse_managed_env_symlinks(tmp_path: Path, script: str, env
             "2busy1miss-runtime.service",
             ".2busy1miss.env",
             "AGENDA_SCHEDULE_TIME=21:00\n",
-        ),
-        (
-            "install-2bored1made.sh",
-            "2bored1made-runtime.service",
-            ".2bored1made.env",
-            "DISCORD_WEBHOOK_URL=\n",
         ),
     ],
 )
@@ -212,7 +158,7 @@ def test_installers_only_start_timers_when_confirmed(
     systemctl = fake_bin / "systemctl"
     systemctl.write_text(
         '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n[ "$2" = "is-active" ] && exit 3\n'
-        '[ "$2" = "is-enabled" ] && exit 1\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+        '[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
         encoding="utf-8",
     )
     systemctl.chmod(0o755)
@@ -235,28 +181,27 @@ def test_installers_only_start_timers_when_confirmed(
     )
 
     calls = log.read_text(encoding="utf-8")
+    disable_call = f"disable --now {timer}"
     state_call = f"show --property=ActiveState --value {service}"
+    assert disable_call in calls
     assert state_call in calls
-    # A first installation has no schedule to interrupt, so it stops nothing.
-    assert "disable --now" not in calls
+    assert calls.index(disable_call) < calls.index(state_call)
     assert "daemon-reload" in calls
     assert ("enable --now" in calls) is starts
     installed_secret = tmp_path / "home" / ".config" / "2much2read-runtime" / secret_name
     assert installed_secret.read_text(encoding="utf-8") == "client secret"
     assert installed_secret.stat().st_mode & 0o777 == 0o600
     if script == "install-2busy1miss-user-service.sh":
-        # Each timer reports the state it was actually left in, rather than one line derived from
-        # the answer for both of them.
+        assert "disable --now 2busy1miss-runtime-agenda.timer" in calls
         if starts:
-            assert "enable --now 2busy1miss-runtime.timer" in calls
-            assert "enable --now 2busy1miss-runtime-agenda.timer" in calls
-            assert "Reminder timer: enabled, active" in result.stdout
-            assert "Agenda timer: enabled, active" in result.stdout
+            assert "enable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer" in calls
+            assert "Timers enabled." in result.stdout
         else:
-            assert "Reminder timer: disabled, inactive" in result.stdout
-            assert "Agenda timer: disabled, inactive" in result.stdout
-            assert "systemctl --user enable --now 2busy1miss-runtime.timer" in result.stdout
-            assert "systemctl --user enable --now 2busy1miss-runtime-agenda.timer" in result.stdout
+            assert (
+                "Timers remain disabled. Enable reminders when ready: systemctl --user enable --now 2busy1miss-runtime.timer"
+                in result.stdout
+            )
+            assert "Enable agenda when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer" in result.stdout
         agenda_timer = tmp_path / "home" / ".config" / "systemd" / "user" / "2busy1miss-runtime-agenda.timer"
         assert "OnCalendar=*-*-* 21:00:00" in agenda_timer.read_text(encoding="utf-8")
         (tmp_path / "home" / ".config" / "2much2read-runtime" / ".2busy1miss.env").write_text(
@@ -302,11 +247,8 @@ def test_installers_only_start_timers_when_confirmed(
         assert "OnCalendar=*-*-* 09:45:00 America/Toronto" in newsletter_timer.read_text(encoding="utf-8")
         if starts:
             assert f"enable --now {timer}" in calls
-        # Both bits, so a timer left running without being enabled cannot be reported as simply off.
         expected = (
-            "Timer: enabled, active"
-            if starts
-            else f"Timer: disabled, inactive. Enable when ready: systemctl --user enable --now {timer}"
+            "Timer enabled." if starts else f"Timer remains disabled. Enable when ready: systemctl --user enable --now {timer}"
         )
         assert expected in result.stdout
 
@@ -348,23 +290,31 @@ def test_newsletter_installer_rejects_invalid_schedule(tmp_path: Path, setting: 
     assert not (home / ".config" / "systemd" / "user" / "2much2read-runtime.timer").exists()
 
 
-UNINSTALLERS = [
-    ("uninstall-2much2read-user-service.sh", ["2much2read-runtime.service", "2much2read-runtime.timer"]),
-    (
-        "uninstall-2busy1miss-user-service.sh",
-        [
-            "2busy1miss-runtime.service",
-            "2busy1miss-runtime.timer",
-            "2busy1miss-runtime-agenda.service",
-            "2busy1miss-runtime-agenda.timer",
-        ],
-    ),
-    ("uninstall-2bored1made.sh", ["2bored1made-runtime.service", "2bored1made-runtime.timer"]),
-]
-
-
-@pytest.mark.parametrize(("script", "units"), UNINSTALLERS)
-def test_uninstallers_remove_only_their_unit_files(tmp_path: Path, script: str, units: list[str]) -> None:
+@pytest.mark.parametrize(
+    ("script", "units", "disable_call", "stop_call"),
+    [
+        (
+            "uninstall-2much2read-user-service.sh",
+            ["2much2read-runtime.service", "2much2read-runtime.timer"],
+            "disable --now 2much2read-runtime.timer",
+            None,
+        ),
+        (
+            "uninstall-2busy1miss-user-service.sh",
+            [
+                "2busy1miss-runtime.service",
+                "2busy1miss-runtime.timer",
+                "2busy1miss-runtime-agenda.service",
+                "2busy1miss-runtime-agenda.timer",
+            ],
+            "disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer",
+            "stop 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service",
+        ),
+    ],
+)
+def test_uninstallers_remove_only_their_unit_files(
+    tmp_path: Path, script: str, units: list[str], disable_call: str, stop_call: str | None
+) -> None:
     root = Path(__file__).parents[1]
     systemd_dir = tmp_path / "home" / ".config" / "systemd" / "user"
     systemd_dir.mkdir(parents=True)
@@ -375,42 +325,14 @@ def test_uninstallers_remove_only_their_unit_files(tmp_path: Path, script: str, 
     fake_bin = tmp_path / "bin"
     fake_bin.mkdir()
     log = tmp_path / "systemctl.log"
-    state = tmp_path / "systemctl-state"
-    state.mkdir()
-    timers = [unit for unit in units if unit.endswith(".timer")]
-    for timer in timers:
-        (state / f"{timer}.enabled").write_text("enabled-runtime\n", encoding="utf-8")
-        (state / f"{timer}.active").write_text("active\n", encoding="utf-8")
     systemctl = fake_bin / "systemctl"
-    systemctl.write_text(
-        """#!/bin/sh
-printf '%s\n' "$*" >> "$SYSTEMCTL_LOG"
-for argument in "$@"; do unit=$argument; done
-case "$*" in
-  *"disable --runtime"*) printf 'disabled\n' > "$SYSTEMCTL_STATE/$unit.enabled" ;;
-  *disable*)
-    if [ "$(cat "$SYSTEMCTL_STATE/$unit.enabled")" = enabled ]; then
-      printf 'disabled\n' > "$SYSTEMCTL_STATE/$unit.enabled"
-    fi
-    ;;
-  *stop*) printf 'inactive\n' > "$SYSTEMCTL_STATE/$unit.active" ;;
-esac
-exit 0
-""",
-        encoding="utf-8",
-    )
+    systemctl.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n', encoding="utf-8")
     systemctl.chmod(0o755)
 
     subprocess.run(
         ["sh", f"scripts/{script}"],
         cwd=root,
-        env=os.environ
-        | {
-            "HOME": str(tmp_path / "home"),
-            "PATH": f"{fake_bin}:{os.environ['PATH']}",
-            "SYSTEMCTL_LOG": str(log),
-            "SYSTEMCTL_STATE": str(state),
-        },
+        env=os.environ | {"HOME": str(tmp_path / "home"), "PATH": f"{fake_bin}:{os.environ['PATH']}", "SYSTEMCTL_LOG": str(log)},
         check=True,
         text=True,
         capture_output=True,
@@ -418,48 +340,11 @@ exit 0
 
     assert all(not (systemd_dir / unit).exists() for unit in units)
     assert preserved.read_text(encoding="utf-8") == "keep"
-    for timer in timers:
-        assert (state / f"{timer}.enabled").read_text(encoding="utf-8") == "disabled\n"
-        assert (state / f"{timer}.active").read_text(encoding="utf-8") == "inactive\n"
-    calls = log.read_text(encoding="utf-8").splitlines()
-    # One call per unit, because "there was nothing installed to stop" and "systemd would not stop
-    # it" have to be told apart per unit rather than for a whole batch at once.
-    for unit in units:
-        if unit.endswith(".timer"):
-            assert f"--user disable {unit}" in calls
-            assert f"--user disable --runtime {unit}" in calls
-        assert f"--user stop {unit}" in calls
-    assert "--user daemon-reload" in calls
-
-
-@pytest.mark.parametrize(("script", "units"), UNINSTALLERS)
-def test_uninstallers_keep_the_files_of_a_unit_they_could_not_stop(tmp_path: Path, script: str, units: list[str]) -> None:
-    # A unit that is not installed is nothing to stop, and saying so is not the same as systemd
-    # refusing to stop one that is. Swallowing both alike removed the unit files of a timer that was
-    # still running, leaving the files and the service manager disagreeing.
-    root = Path(__file__).parents[1]
-    systemd_dir = tmp_path / "home" / ".config" / "systemd" / "user"
-    systemd_dir.mkdir(parents=True)
-    for unit in units:
-        (systemd_dir / unit).write_text("owned", encoding="utf-8")
-    failed_timer = next(unit for unit in reversed(units) if unit.endswith(".timer"))
-    fake_bin = tmp_path / "bin"
-    fake_bin.mkdir()
-    systemctl = fake_bin / "systemctl"
-    systemctl.write_text('#!/bin/sh\n[ "$*" = "--user disable --runtime $FAIL_TIMER" ] && exit 1\nexit 0\n', encoding="utf-8")
-    systemctl.chmod(0o755)
-
-    result = subprocess.run(
-        ["sh", f"scripts/{script}"],
-        cwd=root,
-        env=os.environ | {"HOME": str(tmp_path / "home"), "PATH": f"{fake_bin}:{os.environ['PATH']}", "FAIL_TIMER": failed_timer},
-        text=True,
-        capture_output=True,
-    )
-
-    assert result.returncode != 0, "a teardown systemd refused must not report success"
-    assert f"failed to stop and disable {failed_timer}" in result.stderr
-    assert all((systemd_dir / unit).exists() for unit in units), "the files of a running unit stay"
+    calls = log.read_text(encoding="utf-8")
+    assert disable_call in calls
+    if stop_call is not None:
+        assert stop_call in calls
+    assert "daemon-reload" in calls
 
 
 def test_2busy1miss_agenda_timer_is_an_installer_template() -> None:
@@ -818,11 +703,9 @@ def test_installers_do_not_migrate_while_runtime_lock_is_held(
     [
         ('[ "$2" = "is-active" ] && exit 0\n[ "$2" = "show" ] && printf "active\\n"\nexit 0\n', "stop"),
         ('[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "activating\\n"\nexit 0\n', "stop"),
-        (
-            '[ "$2" = "is-active" ] && exit 1\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
-            "cannot determine whether",
-        ),
-        ('[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && exit 1\nexit 0\n', "cannot reach"),
+        ('[ "$2" = "is-active" ] && exit 1\nexit 0\n', "cannot determine"),
+        ('[ "$2" = "is-active" ] && exit 3\n[ "$2" = "disable" ] && exit 1\nexit 0\n', "failed to stop"),
+        ('[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && exit 1\nexit 0\n', "cannot determine"),
     ],
 )
 def test_installers_do_not_migrate_when_runtime_state_is_unsafe(

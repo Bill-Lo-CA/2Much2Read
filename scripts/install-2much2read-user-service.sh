@@ -1,10 +1,8 @@
 #!/bin/sh
 set -eu
 
-repo_dir=$(unset CDPATH; cd -- "$(dirname -- "$0")/.." && pwd)
+repo_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd)
 cd "$repo_dir"
-
-. "$repo_dir/scripts/lib/systemd-units.sh"
 
 gmail_client_secret=""
 while [ "$#" -gt 0 ]; do
@@ -118,18 +116,33 @@ repair_file() {
   fi
 }
 
-# The timer is stopped much later, inside units_commit, so everything that can refuse the
-# installation gets to refuse it while the schedule is still running.
-units_require_systemd
-units_require_inactive_service 2much2read-runtime.service
+timer_status=0
+systemctl --user is-active --quiet 2much2read-runtime.timer || timer_status=$?
+case "$timer_status" in
+  0|3)
+    systemctl --user disable --now 2much2read-runtime.timer || {
+      printf '%s\n' "failed to stop and disable 2much2read-runtime.timer" >&2
+      exit 1
+    }
+    ;;
+  4) ;;
+  *)
+    printf '%s\n' "cannot determine whether 2much2read-runtime.timer is active" >&2
+    exit 1
+    ;;
+esac
 
-# The timer state is read here, before any file is touched, so a service manager that cannot answer
-# aborts while everything is still where it was. Stopping the timer happens much later, in
-# units_commit, once nothing left can refuse the installation.
-units_init "$systemd_dir" 2much2read-runtime.service 2much2read-runtime.timer
-units_trap
-units_record_timer 2much2read-runtime.timer
-read -r timer_was_enabled timer_was_active < "$units_dir/state.2much2read-runtime.timer"
+service_state=$(systemctl --user show --property=ActiveState --value 2much2read-runtime.service) || {
+  printf '%s\n' "cannot determine whether 2much2read-runtime.service is active" >&2
+  exit 1
+}
+case "$service_state" in
+  inactive|failed) ;;
+  *)
+    printf '%s\n' "stop 2much2read-runtime.service before installing" >&2
+    exit 1
+    ;;
+esac
 
 for directory in "$config_root" "$token_dir" "$data_root" "$data_dir"; do
   reject_symlink "$directory"
@@ -200,56 +213,28 @@ esac
 for unit in "$systemd_dir/2much2read-runtime.service" "$systemd_dir/2much2read-runtime.timer"; do
   reject_symlink "$unit"
 done
-
-units_render deploy/systemd/2much2read-runtime.service 2much2read-runtime.service \
-  __EXECUTABLE__ "$(units_stage_executable "$exe")"
-units_render deploy/systemd/2much2read-runtime.timer 2much2read-runtime.timer \
-  __DIGEST_SCHEDULE_TIME__ "$digest_schedule_time" \
-  __DIGEST_SCHEDULE_TIMEZONE__ "$digest_schedule_timezone"
-units_commit
+sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2much2read-runtime.service > "$systemd_dir/2much2read-runtime.service"
+sed \
+  -e "s|__DIGEST_SCHEDULE_TIME__|$digest_schedule_time|" \
+  -e "s|__DIGEST_SCHEDULE_TIMEZONE__|$digest_schedule_timezone|" \
+  deploy/systemd/2much2read-runtime.timer > "$systemd_dir/2much2read-runtime.timer"
+systemctl --user daemon-reload
 
 exec 9>&-
 
-# Disabling a schedule that was already running is a change the operator did not ask for, so an
-# upgrade offers to keep it and a first installation still defaults to leaving it off.
-if units_enabled_like "$timer_was_enabled"; then
-  printf '%s' "Keep the 2much2read timer enabled? [Y/n] "
-else
-  printf '%s' "Enable 2much2read timer now? [y/N] "
+printf '%s' "Enable 2much2read timer now? [y/N] "
+if ! IFS= read -r enable_timer; then
+  enable_timer=""
 fi
-if ! IFS= read -r answer; then
-  answer=""
-fi
-# Only an explicit answer changes anything. Both bits are restored otherwise, because a timer that
-# was started without being enabled is still a schedule the operator is running.
-case "$answer" in
-  y | Y)
-    # Enabling a timer that was already enabled must not restart one deliberately stopped, and must
-    # not promote a --runtime enablement, which is meant to be gone at reboot, into a permanent one.
-    if units_enabled_like "$timer_was_enabled"; then
-      desired_enabled=$timer_was_enabled
-      desired_active=$timer_was_active
-    else
-      desired_enabled=enabled
-      desired_active=active
-    fi
-    ;;
-  n | N)
-    desired_enabled=disabled
-    desired_active=inactive
+case "$enable_timer" in
+  y|Y)
+    systemctl --user enable --now 2much2read-runtime.timer
+    timer_status="Timer enabled."
     ;;
   *)
-    desired_enabled=$timer_was_enabled
-    desired_active=$timer_was_active
+    timer_status="Timer remains disabled. Enable when ready: systemctl --user enable --now 2much2read-runtime.timer"
     ;;
 esac
-units_apply_timer_state 2much2read-runtime.timer "$desired_enabled" "$desired_active"
-# Both bits, because either one alone can describe a state the timer is not in: a timer left
-# disabled but running would otherwise be reported as simply off.
-timer_status="Timer: $desired_enabled, $desired_active"
-if ! units_enabled_like "$desired_enabled"; then
-  timer_status="$timer_status. Enable when ready: systemctl --user enable --now 2much2read-runtime.timer"
-fi
 
 printf '%s\n' \
   "Config: $config_dir" \

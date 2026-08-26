@@ -1,22 +1,11 @@
 #!/bin/sh
 set -eu
 
-repo_dir=$(unset CDPATH; cd -- "$(dirname -- "$0")/.." && pwd)
-
-. "$repo_dir/scripts/lib/systemd-units.sh"
-
-units_systemd_dir="$HOME/.config/systemd/user"
-
-if ! units_teardown \
-  2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer \
-  2busy1miss-runtime.service 2busy1miss-runtime-agenda.service; then
-  printf '%s\n' "refusing to remove unit files the service manager would not stop" >&2
-  exit 1
-fi
-
+systemctl --user disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer || true
+systemctl --user stop 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service || true
 rm -f \
-  "$units_systemd_dir/2busy1miss-runtime.service" \
-  "$units_systemd_dir/2busy1miss-runtime.timer" \
-  "$units_systemd_dir/2busy1miss-runtime-agenda.service" \
-  "$units_systemd_dir/2busy1miss-runtime-agenda.timer"
+  "$HOME/.config/systemd/user/2busy1miss-runtime.service" \
+  "$HOME/.config/systemd/user/2busy1miss-runtime.timer" \
+  "$HOME/.config/systemd/user/2busy1miss-runtime-agenda.service" \
+  "$HOME/.config/systemd/user/2busy1miss-runtime-agenda.timer"
 systemctl --user daemon-reload
