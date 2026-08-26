@@ -148,6 +148,10 @@ class FiltersResult(CommandResult):
 
 class DoctorResult(CommandResult):
     checks: dict[str, str]
+    # Which keys, not just that something is wrong. `checks` values are status words from a closed
+    # vocabulary because that is what the healthy/warning verdict reads; the operator's own key
+    # names would break it, so they are reported alongside.
+    unknown_env_keys: list[str] | None = None
 
 
 HackerNewsFetchStatus = Literal[

@@ -164,3 +164,29 @@ def test_reset_agenda_checkpoint_requires_an_explicit_delivery_id(monkeypatch: p
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {"status": "ok", "delivery_id": 9}
+
+
+def test_doctor_names_a_misspelled_environment_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_home: Path) -> None:
+    env_path = isolated_home / ".config" / "2much2read-runtime" / ".2busy1miss.env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text("DISCORD_WEBHOOK_URL=ignored\nREMINDER_TIMEZON=typo\n", encoding="utf-8")
+    reminders_path = tmp_path / "reminders.yaml"
+    reminders_path.write_text("calendars:\n  - id: primary\n", encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: Settings(
+            reminders_config_path=reminders_path,
+            database_path=tmp_path / "reminders.sqlite3",
+            lock_path=tmp_path / "reminders.lock",
+            discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
+        ),
+    )
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "warning"
+    assert payload["checks"]["env_keys"] == "unknown"
+    # AGENDA_SCHEDULE_TIME really is a setting here, unlike the newsletter tool's DIGEST_SCHEDULE_*
+    assert payload["unknown_env_keys"] == ["REMINDER_TIMEZON"]

@@ -4,7 +4,6 @@ import re
 from datetime import time, timedelta
 from pathlib import Path
 from typing import Any, Literal, Self
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -12,16 +11,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from two_read_runtime.discord import DiscordDestination, configured_destination, configured_destinations
 from two_read_runtime.paths import app_config_file, app_data_file, config_dir, env_file
+from two_read_runtime.settings_validation import valid_timezone as _timezone
 
 MAX_REMINDER_OFFSET = timedelta(days=366)
-
-
-def _timezone(value: str) -> str:
-    try:
-        ZoneInfo(value)
-    except ZoneInfoNotFoundError as error:
-        raise ValueError(f"unknown IANA timezone {value!r}") from error
-    return value
 
 
 def settings_env_file() -> Path:

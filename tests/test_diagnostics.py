@@ -258,3 +258,42 @@ def test_doctor_does_not_leak_sensitive_paths(
 
     output = result.model_dump_json()
     assert str(secret_path) not in output
+
+
+def test_doctor_names_misspelled_environment_keys_but_not_the_installer_ones(
+    tmp_path: Path, newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # DIGEST_SCHEDULE_TIME and DIGEST_SCHEDULE_TIMEZONE are read out of this file by the installer
+    # with sed to render the timer's OnCalendar line. They are not settings and never will be, so
+    # reporting them would be a false positive on every healthy installation.
+    env_path = tmp_path / ".2much2read.env"
+    env_path.write_text(
+        "DISCORD_WEBHOOK_URL=ignored\n"
+        "DIGEST_SCHEDULE_TIME=08:00\n"
+        "DIGEST_SCHEDULE_TIMEZONE=America/Montreal\n"
+        "DIGEST_TIMEZON=typo\n"
+        "OLLAMA_BASE_RUL=typo\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(diagnostics, "env_file", lambda _: env_path)
+    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b"])
+
+    result = diagnostics.doctor(newsletter_settings, send_test=False)
+
+    assert result.status == "warning"
+    assert result.checks["env_keys"] == "unknown"
+    assert result.unknown_env_keys == ["DIGEST_TIMEZON", "OLLAMA_BASE_RUL"]
+
+
+def test_doctor_reports_no_unknown_keys_when_the_environment_file_is_clean(
+    tmp_path: Path, newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    env_path = tmp_path / ".2much2read.env"
+    env_path.write_text("DISCORD_WEBHOOK_URL=ignored\nDIGEST_SCHEDULE_TIME=08:00\nDIGEST_TIMEZONE=America/Montreal\n", "utf-8")
+    monkeypatch.setattr(diagnostics, "env_file", lambda _: env_path)
+    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b"])
+
+    result = diagnostics.doctor(newsletter_settings, send_test=False)
+
+    assert result.checks["env_keys"] == "ok"
+    assert result.unknown_env_keys is None

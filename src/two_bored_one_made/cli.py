@@ -10,6 +10,7 @@ from pydantic import BaseModel
 from two_read_runtime.discord import DiscordDeliveryError, deliver, delivery_error_code
 from two_read_runtime.paths import directory_is_creatable, env_file
 from two_read_runtime.permissions import private_directory_status, private_file_status, sqlite_files_status
+from two_read_runtime.settings_validation import unknown_env_keys
 
 from .config import NudgesConfigNotFound, Settings, load_nudges
 from .pipeline import reset as reset_nudge
@@ -85,8 +86,12 @@ def doctor() -> None:
     checks["database"] = sqlite_files_status(settings.database_path)
     checks["lock_file"] = private_file_status(settings.lock_path, missing_ok=True)
     checks["database_directory"] = "ok" if directory_is_creatable(settings.database_path.parent) else "not_writable"
+    unknown_keys = unknown_env_keys(env_file("2bored1made"), type(settings).model_fields)
+    checks["env_keys"] = "ok" if not unknown_keys else "unknown"
     status = "ok" if all(value in _HEALTHY_CHECKS for value in checks.values()) else "warning"
     payload: dict[str, object] = {"status": status, "checks": checks}
+    if unknown_keys:
+        payload["unknown_env_keys"] = unknown_keys
     # Which nudge, and why. The check above only says that something is wrong; an operator fixing it
     # needs the id and the error code the send path would have raised.
     if problems:

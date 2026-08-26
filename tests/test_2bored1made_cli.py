@@ -400,3 +400,39 @@ def test_status_and_dry_run_read_an_uninitialized_database_as_empty(tmp_path, mo
     nudge = json.loads(status_result.stdout)["nudges"][0]
     assert nudge["delivered"] == 0
     assert nudge["remaining"] == 3
+
+
+def test_doctor_names_a_misspelled_environment_key(tmp_path, monkeypatch) -> None:
+    # extra="ignore" is not what makes a typo silent: pydantic-settings looks up only the field
+    # names it knows, so an unknown key is never offered to `extra` at all and extra="forbid" would
+    # change nothing. The file itself is the only place the misspelling is visible.
+    env_path = tmp_path / ".2bored1made.env"
+    env_path.write_text("DISCORD_WEBHOOK_URL=ignored\nDISCORD_USERNAM=typo\n", encoding="utf-8")
+    env_path.chmod(0o600)
+    monkeypatch.setattr(cli, "env_file", lambda _: env_path)
+    (tmp_path / "nudges.yaml").write_text("nudges: []\n", encoding="utf-8")
+    (tmp_path / "nudges.yaml").chmod(0o600)
+    monkeypatch.setattr(cli, "Settings", lambda: _nudge_settings(tmp_path, "nudges: []\n"))
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "warning"
+    assert payload["checks"]["env_keys"] == "unknown"
+    assert payload["unknown_env_keys"] == ["DISCORD_USERNAM"]
+
+
+def test_doctor_accepts_an_environment_file_of_only_known_keys(tmp_path, monkeypatch) -> None:
+    env_path = tmp_path / ".2bored1made.env"
+    env_path.write_text("DISCORD_WEBHOOK_URL=ignored\nDISCORD_ALLOWED_MENTION_IDS=123\n", encoding="utf-8")
+    env_path.chmod(0o600)
+    monkeypatch.setattr(cli, "env_file", lambda _: env_path)
+    (tmp_path / "nudges.yaml").write_text("nudges: []\n", encoding="utf-8")
+    (tmp_path / "nudges.yaml").chmod(0o600)
+    monkeypatch.setattr(cli, "Settings", lambda: _nudge_settings(tmp_path, "nudges: []\n"))
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["env_keys"] == "ok"
+    assert "unknown_env_keys" not in payload
