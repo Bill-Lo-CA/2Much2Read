@@ -232,7 +232,29 @@ def test_doctor_reports_a_missing_nudges_file_without_failing(tmp_path, monkeypa
     assert result.exit_code == 0
     payload = json.loads(result.stdout)
     assert payload["checks"]["nudges"] == "missing"
+    # Pinned together with the file check, so a fix that simply stops ever saying "missing" cannot
+    # pass, and so the two can never again describe different worlds in one report.
+    assert payload["checks"]["nudges_file"] == "not_created"
     assert payload["status"] == "warning"
+
+
+def test_doctor_does_not_read_a_bad_value_as_a_missing_file(tmp_path, monkeypatch) -> None:
+    # "not found" is ordinary English, and a validation error quotes back whatever the operator
+    # wrote. Deciding missingness by searching the rendered message reported this file - present,
+    # readable, and named in the same output as ok - as missing, sending the operator to create a
+    # file that already exists instead of to the timezone that actually broke it.
+    monkeypatch.setattr(cli, "env_file", lambda _: tmp_path / "absent.env")
+    body = "timezone: not found\nnudges: []\n"
+    (tmp_path / "nudges.yaml").write_text(body, encoding="utf-8")
+    (tmp_path / "nudges.yaml").chmod(0o600)
+    monkeypatch.setattr(cli, "Settings", lambda: _nudge_settings(tmp_path, body))
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    assert result.exit_code == 0
+    payload = json.loads(result.stdout)
+    assert payload["checks"]["nudges"] == "invalid"
+    assert payload["checks"]["nudges_file"] == "ok", "the file is there, and the report has to agree"
 
 
 NUDGE_WITH_MENTION = "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 3\n    user_id: '456'\n"

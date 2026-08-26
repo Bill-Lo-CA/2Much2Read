@@ -158,9 +158,18 @@ class Settings(BaseSettings):
         )
 
 
+class NudgesConfigNotFound(ValueError):
+    """The configuration file is not there - distinct from being unreadable or wrong.
+
+    Carried as a type rather than left for a caller to recognise in the message. "not found" is
+    ordinary English that a validation error quotes back from whatever the operator wrote, so
+    reading it out of the rendered text reports a file that is sitting right there as missing.
+    """
+
+
 def load_nudges(path: Path) -> NudgesConfig:
     if not path.is_file():
-        raise ValueError(f"nudges configuration not found: {path}")
+        raise NudgesConfigNotFound(f"nudges configuration not found: {path}")
     try:
         data = yaml.safe_load(path.read_text(encoding="utf-8"))
     except yaml.YAMLError as error:

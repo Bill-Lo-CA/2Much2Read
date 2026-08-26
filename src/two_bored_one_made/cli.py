@@ -11,7 +11,7 @@ from two_read_runtime.discord import DiscordDeliveryError, deliver, delivery_err
 from two_read_runtime.paths import directory_is_creatable, env_file
 from two_read_runtime.permissions import private_directory_status, private_file_status, sqlite_files_status
 
-from .config import Settings, load_nudges
+from .config import NudgesConfigNotFound, Settings, load_nudges
 from .pipeline import reset as reset_nudge
 from .pipeline import run as run_nudges
 from .pipeline import status as nudge_status
@@ -19,10 +19,6 @@ from .pipeline import unusable_nudges
 
 app = typer.Typer(no_args_is_help=True)
 _HEALTHY_CHECKS = {"ok", "webhook", "bot", "both", "not_created"}
-
-
-def _config_error_status(error: Exception) -> str:
-    return "missing" if "not found" in str(error).lower() else "invalid"
 
 
 def emit(result: BaseModel) -> None:
@@ -79,7 +75,10 @@ def doctor() -> None:
         problems = unusable_nudges(settings, config)
         checks["nudges_deliverable"] = "ok" if not problems else "unusable"
     except (OSError, ValueError) as error:
-        checks["nudges"] = _config_error_status(error)
+        # The type, not the text. Only the loader can know the file was absent, and a validation
+        # error quotes the operator's own words back - so a bad value that happens to read "not
+        # found" was reported as a missing file while nudges_file said it was right there.
+        checks["nudges"] = "missing" if isinstance(error, NudgesConfigNotFound) else "invalid"
         checks["nudges_deliverable"] = "unknown"
     checks["nudges_file"] = private_file_status(settings.nudges_config_path, missing_ok=True)
     checks["data_dir"] = private_directory_status(settings.database_path.parent, missing_ok=True)
