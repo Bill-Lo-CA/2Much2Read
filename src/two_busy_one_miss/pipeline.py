@@ -494,7 +494,8 @@ def reset_agenda_checkpoint(settings: Settings, delivery_id: int) -> AgendaCheck
 
 def _dry_run_due(settings: Settings, now: datetime) -> ReminderDryRunResult:
     """What a real run would send, read without changing anything on disk."""
-    with reading_connection(settings.database_path) as connection:
+    # The two tables due_attempts joins; a snapshot without both has nothing due to report.
+    with reading_connection(settings.database_path, ("reminder_attempts", "events")) as connection:
         if connection is None:
             return ReminderDryRunResult(due=[])
         rows = Database.reading(connection).due_attempts(now)

@@ -149,5 +149,5 @@ class Database:
 @contextmanager
 def snapshot(path: Path) -> Iterator[Database | None]:
     """Read the history without changing anything on disk."""
-    with reading_connection(path) as connection:
+    with reading_connection(path, ("nudge_sends",)) as connection:
         yield None if connection is None else Database.reading(connection)

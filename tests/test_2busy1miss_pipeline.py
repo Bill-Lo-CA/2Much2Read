@@ -796,3 +796,21 @@ def test_a_reminder_dry_run_without_a_database_reports_nothing_due(tmp_path: Pat
     (tmp_path / "reminders.yaml").write_text("calendars:\n  - id: primary\n", encoding="utf-8")
 
     assert pipeline.run(settings, dry_run=True).due == []
+
+
+def test_a_reminder_dry_run_reads_an_uninitialized_database_as_empty(tmp_path: Path) -> None:
+    # The database file is created before its schema is, so a first run that died between the two
+    # leaves a real, zero-byte database. Reading it raised sqlite3.OperationalError - not a
+    # ValueError, so it reached the operator as a traceback rather than an empty report.
+    from two_read_runtime.permissions import prepare_private_file
+
+    settings = Settings(
+        reminders_config_path=tmp_path / "reminders.yaml",
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+    )
+    (tmp_path / "reminders.yaml").write_text("calendars:\n  - id: primary\n", encoding="utf-8")
+    prepare_private_file(settings.database_path)
+    assert settings.database_path.stat().st_size == 0
+
+    assert pipeline.run(settings, dry_run=True).due == []

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import shutil
 import sqlite3
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import ExitStack, contextmanager
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -40,8 +40,24 @@ def _stamps(path: Path) -> tuple[tuple[int, int] | None, ...]:
 
 
 @contextmanager
-def reading_connection(path: Path) -> Iterator[sqlite3.Connection | None]:
+def reading_connection(path: Path, tables: Collection[str]) -> Iterator[sqlite3.Connection | None]:
     """Open a database for reporting only, or yield None when there is nothing to read yet.
+
+    "Nothing to read yet" covers a database file that exists without the schema. The file is created
+    before the tables are: prepare_private_file opens it with O_CREAT|O_EXCL and the constructor
+    only then runs its CREATE statements, so a reader can find a real, stable, zero-byte database -
+    during that window, or for good, if a first run died between the two. Reading it raised
+    sqlite3.OperationalError, which is not a ValueError and so went straight past the CLI's handler
+    as a traceback. Nothing has been recorded in such a database, and that is what the caller is
+    asking, so it is reported the same way a missing file is.
+
+    The caller names the tables it needs rather than this asking whether any exist, because
+    executescript commits each CREATE as it goes: an interrupted first run can leave some tables and
+    not others, and only the caller knows which ones its queries require. The cost is that a
+    database that once had a table and lost it now reads as empty instead of failing - from here the
+    two are the same observation, the alternative is the traceback above, and neither the run path,
+    which recreates tables with IF NOT EXISTS, nor `doctor`, which reports the files separately,
+    relies on this reader to be the corruption alarm.
 
     A dry run has to be possible whatever else is happening, and has to leave the data directory
     exactly as it found it. A read-only connection to the live file gives neither, in two different
@@ -72,7 +88,15 @@ def reading_connection(path: Path) -> Iterator[sqlite3.Connection | None]:
         # registered here; the stack unwinds it before the directory holding the copy goes away.
         stack.callback(connection.close)
         connection.row_factory = sqlite3.Row
+        if not _has_tables(connection, tables):
+            yield None
+            return
         yield connection
+
+
+def _has_tables(connection: sqlite3.Connection, tables: Collection[str]) -> bool:
+    present = {str(row[0]) for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    return set(tables) <= present
 
 
 def _copy_once(path: Path, destination: Path) -> bool:

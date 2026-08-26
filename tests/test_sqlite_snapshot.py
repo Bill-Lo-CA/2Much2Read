@@ -31,7 +31,7 @@ def source_file(connection: sqlite3.Connection) -> str:
 
 
 def test_nothing_to_read_yields_nothing(tmp_path: Path) -> None:
-    with reading_connection(tmp_path / "absent.sqlite3") as connection:
+    with reading_connection(tmp_path / "absent.sqlite3", ("t",)) as connection:
         assert connection is None
 
 
@@ -41,7 +41,7 @@ def test_a_cleanly_closed_database_is_read_from_a_copy(tmp_path: Path) -> None:
     written(path)
     before = listing(tmp_path)
 
-    with reading_connection(path) as connection:
+    with reading_connection(path, ("t",)) as connection:
         assert connection is not None
         assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 1
         assert source_file(connection) != str(path)
@@ -61,7 +61,7 @@ def test_a_database_with_a_live_writer_is_still_read_from_a_copy(tmp_path: Path)
     try:
         before = listing(tmp_path)
 
-        with reading_connection(path) as connection:
+        with reading_connection(path, ("t",)) as connection:
             assert connection is not None
             # The second row is committed but still only in the write-ahead log.
             assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 2
@@ -76,7 +76,7 @@ def test_rows_come_back_as_mappings(tmp_path: Path) -> None:
     path = tmp_path / "db.sqlite3"
     written(path)
 
-    with reading_connection(path) as connection:
+    with reading_connection(path, ("t",)) as connection:
         assert connection is not None
         assert connection.execute("SELECT x FROM t").fetchone()["x"] == 1
 
@@ -103,7 +103,7 @@ def test_a_write_during_the_copy_is_retaken(tmp_path: Path, monkeypatch) -> None
 
     monkeypatch.setattr(module.shutil, "copy2", copy_then_touch)
 
-    with reading_connection(path) as connection:
+    with reading_connection(path, ("t",)) as connection:
         assert connection is not None
         assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 2
 
@@ -132,7 +132,7 @@ def test_a_database_whose_rows_are_only_in_the_wal_is_read_in_full(tmp_path: Pat
     Path(f"{path}-shm").unlink()
     before = listing(tmp_path)
 
-    with reading_connection(path) as connection:
+    with reading_connection(path, ("t",)) as connection:
         assert connection is not None
         assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 2
         assert source_file(connection) != str(path)
@@ -145,7 +145,7 @@ def test_a_lone_wal_is_not_left_behind_by_the_copy(tmp_path: Path) -> None:
     crashed(path)
     Path(f"{path}-shm").unlink()
 
-    with reading_connection(path) as connection:
+    with reading_connection(path, ("t",)) as connection:
         assert connection is not None
         copy = Path(source_file(connection))
         assert Path(f"{copy}-wal").exists()
@@ -157,7 +157,7 @@ def test_the_connection_is_closed_when_the_context_ends(tmp_path: Path) -> None:
     path = tmp_path / "db.sqlite3"
     written(path)
 
-    with reading_connection(path) as connection:
+    with reading_connection(path, ("t",)) as connection:
         assert connection is not None
         opened = connection
 
@@ -177,7 +177,7 @@ def test_reading_beside_a_committing_writer_moves_no_bytes(tmp_path: Path) -> No
     try:
         before = listing(tmp_path)
 
-        with reading_connection(path) as connection:
+        with reading_connection(path, ("t",)) as connection:
             assert connection is not None
             connection.execute("SELECT count(*) FROM t").fetchone()
 
@@ -220,7 +220,7 @@ def test_a_log_checkpointed_away_between_attempts_is_not_mixed_in(tmp_path: Path
 
     monkeypatch.setattr(module.shutil, "copy2", advance_the_source_after_the_first_log_copy)
 
-    with reading_connection(path) as connection:
+    with reading_connection(path, ("t",)) as connection:
         assert connection is not None
         assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 3
     assert moved == [1], "the source should have moved underneath the first attempt"
@@ -246,7 +246,7 @@ def test_a_log_that_vanishes_mid_copy_is_retried_not_raised(tmp_path: Path, monk
 
     monkeypatch.setattr(module.shutil, "copy2", checkpoint_before_copying_the_log)
 
-    with reading_connection(path) as connection:
+    with reading_connection(path, ("t",)) as connection:
         assert connection is not None
         assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 2
     assert removed == [1], "the log should have gone away underneath the first attempt"
@@ -269,5 +269,44 @@ def test_a_source_that_never_settles_is_an_error_not_a_wrong_answer(tmp_path: Pa
 
     monkeypatch.setattr(module.shutil, "copy2", write_after_every_copy)
 
-    with pytest.raises(module.SnapshotError, match="kept changing"), reading_connection(path):
+    with pytest.raises(module.SnapshotError, match="kept changing"), reading_connection(path, ("t",)):
         pass
+
+
+def test_a_database_created_but_not_yet_populated_reads_as_empty(tmp_path: Path) -> None:
+    # prepare_private_file opens the database with O_CREAT|O_EXCL and the schema is written only
+    # afterwards, so a reader can find a real, stable, zero-byte file - during that window, or for
+    # good if a first run died between the two. Querying it raised sqlite3.OperationalError, which
+    # is not a ValueError and so reached the operator as a traceback rather than an empty report.
+    from two_read_runtime.permissions import prepare_private_file
+
+    path = tmp_path / "db.sqlite3"
+    prepare_private_file(path)
+    assert path.stat().st_size == 0, "the reproduction depends on the file existing and being empty"
+
+    with reading_connection(path, ("t",)) as connection:
+        assert connection is None
+
+
+def test_a_half_created_schema_reads_as_empty(tmp_path: Path) -> None:
+    # executescript commits each CREATE as it goes, so an interrupted first run leaves some tables
+    # and not others. Asking only whether the database has any tables at all would accept this.
+    path = tmp_path / "db.sqlite3"
+    connection = sqlite3.connect(path)
+    connection.execute("CREATE TABLE t(x)")
+    connection.commit()
+    connection.close()
+
+    with reading_connection(path, ("t", "later")) as connection:
+        assert connection is None
+
+
+def test_the_guard_does_not_simply_refuse_everything(tmp_path: Path) -> None:
+    # The two tests above would also pass if the guard rejected every database, so this pins the
+    # other side: a schema that is all there still reads.
+    path = tmp_path / "db.sqlite3"
+    written(path)
+
+    with reading_connection(path, ("t",)) as connection:
+        assert connection is not None
+        assert connection.execute("SELECT count(*) FROM t").fetchone()[0] == 1

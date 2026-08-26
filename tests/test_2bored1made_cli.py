@@ -330,3 +330,22 @@ def test_doctor_cannot_judge_nudges_it_could_not_load(tmp_path, monkeypatch) -> 
     payload = json.loads(result.stdout)
     assert payload["checks"]["nudges"] == "invalid"
     assert payload["checks"]["nudges_deliverable"] == "unknown"
+
+
+def test_status_and_dry_run_read_an_uninitialized_database_as_empty(tmp_path, monkeypatch) -> None:
+    # The database file is created before its schema is, so a first run that died between the two
+    # leaves a real, zero-byte database behind. Reading it raised sqlite3.OperationalError, which is
+    # not a ValueError and so reached the operator as a traceback from both commands.
+    from two_read_runtime.permissions import prepare_private_file
+
+    prepare_private_file(tmp_path / "2bored1made.sqlite3")
+    monkeypatch.setattr(cli, "Settings", lambda: _nudge_settings(tmp_path, NUDGE_WITH_MENTION))
+
+    status_result = CliRunner().invoke(cli.app, ["status"])
+    dry_run_result = CliRunner().invoke(cli.app, ["run", "--dry-run"])
+
+    assert status_result.exit_code == 0, status_result.output
+    assert dry_run_result.exit_code == 0, dry_run_result.output
+    nudge = json.loads(status_result.stdout)["nudges"][0]
+    assert nudge["delivered"] == 0
+    assert nudge["remaining"] == 3
