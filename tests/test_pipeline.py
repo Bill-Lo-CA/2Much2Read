@@ -508,9 +508,9 @@ def test_mixed_gmail_and_hackernews_sources_run_together(tmp_path: Path, monkeyp
         seen.append(("gmail", budget))
         return budget if budget == settings.gmail_max_messages_per_run else 1, 1, 1, 0, [], []
 
-    def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int]]:
+    def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], int]:
         seen.append(("hackernews", int(args[4])))
-        return 1, 1, 1, 0, []
+        return 1, 1, 1, 0, [], 0
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
@@ -543,9 +543,9 @@ def test_hacker_news_force_respects_explicit_command_budget(tmp_path: Path, monk
         def close(self) -> None:
             pass
 
-    def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int]]:
+    def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], int]:
         assert args[4] == 1
-        return 0, 0, 0, 0, []
+        return 0, 0, 0, 0, [], 0
 
     monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
@@ -648,6 +648,7 @@ def test_empty_news_day_records_no_content_run(newsletter_settings: Settings, mo
         "discovered": 0,
         "processed": 0,
         "failed": 0,
+        "skipped": None,
         "delivered": 0,
         "delivery_succeeded": 0,
         "delivery_failed": 0,
@@ -1335,6 +1336,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
         "discovered": 2,
         "processed": 1,
         "failed": 1,
+        "skipped": None,
         "delivered": 0,
         "delivery_succeeded": 0,
         "delivery_failed": 0,
@@ -1436,6 +1438,7 @@ def test_mime_failure_marks_one_message_failed_and_continues(
         "discovered": 2,
         "processed": 1,
         "failed": 1,
+        "skipped": None,
         "delivered": 0,
         "delivery_succeeded": 0,
         "delivery_failed": 0,
@@ -1563,6 +1566,7 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
         "discovered": 1,
         "processed": 1,
         "failed": 0,
+        "skipped": None,
         "delivered": 0,
         "delivery_succeeded": 0,
         "delivery_failed": 0,
@@ -1598,6 +1602,7 @@ def test_existing_daily_digest_skips_before_gmail_access(tmp_path: Path, monkeyp
         "discovered": 0,
         "processed": 0,
         "failed": 0,
+        "skipped": None,
         "delivered": 0,
         "delivery_succeeded": 0,
         "delivery_failed": 0,
@@ -1969,3 +1974,119 @@ def test_only_shortlisted_pairs_reach_the_model() -> None:
 
     assert len(ollama.seen) == 1
     assert [entry.item.title for entry in merged] == ["GPT-5.6 Sol 發表", "Rust 1.94 釋出"]
+
+
+def test_hacker_news_skipped_items_reach_the_run_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A feed whose items mostly failed to read looked exactly like a quiet one.
+
+    discover already counts every unreadable item into HackerNewsDiscovery.skipped; the pipeline
+    took .candidates and dropped the rest, so the number never left the client.
+    """
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n  - id: hn-best\n    name: HN\n    type: hackernews\n    category: OTHER\n", encoding="utf-8"
+    )
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
+    )
+
+    class FakeHackerNewsClient:
+        def discover(self, *args: object, **kwargs: object) -> HackerNewsDiscovery:
+            return HackerNewsDiscovery([], 17)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_unload_model", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "close_ollama_client", lambda _: None)
+    monkeypatch.setattr(pipeline, "RelevanceReranker", lambda *args: _NoopReranker())
+
+    result = run_pipeline(settings, no_deliver=True)
+
+    assert (result.status, result.processed, result.skipped) == ("no_content", 0, 17)
+
+
+class _NoopReranker:
+    model_name = "test-reranker"
+    prompt_version = "v1"
+
+    def rank(self, entries: list[object]) -> list[object]:
+        return entries
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_message_without_a_mime_payload_is_recorded_as_failed_not_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare continue left no trace, so the same message came back every run.
+
+    Nothing was stored, no failed label was applied, and it cost nothing against the run limit - so
+    the next run's query still matched it and paid for another get_message. It is now recorded the
+    way every other unusable message is.
+    """
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="",
+    )
+    good_body = urlsafe_b64encode(b"good newsletter").decode().rstrip("=")
+    gmail = StubGmailClient(
+        ["bad", "good"],
+        {
+            "bad": {"internalDate": "0", "threadId": "bad", "payload": "not a MIME structure"},
+            "good": {
+                "internalDate": "0",
+                "threadId": "good",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [{"name": "Subject", "value": "Good"}],
+                    "body": {"data": good_body},
+                },
+            },
+        },
+    )
+    extraction = EmailExtraction(
+        source_id="alphasignal",
+        newsletter_title="Good news",
+        newsletter_date=None,
+        overview_zh_tw="摘要",
+        items=[
+            {
+                "title": "Good item",
+                "source_title": "Good item",
+                "category": "AI_MODEL",
+                "summary_zh_tw": "內容",
+                "why_it_matters_zh_tw": "原因",
+                "importance": 8,
+                "confidence": 0.9,
+            }
+        ],
+    )
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: StubOllamaClient(extraction))
+
+    result = run_pipeline(settings, no_deliver=True)
+
+    assert (result.status, result.discovered, result.processed, result.failed) == ("partial", 2, 1, 1)
+    assert gmail.applied_labels == [("bad", "failed"), ("good", "processed")]
+    database = Database(settings.database_path)
+    try:
+        row = database.connection.execute(
+            "SELECT documents.state, documents.last_error_code FROM documents"
+            " JOIN gmail_document_state ON gmail_document_state.document_id = documents.id"
+            " WHERE gmail_document_state.gmail_message_id = 'bad'"
+        ).fetchone()
+    finally:
+        database.close()
+    assert tuple(row) == ("failed", "EMAIL_PAYLOAD_INVALID")

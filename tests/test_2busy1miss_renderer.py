@@ -268,3 +268,53 @@ def test_render_agenda_chunks_at_discord_limit() -> None:
 
     assert len(chunks) > 1
     assert all(len(chunk) <= 2_000 for chunk in chunks)
+
+
+def test_the_meet_link_the_adapter_collected_reaches_the_reminder() -> None:
+    """CalendarEvent.links was populated and never read.
+
+    google_calendar._event_links already gathers the Meet, Zoom, htmlLink and description URLs, but
+    the renderer's own link scan looked only at the title, calendar name, and location - so a
+    meeting's join link reached the reader only if someone had also typed it into a displayed field.
+    """
+    timezone = ZoneInfo("America/Montreal")
+    start = datetime(2026, 7, 8, 10, 0, tzinfo=timezone)
+    event = CalendarEvent(
+        calendar_id="primary",
+        calendar_name="Main",
+        event_id="event-1",
+        instance_id="event-1",
+        title="Standup",
+        location="",
+        start=start,
+        end=start + timedelta(hours=1),
+        all_day=False,
+        links=("https://meet.google.com/abc-defg-hij",),
+    )
+    candidate = ReminderCandidate(event, "default-5m", "5m", start - timedelta(minutes=5))
+
+    rendered = render_reminder(candidate)
+
+    assert "Event link - meet.google.com: <https://meet.google.com/abc-defg-hij>" in rendered
+
+
+def test_an_event_link_that_is_not_a_safe_url_is_still_dropped() -> None:
+    timezone = ZoneInfo("America/Montreal")
+    start = datetime(2026, 7, 8, 10, 0, tzinfo=timezone)
+    event = CalendarEvent(
+        calendar_id="primary",
+        calendar_name="Main",
+        event_id="event-1",
+        instance_id="event-1",
+        title="Standup",
+        location="",
+        start=start,
+        end=start + timedelta(hours=1),
+        all_day=False,
+        links=("https://user:pass@example.com/join", "https://exa`mple.com/x"),
+    )
+    candidate = ReminderCandidate(event, "default-5m", "5m", start - timedelta(minutes=5))
+
+    rendered = render_reminder(candidate)
+
+    assert "Event link" not in rendered

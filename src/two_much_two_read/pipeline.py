@@ -345,12 +345,16 @@ def _process_source(
             continue
         message = gmail.get_message(gmail_id)
         payload = message.get("payload")
-        if not isinstance(payload, dict):
-            continue
         headers = message_headers(message)
         received = datetime.fromtimestamp(int(str(message.get("internalDate", "0"))) / 1000, tz=UTC)
         subject = headers.get("subject") or gmail_id
         try:
+            if not isinstance(payload, dict):
+                # Recorded as a failure rather than skipped. A bare continue stored nothing, applied
+                # no failed label, and cost nothing against the run limit, so the query matched the
+                # same message on every run: it reappeared daily and paid for a get_message each
+                # time. Raising here reuses the failure path the extractor's own errors already take.
+                raise EmailExtractionError("message payload is not a MIME structure", "EMAIL_PAYLOAD_INVALID")
             content = _email_content(extract_gmail_payload(payload))
             body = content.analysis_text
         except EmailExtractionError as error:
@@ -459,12 +463,13 @@ def _process_hackernews_source(
     *,
     force: bool,
     now: datetime,
-) -> tuple[int, int, int, int, list[int]]:
+) -> tuple[int, int, int, int, list[int], int]:
     limit = min(remaining, source.max_articles_per_run)
     discovered = 0
     processed = 0
     failed = 0
     attempted = 0
+    skipped = 0
     processed_document_ids: list[int] = []
     fetcher = ArticleFetcher()
     if force:
@@ -489,7 +494,13 @@ def _process_hackernews_source(
             candidates.append(candidate)
     else:
         status(f"{source.id}: scanning stories")
-        candidates = hackernews.discover(source, now, limit=source.max_story_candidates).candidates
+        # discover counts every item it could not read into `skipped`. Taking only .candidates made
+        # a feed whose items mostly failed indistinguishable from a quiet one.
+        discovery = hackernews.discover(source, now, limit=source.max_story_candidates)
+        candidates = discovery.candidates
+        skipped = discovery.skipped
+        if skipped:
+            status(f"{source.id}: skipped {skipped} unreadable stor{'y' if skipped == 1 else 'ies'}")
 
     for candidate in candidates:
         if attempted >= limit:
@@ -566,7 +577,7 @@ def _process_hackernews_source(
         processed += 1
         processed_document_ids.append(document_id)
         status(f"{source.id}: processed {candidate.document.title}")
-    return attempted, discovered, processed, failed, processed_document_ids
+    return attempted, discovered, processed, failed, processed_document_ids, skipped
 
 
 def run_pipeline(
@@ -592,6 +603,7 @@ def run_pipeline(
     processed_document_ids: list[int] = []
     discovered = 0
     failed = 0
+    skipped = 0
     delivered = 0
     delivery_succeeded = 0
     delivery_failed = 0
@@ -650,9 +662,17 @@ def run_pipeline(
                             else source.max_articles_per_run
                         )
                         assert hackernews is not None
-                        used, source_discovered, source_processed, source_failed, source_ids = _process_hackernews_source(
+                        (
+                            used,
+                            source_discovered,
+                            source_processed,
+                            source_failed,
+                            source_ids,
+                            source_skipped,
+                        ) = _process_hackernews_source(
                             database, hackernews, ollama, source, source_remaining, status, force=force, now=now
                         )
+                        skipped += source_skipped
                         source_documents = []
                     if command_remaining is not None:
                         command_remaining -= used
@@ -739,6 +759,7 @@ def run_pipeline(
                 discovered=discovered,
                 processed=processed,
                 failed=failed,
+                skipped=skipped or None,
                 delivered=delivered,
                 delivery_succeeded=delivery_succeeded if digest_id is not None and not no_deliver else 0,
                 delivery_failed=delivery_failed if digest_id is not None and not no_deliver else 0,
