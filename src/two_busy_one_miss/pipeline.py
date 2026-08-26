@@ -13,7 +13,6 @@ from two_read_runtime.discord import (
     deliver,
     deliver_resumable,
     delivery_error_code,
-    legacy_destination,
 )
 from two_read_runtime.locking import ProcessLock
 from two_read_runtime.sqlite_snapshot import reading_connection
@@ -232,8 +231,6 @@ def _deliver_agenda(
 
 
 def _dispatch_due_reminders(database: Database, settings: Settings, now: datetime) -> tuple[int, int, int, dict[str, int]]:
-    if not hasattr(database, "due_reminder_deliveries"):
-        return _dispatch_legacy_due_reminders(database, settings, now)
     sent = 0
     failed = 0
     expired = 0
@@ -292,47 +289,6 @@ def _dispatch_due_reminders(database: Database, settings: Settings, now: datetim
         except DiscordDeliveryError as error:
             error_code = delivery_error_code(error)
             database.fail_reminder_delivery(delivery_id, error_code, list(destinations.values()))
-            failed += 1
-            failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
-    return sent, failed, expired, failed_by_error_code
-
-
-def _dispatch_legacy_due_reminders(database: Database, settings: Settings, now: datetime) -> tuple[int, int, int, dict[str, int]]:
-    sent = failed = expired = 0
-    failed_by_error_code: dict[str, int] = {}
-    for attempt in database.due_attempts(now):
-        attempt_id = int(attempt["id"])
-        if datetime.fromisoformat(str(attempt["event_start_at"])) <= now:
-            database.expire_attempt(attempt_id)
-            expired += 1
-            continue
-        try:
-            try:
-                destination_key = attempt["discord_destination_key"]
-            except (IndexError, KeyError):
-                destination_key = None
-
-            def save_progress(message_ids: list[str], target_id: int = attempt_id) -> None:
-                database.record_delivery_progress(target_id, message_ids)
-
-            def finish_delivery(message_ids: list[str], target_id: int = attempt_id) -> None:
-                database.finish_delivery(target_id, message_ids)
-
-            deliver_resumable(
-                legacy_destination(
-                    settings.discord_destinations(), str(destination_key) if destination_key is not None else None
-                ),
-                str(attempt["content"]),
-                settings.discord_username,
-                attempt["discord_message_ids_json"],
-                save_progress,
-                finish_delivery,
-                sender=deliver,
-            )
-            sent += 1
-        except DiscordDeliveryError as error:
-            error_code = delivery_error_code(error)
-            database.fail_delivery(attempt_id, error_code)
             failed += 1
             failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
     return sent, failed, expired, failed_by_error_code

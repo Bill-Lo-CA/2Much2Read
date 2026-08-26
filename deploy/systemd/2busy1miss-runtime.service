@@ -1,5 +1,6 @@
 [Unit]
 Description=2busy1miss Calendar Reminders
+Wants=network-online.target
 After=network-online.target
 
 [Service]
@@ -21,3 +22,9 @@ LockPersonality=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+ProtectProc=invisible
+RestrictNamespaces=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+PrivateDevices=true

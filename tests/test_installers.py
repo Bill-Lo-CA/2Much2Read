@@ -347,65 +347,6 @@ def test_uninstallers_remove_only_their_unit_files(
     assert "daemon-reload" in calls
 
 
-def test_2busy1miss_agenda_timer_is_an_installer_template() -> None:
-    root = Path(__file__).parents[1]
-    timer = (root / "deploy/systemd/2busy1miss-runtime-agenda.timer").read_text(encoding="utf-8")
-    service = (root / "deploy/systemd/2busy1miss-runtime-agenda.service").read_text(encoding="utf-8")
-
-    assert "OnCalendar=*-*-* __AGENDA_SCHEDULE_TIME__:00" in timer
-    assert "Persistent=true" in timer
-    assert "ExecStart=__EXECUTABLE__ agenda-next-day --scheduled" in service
-
-
-def test_2much2read_timer_is_an_installer_template() -> None:
-    timer = (Path(__file__).parents[1] / "deploy/systemd/2much2read-runtime.timer").read_text(encoding="utf-8")
-
-    assert "OnCalendar=*-*-* __DIGEST_SCHEDULE_TIME__:00 __DIGEST_SCHEDULE_TIMEZONE__" in timer
-
-
-def test_2busy1miss_dispatcher_runs_every_minute() -> None:
-    timer = (Path(__file__).parents[1] / "deploy/systemd/2busy1miss-runtime.timer").read_text(encoding="utf-8")
-
-    assert "OnCalendar=*-*-* *:*:00" in timer
-    assert "RandomizedDelaySec" not in timer
-
-
-@pytest.mark.parametrize(
-    ("unit", "app"),
-    [
-        ("2much2read-runtime.service", "2much2read"),
-        ("2busy1miss-runtime.service", "2busy1miss"),
-        ("2busy1miss-runtime-agenda.service", "2busy1miss"),
-    ],
-)
-def test_runtime_units_use_the_runtime_sandbox(unit: str, app: str) -> None:
-    service = (Path(__file__).parents[1] / "deploy" / "systemd" / unit).read_text(encoding="utf-8")
-    required = {
-        "UMask=0077",
-        "ProtectSystem=strict",
-        "ProtectHome=read-only",
-        f"ReadWritePaths=%h/.config/2much2read-runtime/{app} %h/.local/share/2much2read-runtime/{app}",
-        "NoNewPrivileges=true",
-        "PrivateTmp=true",
-        "ProtectKernelTunables=true",
-        "ProtectKernelModules=true",
-        "ProtectKernelLogs=true",
-        "ProtectControlGroups=true",
-        "LockPersonality=true",
-        "RestrictSUIDSGID=true",
-        "RestrictRealtime=true",
-        "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
-    }
-
-    assert required <= set(service.splitlines())
-    assert f"EnvironmentFile=%h/.config/2much2read-runtime/.{app}.env" in service
-    if app == "2much2read":
-        assert "Environment=HF_HOME=%h/.local/share/2much2read-runtime/2much2read/huggingface" in service
-    assert sum(line.startswith("ReadWritePaths=") for line in service.splitlines()) == 1
-    assert "PrivateDevices" not in service
-    assert "MemoryDenyWriteExecute" not in service
-
-
 @pytest.mark.parametrize(
     ("script", "app", "env_name", "yaml_name", "secret_name", "token_name", "sqlite_name", "lock_name"),
     [

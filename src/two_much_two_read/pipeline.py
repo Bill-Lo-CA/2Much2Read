@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code, legacy_destination
+from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code
 from two_read_runtime.locking import ProcessLock
 
 from .article_extractor import ArticleExtractionError, extract_article
@@ -794,44 +794,13 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
             assert active_database is not None
             for digest in active_database.pending_digests():
                 digest_id = int(digest["id"])
-                if not hasattr(active_database, "has_digest_deliveries"):
-                    try:
-                        try:
-                            destination_key = digest["discord_destination_key"]
-                        except (IndexError, KeyError):
-                            destination_key = None
-
-                        def save_legacy_progress(message_ids: list[str], target_id: int = digest_id) -> None:
-                            active_database.record_delivery_progress(target_id, message_ids)
-
-                        def finish_legacy_delivery(message_ids: list[str], target_id: int = digest_id) -> None:
-                            active_database.finish_delivery(target_id, message_ids)
-
-                        deliver_resumable(
-                            legacy_destination(destinations, str(destination_key) if destination_key is not None else None),
-                            str(digest["rendered_content"]),
-                            settings.discord_username,
-                            digest["discord_message_ids_json"],
-                            save_legacy_progress,
-                            finish_legacy_delivery,
-                            sender=deliver,
-                        )
-                        delivered += 1
-                    except DiscordDeliveryError as error:
-                        error_code = delivery_error_code(error)
-                        active_database.fail_delivery(digest_id, error_code)
-                        failed += 1
-                        failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
-                    continue
+                # Migrating the rows a pre-per-destination digest left behind is still reachable and
+                # stays; what was removed here is the branch that asked whether this Database object
+                # was old enough to lack the method, which it never is.
                 if not active_database.has_digest_deliveries(digest_id) and digest["discord_message_ids_json"] is not None:
                     active_database.migrate_legacy_digest_deliveries(digest_id, destinations)
                 active_database.reconcile_digest_deliveries(digest_id, destinations)
-            deliveries = (
-                active_database.pending_digest_deliveries(destinations)
-                if hasattr(active_database, "pending_digest_deliveries")
-                else []
-            )
-            for delivery in deliveries:
+            for delivery in active_database.pending_digest_deliveries(destinations):
                 try:
                     delivery_id = int(delivery["id"])
                     destination = next(

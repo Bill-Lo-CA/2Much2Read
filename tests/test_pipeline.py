@@ -197,6 +197,14 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, mon
 
 
 class FakeDigestDatabase:
+    """A stand-in that speaks the per-destination delivery interface the real Database has.
+
+    It used to omit those methods, which only worked because retry_delivery asked `hasattr` before
+    calling them and fell back to a pre-per-destination path. Production never took that branch -
+    Database has always defined all three - so the fallback existed for this fake alone. The fake
+    now models one delivery per pending digest, which is what a single-webhook deployment has.
+    """
+
     def __init__(self, pending: list[dict[str, object]], failure_error: Exception | None = None) -> None:
         self.pending = pending
         self.failure_error = failure_error
@@ -204,23 +212,38 @@ class FakeDigestDatabase:
         self.finished: list[tuple[int, list[str]]] = []
         self.progress: list[tuple[int, list[str]]] = []
         self.closed = False
+        self.reconciled: list[int] = []
 
     def pending_digests(self) -> list[dict[str, object]]:
         return self.pending
 
-    def delivery_checkpoint(self, digest_id: int, destination_key: str) -> object:
-        return next(digest for digest in self.pending if digest["id"] == digest_id)["discord_message_ids_json"]
+    def has_digest_deliveries(self, digest_id: int) -> bool:
+        return True
 
-    def record_delivery_progress(self, digest_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
-        self.progress.append((digest_id, message_ids))
+    def reconcile_digest_deliveries(self, digest_id: int, destinations: list[DiscordDestination]) -> None:
+        self.reconciled.append(digest_id)
 
-    def finish_delivery(self, digest_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
-        self.finished.append((digest_id, message_ids))
+    def pending_digest_deliveries(self, destinations: list[DiscordDestination]) -> list[dict[str, object]]:
+        return [
+            {
+                "id": digest["id"],
+                "destination_key": destinations[0].key,
+                "rendered_content": digest["rendered_content"],
+                "discord_message_ids_json": digest["discord_message_ids_json"],
+            }
+            for digest in self.pending
+        ]
 
-    def fail_delivery(self, digest_id: int, error_code: str) -> None:
+    def record_digest_delivery_progress(self, delivery_id: int, message_ids: list[str]) -> None:
+        self.progress.append((delivery_id, message_ids))
+
+    def finish_digest_delivery(self, delivery_id: int, message_ids: list[str], destinations: list[DiscordDestination]) -> None:
+        self.finished.append((delivery_id, message_ids))
+
+    def fail_digest_delivery(self, delivery_id: int, error_code: str, destinations: list[DiscordDestination]) -> None:
         if self.failure_error is not None:
             raise self.failure_error
-        self.failed.append((digest_id, error_code))
+        self.failed.append((delivery_id, error_code))
 
     def close(self) -> None:
         self.closed = True
