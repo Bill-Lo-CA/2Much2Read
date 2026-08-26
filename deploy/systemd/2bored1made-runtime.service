@@ -1,0 +1,23 @@
+[Unit]
+Description=2bored1made Recurring Nudges
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=%h/.config/2much2read-runtime/.2bored1made.env
+ExecStart=__EXECUTABLE__ run
+TimeoutStartSec=5min
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/.local/share/2much2read-runtime/2bored1made
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6

@@ -145,7 +145,11 @@ def rules_test(days: Annotated[int, typer.Option("--days", min=1, max=30)] = 7) 
 
 @app.command("run")
 def run_command(dry_run: Annotated[bool, typer.Option()] = False) -> None:
-    emit_delivery_result(run_with_elapsed("2busy1miss run", lambda: run(Settings(), dry_run)))
+    try:
+        result = run_with_elapsed("2busy1miss run", lambda: run(Settings(), dry_run))
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    emit_delivery_result(result)
 
 
 @app.command("agenda")

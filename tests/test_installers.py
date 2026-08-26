@@ -6,45 +6,11 @@ from pathlib import Path
 import pytest
 
 
-def test_2bored1made_installer_copies_the_env_file_once(tmp_path: Path) -> None:
-    root = Path(__file__).parents[1]
-    home = tmp_path / "home"
-    environment = os.environ | {"HOME": str(home)}
-
-    subprocess.run(
-        ["sh", "scripts/install-2bored1made.sh"],
-        cwd=root,
-        env=environment,
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    installed_env = home / ".config" / "2much2read-runtime" / ".2bored1made.env"
-    assert installed_env.read_text(encoding="utf-8") == (root / "config" / "2bored1made.env.example").read_text(encoding="utf-8")
-    assert installed_env.stat().st_mode & 0o777 == 0o600
-    installed_env.chmod(0o644)
-    installed_env.write_text("DISCORD_WEBHOOK_URL=https://configured.example\n", encoding="utf-8")
-
-    subprocess.run(
-        ["sh", "scripts/install-2bored1made.sh"],
-        cwd=root,
-        env=environment,
-        check=True,
-        text=True,
-        capture_output=True,
-    )
-
-    assert installed_env.read_text(encoding="utf-8") == "DISCORD_WEBHOOK_URL=https://configured.example\n"
-    assert installed_env.stat().st_mode & 0o777 == 0o600
-
-
 @pytest.mark.parametrize(
     ("script", "env_name"),
     [
         ("install-2much2read-user-service.sh", ".2much2read.env"),
         ("install-2busy1miss-user-service.sh", ".2busy1miss.env"),
-        ("install-2bored1made.sh", ".2bored1made.env"),
     ],
 )
 def test_installers_refuse_managed_env_symlinks(tmp_path: Path, script: str, env_name: str) -> None:

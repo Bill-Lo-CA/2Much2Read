@@ -7,6 +7,7 @@ from unittest.mock import MagicMock, call
 from zoneinfo import ZoneInfo
 
 import pytest
+from conftest import directory_digest
 
 from two_busy_one_miss import pipeline
 from two_busy_one_miss.config import EventMatch, RemindersConfig, ReminderSpec, RuleConfig, Settings
@@ -16,6 +17,7 @@ from two_busy_one_miss.renderer import render_agenda
 from two_busy_one_miss.rules import ReminderCandidate
 from two_busy_one_miss.storage import Database
 from two_read_runtime.discord import DiscordDeliveryError
+from two_read_runtime.locking import ProcessLock
 
 
 class FakeReminderDatabase:
@@ -732,3 +734,83 @@ def test_run_expires_started_events_without_discord_config(tmp_path: Path, monke
     database = Database(settings.database_path)
     assert database.attempt_state(attempt_id) == "expired"
     database.close()
+
+
+def _reminder_history(tmp_path: Path) -> tuple[Settings, set[str]]:
+    settings = Settings(
+        reminders_config_path=tmp_path / "reminders.yaml",
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
+    )
+    (tmp_path / "reminders.yaml").write_text("calendars:\n  - id: primary\n", encoding="utf-8")
+    start = datetime(2026, 7, 9, 9, 0, tzinfo=ZoneInfo("America/Montreal"))
+    database = Database(settings.database_path)
+    database.create_attempt(
+        ReminderCandidate(
+            CalendarEvent("primary", "Main", "e1", "i1", "Standup", "", start, start + timedelta(minutes=30), False),
+            "default-5m",
+            "5m",
+            start - timedelta(minutes=5),
+        ),
+        "standup reminder",
+    )
+    database.close()
+    # A clean close removes the write-ahead log, which is the state a read has to preserve.
+    assert not (tmp_path / "reminders.sqlite3-wal").exists()
+    return settings, directory_digest(tmp_path)
+
+
+def test_a_reminder_dry_run_leaves_the_data_directory_alone(tmp_path: Path) -> None:
+    # SQLite recreates the -wal and -shm sidecars to read a WAL database, even through a mode=ro
+    # connection, so reading the live file in place is not the same as changing nothing.
+    settings, before = _reminder_history(tmp_path)
+
+    result = pipeline.run(settings, dry_run=True, now=datetime(2026, 7, 9, 9, 0, tzinfo=ZoneInfo("America/Montreal")))
+
+    assert result.due == ["standup reminder"]
+    assert directory_digest(tmp_path) == before
+
+
+def test_a_reminder_dry_run_works_while_the_lock_is_held(tmp_path: Path) -> None:
+    # The every-minute reminder run holds this lock while it delivers. A dry run only reads, so it
+    # has no reason to wait for it, and no reason to fail.
+    settings, _ = _reminder_history(tmp_path)
+    now = datetime(2026, 7, 9, 9, 0, tzinfo=ZoneInfo("America/Montreal"))
+
+    with ProcessLock(settings.lock_path):
+        # Taking the lock is what creates the lock file here, so the comparison starts after it.
+        before = directory_digest(tmp_path)
+
+        assert pipeline.run(settings, dry_run=True, now=now).due == ["standup reminder"]
+
+        assert directory_digest(tmp_path) == before
+
+
+def test_a_reminder_dry_run_without_a_database_reports_nothing_due(tmp_path: Path) -> None:
+    settings = Settings(
+        reminders_config_path=tmp_path / "reminders.yaml",
+        database_path=tmp_path / "absent.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+    )
+    (tmp_path / "reminders.yaml").write_text("calendars:\n  - id: primary\n", encoding="utf-8")
+
+    assert pipeline.run(settings, dry_run=True).due == []
+
+
+def test_a_reminder_dry_run_reads_an_uninitialized_database_as_empty(tmp_path: Path) -> None:
+    # The database file is created before its schema is, so a first run that died between the two
+    # leaves a real, zero-byte database. Reading it raised sqlite3.OperationalError - not a
+    # ValueError, so it reached the operator as a traceback rather than an empty report.
+    from two_read_runtime.permissions import prepare_private_file
+
+    settings = Settings(
+        reminders_config_path=tmp_path / "reminders.yaml",
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+    )
+    (tmp_path / "reminders.yaml").write_text("calendars:\n  - id: primary\n", encoding="utf-8")
+    prepare_private_file(settings.database_path)
+    assert settings.database_path.stat().st_size == 0
+
+    assert pipeline.run(settings, dry_run=True).due == []

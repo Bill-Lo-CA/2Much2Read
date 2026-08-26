@@ -1,0 +1,509 @@
+import sqlite3
+from datetime import date, datetime, time
+from zoneinfo import ZoneInfo
+
+import pytest
+from conftest import directory_digest
+
+from two_bored_one_made import pipeline
+from two_bored_one_made.config import NudgeConfig, NudgesConfig, Settings, load_nudges
+from two_bored_one_made.storage import Database
+from two_read_runtime.discord import DiscordDeliveryError
+from two_read_runtime.locking import ProcessLock
+
+MONTREAL = ZoneInfo("America/Montreal")
+WEBHOOK = "https://discord.com/api/webhooks/123456789012345678/test-webhook-token"
+
+
+def nudge(**overrides: object) -> NudgeConfig:
+    values: dict[str, object] = {
+        "id": "stretch",
+        "message": "起來動一動",
+        "at": [time(9), time(14), time(21)],
+        "total_sends": 3,
+    }
+    values.update(overrides)
+    return NudgeConfig.model_validate(values)
+
+
+def at(hour: int, minute: int = 0) -> datetime:
+    return datetime(2026, 8, 21, hour, minute, tzinfo=MONTREAL)
+
+
+def settings(tmp_path, **overrides: object) -> Settings:
+    values: dict[str, object] = {
+        "discord_webhook_url": WEBHOOK,
+        "database_path": tmp_path / "2bored1made.sqlite3",
+        "lock_path": tmp_path / "2bored1made.lock",
+        "nudges_config_path": tmp_path / "nudges.yaml",
+    }
+    values.update(overrides)
+    return Settings(**values)
+
+
+def write_nudges(tmp_path, body: str) -> None:
+    (tmp_path / "nudges.yaml").write_text(body, encoding="utf-8")
+
+
+class TestDueSlots:
+    def test_a_slot_is_due_once_its_time_has_passed(self) -> None:
+        config = NudgesConfig(nudges=[nudge()])
+
+        assert pipeline.due_slots(config, {}, {}, at(8, 59)) == []
+        assert [slot.slot_time for slot in pipeline.due_slots(config, {}, {}, at(9, 0))] == [time(9)]
+
+    def test_only_one_slot_fires_per_run_so_a_backlog_trickles(self) -> None:
+        # A machine switched off all day reaches 21:05 with three slots owed. Sending all three at
+        # once is a burst of identical messages; the per-minute timer drains them one at a time.
+        config = NudgesConfig(nudges=[nudge()])
+
+        due = pipeline.due_slots(config, {}, {}, at(21, 5))
+
+        assert [slot.slot_time for slot in due] == [time(9)]
+
+    def test_a_delivered_slot_is_not_sent_again(self) -> None:
+        config = NudgesConfig(nudges=[nudge()])
+        states = {("stretch", "09:00"): ("delivered", 1)}
+
+        due = pipeline.due_slots(config, {"stretch": 1}, states, at(14, 30))
+
+        assert [slot.slot_time for slot in due] == [time(14)]
+
+    def test_a_failed_slot_is_retried_but_not_forever(self) -> None:
+        config = NudgesConfig(nudges=[nudge()])
+
+        retried = pipeline.due_slots(config, {}, {("stretch", "09:00"): ("failed", 1)}, at(9, 30))
+        assert [slot.slot_time for slot in retried] == [time(9)]
+
+        exhausted = pipeline.due_slots(config, {}, {("stretch", "09:00"): ("failed", pipeline.MAX_SLOT_ATTEMPTS)}, at(9, 30))
+        assert exhausted == []
+
+    def test_a_finished_nudge_stops(self) -> None:
+        config = NudgesConfig(nudges=[nudge(total_sends=3)])
+
+        assert pipeline.due_slots(config, {"stretch": 3}, {}, at(21, 0)) == []
+
+    def test_a_disabled_nudge_never_fires(self) -> None:
+        config = NudgesConfig(nudges=[nudge(enabled=False)])
+
+        assert pipeline.due_slots(config, {}, {}, at(21, 0)) == []
+
+    def test_yesterdays_missed_slot_is_dropped_rather_than_delivered_late(self) -> None:
+        # slot_states is keyed on today only, so a slot missed yesterday leaves no trace; what
+        # matters is that nothing from yesterday appears in the result.
+        config = NudgesConfig(nudges=[nudge(at=[time(9)])])
+
+        due = pipeline.due_slots(config, {}, {}, at(2, 0))
+
+        assert due == []
+
+
+class TestDelivery:
+    def test_a_failed_send_does_not_spend_one_of_the_sends(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 3\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: (_ for _ in ()).throw(DiscordDeliveryError()))
+
+        result = pipeline.run(settings(tmp_path), False, now=at(9, 30))
+
+        assert (result.status, result.sent, result.failed) == ("failed", 0, 1)
+        database = Database(tmp_path / "2bored1made.sqlite3")
+        try:
+            assert database.delivered_counts() == {}
+        finally:
+            database.close()
+
+    def test_a_delivered_send_counts_down(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 2\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+
+        result = pipeline.run(settings(tmp_path), False, now=at(9, 30))
+
+        assert (result.status, result.sent, result.completed) == ("ok", 1, [])
+        assert pipeline.status(settings(tmp_path), now=at(9, 30)).nudges[0].remaining == 1
+
+    def test_the_last_send_reports_the_nudge_complete(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 1\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+
+        assert pipeline.run(settings(tmp_path), False, now=at(9, 30)).completed == ["stretch"]
+        # A second run the same day has nothing left to send.
+        assert pipeline.run(settings(tmp_path), False, now=at(9, 31)).sent == 0
+
+    def test_running_twice_in_one_slot_sends_once(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
+        sends: list[str] = []
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: sends.append("x") or ["message-id"])
+
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+        pipeline.run(settings(tmp_path), False, now=at(9, 31))
+
+        assert sends == ["x"]
+
+    def test_a_mention_outside_the_allowlist_fails_instead_of_being_sent(self, tmp_path, monkeypatch) -> None:
+        write_nudges(
+            tmp_path,
+            "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 3\n    user_id: '456'\n",
+        )
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sent")))
+
+        result = pipeline.run(settings(tmp_path, discord_allowed_mention_ids="123"), False, now=at(9, 30))
+
+        assert result.failed_by_error_code == {pipeline.MENTION_NOT_ALLOWED: 1}
+
+    def test_an_allowed_mention_reaches_discord_as_a_mention(self, tmp_path, monkeypatch) -> None:
+        write_nudges(
+            tmp_path,
+            "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 3\n    user_id: '123'\n",
+        )
+        calls: list[dict[str, object]] = []
+
+        def fake_deliver(destination, content, username, **kwargs):  # type: ignore[no-untyped-def]
+            calls.append({"content": content, **kwargs})
+            return ["message-id"]
+
+        monkeypatch.setattr(pipeline, "deliver", fake_deliver)
+
+        pipeline.run(settings(tmp_path, discord_allowed_mention_ids="123"), False, now=at(9, 30))
+
+        assert calls[0]["allowed_user_ids"] == ["123"]
+        assert calls[0]["mention_user_ids"] == ["123"]
+
+
+class TestDestination:
+    def test_a_nudge_webhook_overrides_the_shared_one(self, tmp_path) -> None:
+        other = "https://discord.com/api/webhooks/876543210987654321/other-token"
+
+        destination = pipeline.nudge_destination(settings(tmp_path), nudge(webhook_url=other))
+
+        assert destination.webhook_url == other
+
+    def test_without_its_own_webhook_a_nudge_uses_the_configured_one(self, tmp_path) -> None:
+        assert pipeline.nudge_destination(settings(tmp_path), nudge()).webhook_url == WEBHOOK
+
+    def test_both_mode_still_resolves_to_a_single_destination(self, tmp_path) -> None:
+        # A nudge counts sends, so it cannot fan out: a run that reached one destination and not
+        # the other could not say whether it had spent one of the remaining sends.
+        configured = settings(tmp_path, discord_delivery_mode="both", discord_bot_token="token", discord_bot_channel_id="123")
+
+        assert pipeline.nudge_destination(configured, nudge()).transport == "webhook"
+
+
+class TestContent:
+    def test_the_message_is_sent_verbatim_apart_from_at_signs(self) -> None:
+        assert pipeline.nudge_content(nudge(message="ping @everyone")) == "ping @​everyone"
+
+    def test_no_progress_counter_is_appended_to_the_operators_words(self) -> None:
+        assert pipeline.nudge_content(nudge(message="起來動一動")) == "起來動一動"
+
+
+class TestConfig:
+    def test_times_are_sorted_and_must_be_unique(self, tmp_path) -> None:
+        assert nudge(at=[time(21), time(9)]).at == [time(9), time(21)]
+
+        with pytest.raises(ValueError, match="unique"):
+            nudge(at=[time(9), time(9)])
+
+    def test_a_blank_message_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="blank"):
+            nudge(message="   ")
+
+    def test_total_sends_must_be_positive(self) -> None:
+        with pytest.raises(ValueError):
+            nudge(total_sends=0)
+
+    def test_a_non_numeric_user_id_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="numeric"):
+            nudge(user_id="someone")
+
+    def test_a_webhook_that_is_not_discord_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="webhook_url"):
+            nudge(webhook_url="https://example.com/api/webhooks/1/token")
+
+    def test_duplicate_ids_are_rejected(self) -> None:
+        with pytest.raises(ValueError, match="unique"):
+            NudgesConfig(nudges=[nudge(), nudge()])
+
+    def test_an_unknown_field_is_rejected(self) -> None:
+        with pytest.raises(ValueError):
+            NudgeConfig.model_validate({"id": "a", "message": "b", "at": ["09:00"], "total_sends": 1, "evry": "2h"})
+
+    def test_a_missing_file_names_itself(self, tmp_path) -> None:
+        with pytest.raises(ValueError, match="not found"):
+            load_nudges(tmp_path / "absent.yaml")
+
+    def test_an_empty_file_loads_as_no_nudges(self, tmp_path) -> None:
+        (tmp_path / "nudges.yaml").write_text("", encoding="utf-8")
+
+        assert load_nudges(tmp_path / "nudges.yaml").nudges == []
+
+
+class TestReset:
+    def test_reset_restarts_the_count(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 1\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+
+        result = pipeline.reset(settings(tmp_path), "stretch")
+
+        assert result.cleared == 1
+        assert pipeline.status(settings(tmp_path), now=at(9, 30)).nudges[0].delivered == 0
+
+    def test_resetting_an_unknown_nudge_is_an_error(self, tmp_path) -> None:
+        write_nudges(tmp_path, "nudges: []\n")
+
+        with pytest.raises(ValueError, match="unknown nudge id"):
+            pipeline.reset(settings(tmp_path), "ghost")
+
+
+class TestStatus:
+    def test_a_finished_nudge_reports_no_next_slot(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 1\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+
+        view = pipeline.status(settings(tmp_path), now=at(9, 30)).nudges[0]
+
+        assert (view.done, view.next_slot, view.remaining) == (True, None, 0)
+
+
+class TestDryRun:
+    def test_a_dry_run_reports_what_would_be_sent_without_sending(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 3\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("sent")))
+
+        result = pipeline.run(settings(tmp_path), True, now=at(9, 30))
+
+        assert result.due == ["stretch@09:00"]
+
+
+class TestCompleted:
+    def test_only_the_run_that_finished_a_nudge_reports_it(self, tmp_path, monkeypatch) -> None:
+        # Listing every already-finished nudge would repeat the same names in every result for as
+        # long as they stay in the configuration.
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00','14:00']\n    total_sends: 1\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+
+        assert pipeline.run(settings(tmp_path), False, now=at(9, 30)).completed == ["stretch"]
+        assert pipeline.run(settings(tmp_path), False, now=at(14, 30)).completed == []
+
+    def test_a_run_that_did_not_finish_a_nudge_reports_nothing(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+
+        assert pipeline.run(settings(tmp_path), False, now=at(9, 30)).completed == []
+
+
+class TestRemovedNudges:
+    def test_a_nudge_deleted_from_the_configuration_can_still_be_reset(self, tmp_path, monkeypatch) -> None:
+        # Otherwise its rows are unreachable, and re-adding the same id later would inherit a
+        # countdown that was already spent.
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+        write_nudges(tmp_path, "nudges: []\n")
+
+        assert pipeline.reset(settings(tmp_path), "stretch").cleared == 1
+
+    def test_an_id_with_neither_configuration_nor_history_is_still_an_error(self, tmp_path) -> None:
+        write_nudges(tmp_path, "nudges: []\n")
+
+        with pytest.raises(ValueError, match="unknown nudge id"):
+            pipeline.reset(settings(tmp_path), "ghost")
+
+
+class TestDaylightSaving:
+    def test_the_repeated_hour_still_sends_only_once(self, tmp_path, monkeypatch) -> None:
+        # America/Montreal runs 01:30 twice on 2026-11-01. The slot is keyed on the local date and
+        # wall-clock time, so the second 01:30 finds the slot already delivered.
+        write_nudges(tmp_path, "nudges:\n  - id: night\n    message: hi\n    at: ['01:30']\n    total_sends: 5\n")
+        sends: list[str] = []
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: sends.append("x") or ["message-id"])
+        first = datetime(2026, 11, 1, 1, 45, tzinfo=MONTREAL, fold=0)
+        second = datetime(2026, 11, 1, 1, 45, tzinfo=MONTREAL, fold=1)
+        assert first.utcoffset() != second.utcoffset()
+
+        pipeline.run(settings(tmp_path), False, now=first)
+        pipeline.run(settings(tmp_path), False, now=second)
+
+        assert sends == ["x"]
+
+    def test_a_slot_inside_the_skipped_hour_still_fires_that_day(self, tmp_path, monkeypatch) -> None:
+        # 02:30 does not exist on 2026-03-08; the nudge must not be silently lost for the day.
+        write_nudges(tmp_path, "nudges:\n  - id: spring\n    message: hi\n    at: ['02:30']\n    total_sends: 5\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+
+        result = pipeline.run(settings(tmp_path), False, now=datetime(2026, 3, 8, 9, 0, tzinfo=MONTREAL))
+
+        assert result.sent == 1
+
+
+class TestReadsDoNotWrite:
+    def _existing_history(self, tmp_path, monkeypatch) -> set[str]:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+        # A clean close removes the write-ahead log, which is the state a read has to preserve.
+        assert not (tmp_path / "2bored1made.sqlite3-wal").exists()
+        return directory_digest(tmp_path)
+
+    def test_a_dry_run_against_an_existing_database_writes_nothing(self, tmp_path, monkeypatch) -> None:
+        # SQLite recreates the -wal and -shm sidecars to read a WAL database, even through a
+        # mode=ro connection, so reading the live file is not the same as not writing.
+        before = self._existing_history(tmp_path, monkeypatch)
+
+        pipeline.run(settings(tmp_path), True, now=at(9, 30))
+
+        assert directory_digest(tmp_path) == before
+
+    def test_status_against_an_existing_database_writes_nothing(self, tmp_path, monkeypatch) -> None:
+        before = self._existing_history(tmp_path, monkeypatch)
+
+        pipeline.status(settings(tmp_path), now=at(9, 30))
+
+        assert directory_digest(tmp_path) == before
+
+    def test_a_read_still_sees_what_the_last_run_recorded(self, tmp_path, monkeypatch) -> None:
+        self._existing_history(tmp_path, monkeypatch)
+
+        assert pipeline.status(settings(tmp_path), now=at(9, 30)).nudges[0].delivered == 1
+        assert pipeline.run(settings(tmp_path), True, now=at(14, 0)).due == []
+
+    def test_a_read_works_while_the_lock_is_held(self, tmp_path, monkeypatch) -> None:
+        # A dry run that cannot run during the thing it exists to describe is not much of a dry
+        # run, and a reader has no reason to wait for a writer: it only reads.
+        before = self._existing_history(tmp_path, monkeypatch)
+        configured = settings(tmp_path)
+
+        with ProcessLock(configured.lock_path):
+            assert pipeline.status(configured, now=at(9, 30)).nudges[0].delivered == 1
+            assert pipeline.run(configured, True, now=at(9, 30)).due == []
+
+        assert directory_digest(tmp_path) == before
+
+    def test_a_read_works_while_a_writer_holds_the_database_open(self, tmp_path, monkeypatch) -> None:
+        # A writer that has committed leaves frames in the -wal and marks in the -shm. Reading the
+        # live database there creates no file, but moves the reader marks inside the -shm - same
+        # name, same size, same mtime, different bytes - so only a digest sees it.
+        self._existing_history(tmp_path, monkeypatch)
+        writer = Database(tmp_path / "2bored1made.sqlite3")
+        try:
+            writer.record_send("stretch", date(2026, 8, 21), time(14), message="hi", destination_key="k", delivered=True)
+            assert (tmp_path / "2bored1made.sqlite3-wal").exists()
+            assert (tmp_path / "2bored1made.sqlite3-shm").exists()
+            before = directory_digest(tmp_path)
+
+            view = pipeline.status(settings(tmp_path), now=at(9, 30)).nudges[0]
+
+            assert view.delivered == 2
+            assert directory_digest(tmp_path) == before
+        finally:
+            writer.close()
+
+    def test_a_read_never_opens_the_live_database(self, tmp_path, monkeypatch) -> None:
+        # The digest catches what a read changed; this catches what it touched at all, which does
+        # not depend on the write-ahead log happening to be in a state that shows the difference.
+        self._existing_history(tmp_path, monkeypatch)
+        # With the sidecars present a read-only connection to the live file would create nothing,
+        # so this is the state the assertion has to be made in.
+        writer = Database(tmp_path / "2bored1made.sqlite3")
+        writer.record_send("stretch", date(2026, 8, 21), time(14), message="hi", destination_key="k", delivered=True)
+        opened: list[str] = []
+        real_connect = sqlite3.connect
+
+        def recording_connect(target, *args, **kwargs):  # type: ignore[no-untyped-def]
+            opened.append(str(target))
+            return real_connect(target, *args, **kwargs)
+
+        monkeypatch.setattr(sqlite3, "connect", recording_connect)
+        try:
+            pipeline.status(settings(tmp_path), now=at(9, 30))
+            pipeline.run(settings(tmp_path), True, now=at(9, 30))
+        finally:
+            monkeypatch.undo()
+            writer.close()
+
+        live = str(tmp_path / "2bored1made.sqlite3")
+        assert opened, "the reads should have opened something"
+        assert not [target for target in opened if live in target]
+
+    def test_a_read_does_not_even_create_the_lock_file(self, tmp_path, monkeypatch) -> None:
+        # Taking the lock creates the lock file when it is missing, which is itself a change to the
+        # data directory; a missing lock file also means no writer has ever run here.
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
+        Database(tmp_path / "2bored1made.sqlite3").close()
+        before = directory_digest(tmp_path)
+        assert "2bored1made.lock" not in before
+
+        pipeline.status(settings(tmp_path), now=at(9, 30))
+        pipeline.run(settings(tmp_path), True, now=at(9, 30))
+
+        assert directory_digest(tmp_path) == before
+
+
+class TestNextSlotAgreesWithRun:
+    """What status reports as the next firing has to be what the next run actually sends."""
+
+    def _config(self, tmp_path) -> str:
+        return "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00','14:00','21:00']\n    total_sends: 3\n"
+
+    @pytest.mark.parametrize("hour", [9, 14, 21])
+    def test_an_owed_slot_is_the_next_firing_not_tomorrow(self, tmp_path, hour) -> None:
+        # At 21:05 an untouched nudge is still owed its 09:00, and the next per-minute run delivers
+        # it; reporting tomorrow's 09:00 would describe a different program.
+        write_nudges(tmp_path, self._config(tmp_path))
+        now = at(hour, 5)
+
+        view = pipeline.status(settings(tmp_path), now=now).nudges[0]
+        due = pipeline.run(settings(tmp_path), True, now=now).due
+
+        assert due == ["stretch@09:00"]
+        assert view.next_slot == at(9, 0)
+        assert view.overdue is True
+
+    def test_nothing_owed_reports_the_next_time_of_day(self, tmp_path) -> None:
+        write_nudges(tmp_path, self._config(tmp_path))
+
+        view = pipeline.status(settings(tmp_path), now=at(8, 0)).nudges[0]
+
+        assert (view.next_slot, view.overdue) == (at(9, 0), False)
+        assert pipeline.run(settings(tmp_path), True, now=at(8, 0)).due == []
+
+    def test_a_delivered_slot_moves_the_report_on(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, self._config(tmp_path))
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+
+        view = pipeline.status(settings(tmp_path), now=at(9, 31)).nudges[0]
+
+        assert (view.next_slot, view.overdue) == (at(14, 0), False)
+
+    def test_an_exhausted_slot_is_not_reported_as_owed(self, tmp_path, monkeypatch) -> None:
+        # A slot that has spent its attempts will not be retried today, so it is not what fires next.
+        write_nudges(tmp_path, self._config(tmp_path))
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: (_ for _ in ()).throw(DiscordDeliveryError()))
+        for minute in range(pipeline.MAX_SLOT_ATTEMPTS):
+            pipeline.run(settings(tmp_path), False, now=at(9, 30 + minute))
+
+        view = pipeline.status(settings(tmp_path), now=at(9, 40)).nudges[0]
+
+        assert (view.next_slot, view.overdue) == (at(14, 0), False)
+        assert pipeline.run(settings(tmp_path), True, now=at(9, 40)).due == []
+
+    def test_the_last_day_rolls_over_to_tomorrow(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+
+        view = pipeline.status(settings(tmp_path), now=at(23, 0)).nudges[0]
+
+        assert view.next_slot is not None
+        assert (view.next_slot.date(), view.overdue) == (at(9, 0).date().replace(day=22), False)
+
+    def test_a_finished_nudge_reports_neither(self, tmp_path, monkeypatch) -> None:
+        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 1\n")
+        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
+        pipeline.run(settings(tmp_path), False, now=at(9, 30))
+
+        view = pipeline.status(settings(tmp_path), now=at(21, 0)).nudges[0]
+
+        assert (view.done, view.next_slot, view.overdue) == (True, None, False)

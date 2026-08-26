@@ -1,0 +1,16 @@
+# Recurring Discord messages. Each nudge fires at fixed times of day and stops for good once it has
+# been delivered total_sends times. A send that fails does not count, so an outage costs nothing.
+timezone: America/Montreal
+
+nudges: []
+
+# nudges:
+#   - id: stretch
+#     message: 起來動一動
+#     at: ["09:00", "14:00", "21:00"]
+#     total_sends: 30
+#     # Optional. Must also appear in DISCORD_ALLOWED_MENTION_IDS.
+#     user_id: "123456789012345678"
+#     # Optional. Defaults to DISCORD_WEBHOOK_URL from the env file.
+#     webhook_url: https://discord.com/api/webhooks/123456789012345678/token
+#     enabled: true
