@@ -38,5 +38,6 @@ def unknown_env_keys(path: Path, fields: Iterable[str], *, also_allowed: Iterabl
         values: Mapping[str, str | None] = dotenv_values(path, encoding="utf-8")
     except OSError:
         return []
-    known = {name.casefold() for name in fields} | {name.casefold() for name in also_allowed}
-    return sorted(key for key in values if key.casefold() not in known)
+    known = {name.casefold() for name in fields}
+    allowed = set(also_allowed)
+    return sorted(key for key in values if key.casefold() not in known and key not in allowed)

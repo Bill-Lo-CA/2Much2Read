@@ -75,6 +75,22 @@ def test_run_and_backfill_exit_from_the_delivery_result(
     assert json.loads(result.stdout)["status"] == status
 
 
+@pytest.mark.parametrize("command", [["run"], ["backfill"]])
+def test_run_and_backfill_report_invalid_settings_without_a_traceback(
+    command: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def invalid_settings(**kwargs: object) -> Settings:
+        raise ValueError("unknown IANA timezone")
+
+    monkeypatch.setattr(cli, "Settings", invalid_settings)
+
+    result = CliRunner().invoke(cli.app, command)
+
+    assert result.exit_code == 2
+    assert "unknown IANA timezone" in result.output
+    assert "Traceback" not in result.output
+
+
 def test_run_avoids_ansi_progress_when_stderr_is_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run_pipeline(*args: object, **kwargs: object) -> NewsletterRunResult:
         return NewsletterRunResult(status="ok", discovered=1, processed=1, failed=0, delivered=0)

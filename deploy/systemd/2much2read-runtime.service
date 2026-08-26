@@ -1,7 +1,5 @@
 [Unit]
 Description=2much2read Gmail Digest
-Wants=network-online.target
-After=network-online.target
 
 [Service]
 Type=oneshot

@@ -1,7 +1,5 @@
 [Unit]
 Description=2bored1made Recurring Nudges
-Wants=network-online.target
-After=network-online.target
 
 [Service]
 Type=oneshot

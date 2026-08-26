@@ -297,7 +297,7 @@ def test_newsletter_installer_rejects_invalid_schedule(tmp_path: Path, setting: 
             "uninstall-2much2read-user-service.sh",
             ["2much2read-runtime.service", "2much2read-runtime.timer"],
             "disable --now 2much2read-runtime.timer",
-            None,
+            "stop 2much2read-runtime.service",
         ),
         (
             "uninstall-2busy1miss-user-service.sh",
@@ -326,7 +326,10 @@ def test_uninstallers_remove_only_their_unit_files(
     fake_bin.mkdir()
     log = tmp_path / "systemctl.log"
     systemctl = fake_bin / "systemctl"
-    systemctl.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n', encoding="utf-8")
+    systemctl.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n[ "$2" = "is-active" ] && exit 3\nexit 0\n',
+        encoding="utf-8",
+    )
     systemctl.chmod(0o755)
 
     subprocess.run(
@@ -345,6 +348,52 @@ def test_uninstallers_remove_only_their_unit_files(
     if stop_call is not None:
         assert stop_call in calls
     assert "daemon-reload" in calls
+
+
+@pytest.mark.parametrize(
+    ("script", "units"),
+    [
+        (
+            "uninstall-2much2read-user-service.sh",
+            ["2much2read-runtime.service", "2much2read-runtime.timer"],
+        ),
+        (
+            "uninstall-2busy1miss-user-service.sh",
+            [
+                "2busy1miss-runtime.service",
+                "2busy1miss-runtime.timer",
+                "2busy1miss-runtime-agenda.service",
+                "2busy1miss-runtime-agenda.timer",
+            ],
+        ),
+    ],
+)
+def test_uninstallers_keep_unit_files_when_a_service_will_not_stop(tmp_path: Path, script: str, units: list[str]) -> None:
+    root = Path(__file__).parents[1]
+    systemd_dir = tmp_path / "home" / ".config" / "systemd" / "user"
+    systemd_dir.mkdir(parents=True)
+    for unit in units:
+        (systemd_dir / unit).write_text("owned", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        '#!/bin/sh\n[ "$2" = "stop" ] && exit 1\n[ "$2" = "is-active" ] && exit 0\nexit 0\n',
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", f"scripts/{script}"],
+        cwd=root,
+        env=os.environ | {"HOME": str(tmp_path / "home"), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert "active" in result.stderr
+    assert all((systemd_dir / unit).exists() for unit in units)
 
 
 @pytest.mark.parametrize(

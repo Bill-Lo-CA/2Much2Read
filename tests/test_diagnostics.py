@@ -272,7 +272,8 @@ def test_doctor_names_misspelled_environment_keys_but_not_the_installer_ones(
         "DIGEST_SCHEDULE_TIME=08:00\n"
         "DIGEST_SCHEDULE_TIMEZONE=America/Montreal\n"
         "DIGEST_TIMEZON=typo\n"
-        "OLLAMA_BASE_RUL=typo\n",
+        "OLLAMA_BASE_RUL=typo\n"
+        "digest_schedule_time=09:00\n",
         encoding="utf-8",
     )
     monkeypatch.setattr(diagnostics, "env_file", lambda _: env_path)
@@ -282,7 +283,7 @@ def test_doctor_names_misspelled_environment_keys_but_not_the_installer_ones(
 
     assert result.status == "warning"
     assert result.checks["env_keys"] == "unknown"
-    assert result.unknown_env_keys == ["DIGEST_TIMEZON", "OLLAMA_BASE_RUL"]
+    assert result.unknown_env_keys == ["DIGEST_TIMEZON", "OLLAMA_BASE_RUL", "digest_schedule_time"]
 
 
 def test_doctor_reports_no_unknown_keys_when_the_environment_file_is_clean(

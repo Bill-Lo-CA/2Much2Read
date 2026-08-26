@@ -52,9 +52,9 @@ DATA_ROOT = "%h/.local/share/2much2read-runtime"
 )
 def test_runtime_units_use_the_runtime_sandbox(unit: str, env_name: str, read_write_paths: str) -> None:
     service = (UNITS / unit).read_text(encoding="utf-8")
-    lines = set(service.splitlines())
+    lines = service.splitlines()
 
-    assert lines >= REQUIRED_SANDBOX
+    assert set(lines) >= REQUIRED_SANDBOX
     assert f"ReadWritePaths={read_write_paths}" in lines
     assert f"EnvironmentFile={CONFIG_ROOT}/.{env_name}.env" in service
     assert sum(line.startswith("ReadWritePaths=") for line in lines) == 1
@@ -64,14 +64,18 @@ def test_runtime_units_use_the_runtime_sandbox(unit: str, env_name: str, read_wr
 
 @pytest.mark.parametrize(
     "unit",
-    ["2much2read-runtime.service", "2busy1miss-runtime.service", "2busy1miss-runtime-agenda.service"],
+    [
+        "2much2read-runtime.service",
+        "2busy1miss-runtime.service",
+        "2busy1miss-runtime-agenda.service",
+        "2bored1made-runtime.service",
+    ],
 )
-def test_units_pull_in_the_network_rather_than_only_ordering_after_it(unit: str) -> None:
-    """After= alone orders against a target nothing has asked for, so it may never be reached."""
+def test_user_units_do_not_depend_on_the_system_managers_network_target(unit: str) -> None:
+    """The user manager cannot order these units against a target owned by the system manager."""
     service = (UNITS / unit).read_text(encoding="utf-8")
 
-    assert "Wants=network-online.target" in service
-    assert "After=network-online.target" in service
+    assert "network-online.target" not in service
 
 
 def test_only_the_model_loading_unit_opts_out_of_device_isolation() -> None:

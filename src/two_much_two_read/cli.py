@@ -230,12 +230,15 @@ def run_command(
 ) -> None:
     if force and (dry_run or source is None or max_messages is None):
         raise typer.BadParameter("--force requires --source and --max-messages and cannot use --dry-run")
-    emit_delivery_result(
-        run_with_live_progress(
-            "2much2read run",
-            lambda status: run_pipeline(Settings(), source, max_messages, not deliver, dry_run, force, status=status),
-        )
+    try:
+        settings = Settings()
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    result = run_with_live_progress(
+        "2much2read run",
+        lambda status: run_pipeline(settings, source, max_messages, not deliver, dry_run, force, status=status),
     )
+    emit_delivery_result(result)
 
 
 @app.command()
@@ -244,4 +247,9 @@ def backfill(
     source: Annotated[str | None, typer.Option()] = None,
     deliver: Annotated[bool, typer.Option()] = False,
 ) -> None:
-    emit_delivery_result(run_pipeline(Settings(gmail_lookback_days=days), source, None, not deliver, False))
+    try:
+        settings = Settings(gmail_lookback_days=days)
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    result = run_pipeline(settings, source, None, not deliver, False)
+    emit_delivery_result(result)

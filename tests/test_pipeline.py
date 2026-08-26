@@ -2000,10 +2000,10 @@ def test_only_shortlisted_pairs_reach_the_model() -> None:
 
 
 def test_hacker_news_skipped_items_reach_the_run_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A feed whose items mostly failed to read looked exactly like a quiet one.
+    """Unreadable feed items fail the run while normally filtered items remain skipped.
 
-    discover already counts every unreadable item into HackerNewsDiscovery.skipped; the pipeline
-    took .candidates and dropped the rest, so the number never left the client.
+    The old aggregate count could not distinguish an API failure from an ineligible story, so a
+    broken item endpoint looked like a quiet news day and exited zero.
     """
     sources_path = tmp_path / "sources.yaml"
     sources_path.write_text(
@@ -2018,7 +2018,7 @@ def test_hacker_news_skipped_items_reach_the_run_result(tmp_path: Path, monkeypa
 
     class FakeHackerNewsClient:
         def discover(self, *args: object, **kwargs: object) -> HackerNewsDiscovery:
-            return HackerNewsDiscovery([], 17)
+            return HackerNewsDiscovery([], skipped=17, unreadable=17)
 
         def close(self) -> None:
             pass
@@ -2031,7 +2031,7 @@ def test_hacker_news_skipped_items_reach_the_run_result(tmp_path: Path, monkeypa
 
     result = run_pipeline(settings, no_deliver=True)
 
-    assert (result.status, result.processed, result.skipped) == ("no_content", 0, 17)
+    assert (result.status, result.processed, result.failed, result.skipped) == ("partial", 0, 17, 17)
 
 
 class _NoopReranker:

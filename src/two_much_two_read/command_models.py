@@ -17,9 +17,8 @@ class NewsletterRunResult(CommandResult):
     discovered: int
     processed: int
     failed: int
-    # Feed items Hacker News would not give up, carried out of HackerNewsDiscovery. Omitted when
-    # zero so an ordinary run's output is unchanged; a feed that mostly failed used to look like a
-    # quiet one, because only .candidates was read.
+    # Hacker News feed items rejected before processing, including normal filtering and unreadable
+    # items. Omitted when zero so an ordinary run's output is unchanged.
     skipped: int | None = None
     delivered: int
     delivery_succeeded: int = 0

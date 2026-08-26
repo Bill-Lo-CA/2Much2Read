@@ -494,13 +494,14 @@ def _process_hackernews_source(
             candidates.append(candidate)
     else:
         status(f"{source.id}: scanning stories")
-        # discover counts every item it could not read into `skipped`. Taking only .candidates made
-        # a feed whose items mostly failed indistinguishable from a quiet one.
+        # Keep normal filtering in `skipped`, but count unreadable items as failures so a broken
+        # item endpoint cannot make a scheduled run look like a quiet news day.
         discovery = hackernews.discover(source, now, limit=source.max_story_candidates)
         candidates = discovery.candidates
         skipped = discovery.skipped
-        if skipped:
-            status(f"{source.id}: skipped {skipped} unreadable stor{'y' if skipped == 1 else 'ies'}")
+        failed += discovery.unreadable
+        if discovery.unreadable:
+            status(f"{source.id}: failed to read {discovery.unreadable} stor{'y' if discovery.unreadable == 1 else 'ies'}")
 
     for candidate in candidates:
         if attempted >= limit:
