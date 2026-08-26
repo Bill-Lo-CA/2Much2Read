@@ -8,7 +8,7 @@ import typer
 from pydantic import BaseModel
 
 from two_read_runtime.discord import DiscordDeliveryError, deliver, delivery_error_code
-from two_read_runtime.paths import directory_is_creatable, env_file
+from two_read_runtime.paths import config_dir, data_dir, directory_is_creatable, env_file
 from two_read_runtime.permissions import private_directory_status, private_file_status, sqlite_files_status
 from two_read_runtime.settings_validation import unknown_env_keys
 
@@ -82,6 +82,11 @@ def doctor() -> None:
         checks["nudges"] = "missing" if isinstance(error, NudgesConfigNotFound) else "invalid"
         checks["nudges_deliverable"] = "unknown"
     checks["nudges_file"] = private_file_status(settings.nudges_config_path, missing_ok=True)
+    # This tool has no installer, so README.md carries the setup and nothing chmods the shared
+    # roots on its behalf. Checking only the leaf is what let the documented commands leave
+    # ~/.local/share/2much2read-runtime at the default mode without anything saying so.
+    checks["config_dir"] = private_directory_status(config_dir(), missing_ok=True)
+    checks["data_root"] = private_directory_status(data_dir(), missing_ok=True)
     checks["data_dir"] = private_directory_status(settings.database_path.parent, missing_ok=True)
     checks["database"] = sqlite_files_status(settings.database_path)
     checks["lock_file"] = private_file_status(settings.lock_path, missing_ok=True)

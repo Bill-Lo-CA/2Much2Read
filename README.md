@@ -358,8 +358,11 @@ nudges are due.
 
 ```bash
 uv sync --all-groups
-install -d -m 700 "$HOME/.config/2much2read-runtime" \
-  "$HOME/.local/share/2much2read-runtime/2bored1made"
+# One level at a time: `install -d -m MODE a/b` applies the mode to the leaf only, and the
+# shared data root has to be 0700 as well. `2bored1made doctor` reports both.
+install -d -m 700 "$HOME/.config/2much2read-runtime"
+install -d -m 700 "$HOME/.local/share/2much2read-runtime"
+install -d -m 700 "$HOME/.local/share/2much2read-runtime/2bored1made"
 install -d "$HOME/.config/systemd/user"
 install -m 600 config/2bored1made.env.example \
   "$HOME/.config/2much2read-runtime/.2bored1made.env"
