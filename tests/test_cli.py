@@ -50,6 +50,31 @@ def test_run_help_uses_clear_delivery_flags_without_resend() -> None:
     assert "--resend" not in help_text
 
 
+@pytest.mark.parametrize("command", [["run"], ["backfill"]])
+@pytest.mark.parametrize(
+    ("status", "exit_code"),
+    [
+        # A digest that was built and then failed to deliver is the case the timer has to notice.
+        ("partial", 1),
+        # These two are runs that correctly had nothing to deliver, not failures.
+        ("no_content", 0),
+        ("skipped", 0),
+    ],
+)
+def test_run_and_backfill_exit_from_the_delivery_result(
+    command: list[str], status: str, exit_code: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run_pipeline(*args: object, **kwargs: object) -> NewsletterRunResult:
+        return NewsletterRunResult(status=status, discovered=1, processed=1, failed=0, delivered=0)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(cli, "run_pipeline", fake_run_pipeline)
+
+    result = CliRunner().invoke(cli.app, command)
+
+    assert result.exit_code == exit_code
+    assert json.loads(result.stdout)["status"] == status
+
+
 def test_run_avoids_ansi_progress_when_stderr_is_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
     def fake_run_pipeline(*args: object, **kwargs: object) -> NewsletterRunResult:
         return NewsletterRunResult(status="ok", discovered=1, processed=1, failed=0, delivered=0)

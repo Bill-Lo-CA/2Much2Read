@@ -137,7 +137,9 @@ def test_send_both_reports_a_partial_delivery(monkeypatch) -> None:
     monkeypatch.setattr(cli, "deliver", fake_deliver)
     result = CliRunner().invoke(cli.app, ["send", "--message", "Build failed"])
 
-    assert result.exit_code == 0
+    # One destination reached and one missed is still "partial", but a caller that only reads the
+    # exit status has to be told something went wrong.
+    assert result.exit_code == 1
     assert json.loads(result.stdout) == {
         "status": "partial",
         "discord_message_ids": ["webhook-message"],
@@ -145,6 +147,33 @@ def test_send_both_reports_a_partial_delivery(monkeypatch) -> None:
         "delivery_failed": 1,
         "failed_by_error_code": {"DISCORD_BOT_FORBIDDEN": 1},
     }
+
+
+def test_send_reports_failed_when_no_destination_was_reached(monkeypatch) -> None:
+    # The default deployment has one webhook, so "partial" was the only word this command could say
+    # about a send that reached nobody - and it said it while exiting zero.
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: Settings(discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token"),
+    )
+    monkeypatch.setattr(cli, "deliver", lambda *args, **kwargs: (_ for _ in ()).throw(cli.DiscordDeliveryError()))
+
+    result = CliRunner().invoke(cli.app, ["send", "--message", "Build failed"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.stdout)
+    assert (payload["status"], payload["delivery_succeeded"], payload["delivery_failed"]) == ("failed", 0, 1)
+
+
+def test_send_reports_a_broken_configuration_instead_of_a_traceback(monkeypatch) -> None:
+    monkeypatch.setattr(cli, "Settings", lambda: Settings(discord_webhook_url="not-a-discord-webhook"))
+
+    result = CliRunner().invoke(cli.app, ["send", "--message", "Build failed"])
+
+    assert result.exit_code == 2
+    assert "DISCORD_WEBHOOK_INVALID" in result.output
+    assert "Traceback" not in result.output
 
 
 ONE_NUDGE = "nudges:\n  - id: stretch\n    message: hi\n    at: ['00:01']\n    total_sends: 2\n"

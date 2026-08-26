@@ -128,9 +128,16 @@ def send(
     if invalid_ids := set(mention_ids) - settings.allowed_mention_ids:
         raise typer.BadParameter(f"mention IDs are not allowed: {', '.join(sorted(invalid_ids))}")
     content = message.replace("@", "@\u200b")
+    # Resolved once, and inside the handler: every other command in this file reports a broken
+    # Discord configuration as a parameter error, and calling this in the loop header made `send`
+    # the one that answered with a traceback instead.
+    try:
+        destinations = settings.discord_destinations()
+    except DiscordDeliveryError as error:
+        raise typer.BadParameter(str(error)) from error
     message_ids: list[str] = []
     failed_by_error_code: dict[str, int] = {}
-    for destination in settings.discord_destinations():
+    for destination in destinations:
         try:
             message_ids.extend(
                 deliver(
@@ -144,11 +151,15 @@ def send(
         except DiscordDeliveryError as error:
             code = delivery_error_code(error)
             failed_by_error_code[code] = failed_by_error_code.get(code, 0) + 1
+    failed = sum(failed_by_error_code.values())
     result = SendResult(
-        status="partial" if failed_by_error_code else "ok",
+        # The same three-way verdict the scheduled path already computes: nothing delivered is a
+        # failure, not a partial one. With a single destination - the default - "partial" was the
+        # only word this command could say about a send that reached nobody.
+        status="failed" if failed and not message_ids else "partial" if failed else "ok",
         discord_message_ids=message_ids,
-        delivery_succeeded=len(settings.discord_destinations()) - sum(failed_by_error_code.values()),
-        delivery_failed=sum(failed_by_error_code.values()),
+        delivery_succeeded=len(destinations) - failed,
+        delivery_failed=failed,
         failed_by_error_code=failed_by_error_code,
     )
-    typer.echo(json.dumps(result.model_dump()))
+    emit_delivery_result(result)

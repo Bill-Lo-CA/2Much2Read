@@ -162,7 +162,7 @@ def agenda_command(
         parsed = date.fromisoformat(day)
     except ValueError as error:
         raise typer.BadParameter("date must use YYYY-MM-DD") from error
-    emit(run_with_elapsed("2busy1miss agenda", lambda: agenda(Settings(), parsed, dry_run, force)))
+    emit_delivery_result(run_with_elapsed("2busy1miss agenda", lambda: agenda(Settings(), parsed, dry_run, force)))
 
 
 @app.command("agenda-next-day")
@@ -171,7 +171,9 @@ def agenda_next_day_command(
     force: Annotated[bool, typer.Option()] = False,
     scheduled: Annotated[bool, typer.Option()] = False,
 ) -> None:
-    emit(run_with_elapsed("2busy1miss agenda next day", lambda: next_day_agenda(Settings(), dry_run, force, scheduled=scheduled)))
+    emit_delivery_result(
+        run_with_elapsed("2busy1miss agenda next day", lambda: next_day_agenda(Settings(), dry_run, force, scheduled=scheduled))
+    )
 
 
 @app.command("agenda-retry")

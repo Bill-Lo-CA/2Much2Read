@@ -74,6 +74,12 @@ def invoke(operation: Callable[[], BaseModel]) -> None:
 
 
 def emit_delivery_result(result: BaseModel) -> None:
+    """Emit a result and let its status set the exit code.
+
+    A scheduled unit that exits zero after a failed delivery reports success to systemd. Only
+    "partial" and "failed" are failures: "no_content" and "skipped" are runs that correctly had
+    nothing to deliver.
+    """
     emit(result)
     if getattr(result, "status", "ok") in {"partial", "failed"}:
         raise typer.Exit(code=1)
@@ -224,7 +230,7 @@ def run_command(
 ) -> None:
     if force and (dry_run or source is None or max_messages is None):
         raise typer.BadParameter("--force requires --source and --max-messages and cannot use --dry-run")
-    emit(
+    emit_delivery_result(
         run_with_live_progress(
             "2much2read run",
             lambda status: run_pipeline(Settings(), source, max_messages, not deliver, dry_run, force, status=status),
@@ -238,4 +244,4 @@ def backfill(
     source: Annotated[str | None, typer.Option()] = None,
     deliver: Annotated[bool, typer.Option()] = False,
 ) -> None:
-    emit(run_pipeline(Settings(gmail_lookback_days=days), source, None, not deliver, False))
+    emit_delivery_result(run_pipeline(Settings(gmail_lookback_days=days), source, None, not deliver, False))

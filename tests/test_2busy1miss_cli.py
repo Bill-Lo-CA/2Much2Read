@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -6,7 +7,7 @@ from typer.testing import CliRunner
 
 from two_busy_one_miss import cli
 from two_busy_one_miss.config import Settings
-from two_busy_one_miss.pipeline import AgendaRetryResult, ReminderRetryResult, ReminderRunResult
+from two_busy_one_miss.pipeline import AgendaDeliveryResult, AgendaRetryResult, ReminderRetryResult, ReminderRunResult
 from two_read_runtime.discord import DiscordDeliveryError
 
 
@@ -100,34 +101,51 @@ def test_doctor_redacts_missing_config_path_and_reports_custom_runtime(tmp_path:
 
 
 @pytest.mark.parametrize(
-    ("command", "operation", "delivery_result"),
+    ("command", "operation", "delivery_result", "expected_status"),
     [
         (
             ["run"],
             "run",
             ReminderRunResult(status="failed", sent=0, failed=1, failed_by_error_code={}, expired=0),
+            "failed",
         ),
         (
             ["agenda-retry", "2026-07-09"],
             "retry_agenda",
             AgendaRetryResult(status="failed", day="2026-07-09", delivered=0, failed=1, failed_by_error_code={}),
+            "failed",
         ),
         (
             ["retry-delivery"],
             "retry_delivery",
             ReminderRetryResult(status="failed", delivered=0, failed=1, failed_by_error_code={}, expired=0),
+            "failed",
+        ),
+        # The two the timers actually execute. Both reported a failed delivery and exited zero, so
+        # a systemd unit that could not reach Discord still looked like a clean run.
+        (
+            ["agenda", "2026-07-09"],
+            "agenda",
+            AgendaDeliveryResult(status="partial", sent=0, day=date(2026, 7, 9)),
+            "partial",
+        ),
+        (
+            ["agenda-next-day", "--scheduled"],
+            "next_day_agenda",
+            AgendaDeliveryResult(status="partial", sent=0, day=date(2026, 7, 9)),
+            "partial",
         ),
     ],
 )
 def test_delivery_commands_exit_nonzero_when_delivery_fails(
-    command: list[str], operation: str, delivery_result: object, monkeypatch: pytest.MonkeyPatch
+    command: list[str], operation: str, delivery_result: object, expected_status: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(cli, operation, lambda *args: delivery_result)
+    monkeypatch.setattr(cli, operation, lambda *args, **kwargs: delivery_result)
 
     result = CliRunner().invoke(cli.app, command)
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout)["status"] == "failed"
+    assert json.loads(result.stdout)["status"] == expected_status
 
 
 def test_reset_delivery_checkpoint_requires_an_explicit_delivery_id(monkeypatch: pytest.MonkeyPatch) -> None:
