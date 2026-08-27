@@ -53,7 +53,7 @@ otherwise the app starts against empty state at the new path while the old files
 
 The systemd templates allow writes only to the matching app config and data directories. If an environment-file path override such as `DATABASE_PATH`, `*_TOKEN_PATH`, or `*_CONFIG_PATH` points elsewhere, manual CLI runs may work but the sandboxed service will not; keep overrides under those app directories or add a reviewed user-unit drop-in with the required `ReadWritePaths` exception.
 
-The service sandbox is intentionally compatible with local PyTorch/GPU use: it omits `PrivateDevices` and `MemoryDenyWriteExecute`. Inspect the installed units with:
+The service sandbox makes two deliberate exemptions, and they have different scopes. `PrivateDevices` is omitted only from `2much2read-runtime.service`, which loads a model and needs the GPU; the three services that load no model set `PrivateDevices=true`. `MemoryDenyWriteExecute` is omitted from all four, for an unrelated reason: the Google-authenticated paths import `cryptography`, which loads `_cffi_backend`, and cffi callbacks need writable-executable memory. Inspect the installed units with:
 
 ```bash
 systemd-analyze --user security 2much2read-runtime.service
