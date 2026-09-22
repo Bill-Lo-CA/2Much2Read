@@ -1,3 +1,4 @@
+import json
 import os
 import sqlite3
 import stat
@@ -5,10 +6,12 @@ from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
+import pytest
+
 from two_busy_one_miss.google_calendar import CalendarEvent
 from two_busy_one_miss.rules import ReminderCandidate
 from two_busy_one_miss.storage import Database
-from two_read_runtime.discord import configured_destinations
+from two_read_runtime.discord import DiscordDestination, configured_destinations
 
 
 def candidate(event_id: str = "event-1") -> ReminderCandidate:
@@ -438,6 +441,106 @@ def test_normalising_two_failed_copies_keeps_each_destination_that_already_has_t
     survivors = [int(row["id"]) for row in reopened.connection.execute("SELECT id FROM reminder_attempts")]
     assert survivors == [canonical]
     assert _delivery_states(reopened, canonical) == {webhook_key: "delivered", bot_key: "delivered"}
+    reopened.close()
+
+
+def _failed_twins(database: Database) -> tuple[int, int, list[DiscordDestination]]:
+    """One reminder written twice, both copies reading `failed`, deliveries left to the caller."""
+    destinations = configured_destinations("both", WEBHOOK, "token", "123")
+    legacy = database.create_attempt(_candidate_at(datetime(2026, 7, 8, 9, 55, tzinfo=MONTREAL)), "copy", destinations)
+    assert legacy is not None
+    database.connection.execute(
+        "UPDATE reminder_attempts SET state='failed',reminder_at='2026-07-08T09:55:00-04:00' WHERE id=?", (legacy,)
+    )
+    database.connection.execute(
+        """INSERT INTO reminder_attempts
+        (event_row_id,calendar_id,event_id,instance_id,rule_id,reminder_at,content,state,created_at,updated_at)
+        SELECT event_row_id,calendar_id,event_id,instance_id,rule_id,'2026-07-08T13:55:00+00:00','copy','failed',
+               created_at,updated_at FROM reminder_attempts WHERE id=?""",
+        (legacy,),
+    )
+    canonical = int(database.connection.execute("SELECT id FROM reminder_attempts WHERE id<>?", (legacy,)).fetchone()[0])
+    database.ensure_reminder_deliveries(canonical, destinations)
+    return legacy, canonical, destinations
+
+
+def test_normalising_keeps_the_chunks_a_destination_has_already_had(tmp_path: Path) -> None:
+    """Two records of one destination can tie on state and still be a chunk apart.
+
+    `deliver_resumable` sends `chunks[len(message_ids):]`, so the stored ids are a resume cursor,
+    not a detail. Both copies read `failed` for the webhook, one having got two chunks out and the
+    other one; discarding the further-along record by state alone sent the second chunk again.
+    """
+    path = tmp_path / "test.sqlite3"
+    database = Database(path)
+    legacy, canonical, destinations = _failed_twins(database)
+    webhook_key = destinations[0].key
+    for attempt, ids in ((legacy, '["c1", "c2"]'), (canonical, '["c1"]')):
+        database.connection.execute(
+            """UPDATE reminder_deliveries SET state='failed',attempt_count=2,discord_message_ids_json=?
+            WHERE reminder_attempt_id=? AND destination_key=?""",
+            (ids, attempt, webhook_key),
+        )
+    database.connection.commit()
+    database.close()
+
+    reopened = Database(path)
+
+    survivor = reopened.connection.execute(
+        """SELECT discord_message_ids_json,attempt_count FROM reminder_deliveries
+        WHERE reminder_attempt_id=? AND destination_key=?""",
+        (canonical, webhook_key),
+    ).fetchone()
+    assert json.loads(str(survivor["discord_message_ids_json"])) == ["c1", "c2"]
+    assert int(survivor["attempt_count"]) == 2
+    reopened.close()
+
+
+def test_normalising_leaves_the_surviving_attempt_saying_what_its_destinations_say(tmp_path: Path) -> None:
+    """Merging the destinations can change what the attempt's own one word should be.
+
+    Two copies read `failed` because each was missing a different destination; merged, every
+    destination on the survivor is delivered. Left at `failed` the attempt stays in due_attempts
+    for good, and the dispatcher expires it the moment the event starts.
+    """
+    path = tmp_path / "test.sqlite3"
+    database = Database(path)
+    legacy, canonical, destinations = _failed_twins(database)
+    webhook_key, bot_key = destinations[0].key, destinations[1].key
+    for attempt, delivered in ((legacy, webhook_key), (canonical, bot_key)):
+        database.connection.execute(
+            "UPDATE reminder_deliveries SET state='delivered' WHERE reminder_attempt_id=? AND destination_key=?",
+            (attempt, delivered),
+        )
+    database.connection.commit()
+    database.close()
+
+    reopened = Database(path)
+
+    assert _delivery_states(reopened, canonical) == {webhook_key: "delivered", bot_key: "delivered"}
+    assert str(reopened.connection.execute("SELECT state FROM reminder_attempts").fetchone()[0]) == "delivered"
+    assert reopened.due_attempts(datetime(2026, 7, 8, 14, 0, tzinfo=UTC)) == []
+    reopened.close()
+
+
+@pytest.mark.parametrize("terminal", ["cancelled", "expired"])
+def test_normalising_does_not_reopen_a_reminder_that_was_called_off(tmp_path: Path, terminal: str) -> None:
+    """`cancelled` and `expired` are decisions about the reminder, not summaries of its destinations.
+
+    The surviving attempt outranks a pending copy, so its pending deliveries move across - and
+    recomputing its state from those would put a called-off reminder back in the send queue.
+    """
+    path = tmp_path / "test.sqlite3"
+    database = Database(path)
+    legacy, canonical, _ = _failed_twins(database)
+    database.connection.execute("UPDATE reminder_attempts SET state=? WHERE id=?", (terminal, canonical))
+    database.connection.execute("UPDATE reminder_attempts SET state='pending' WHERE id=?", (legacy,))
+    database.connection.commit()
+    database.close()
+
+    reopened = Database(path)
+
+    assert str(reopened.connection.execute("SELECT state FROM reminder_attempts").fetchone()[0]) == terminal
     reopened.close()
 
 

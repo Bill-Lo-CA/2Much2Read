@@ -190,8 +190,68 @@ for file in "$env_file" "$reminders_file" "$calendar_client_secret_file" "$calen
   repair_file "$file"
 done
 
-agenda_schedule_time=$(sed -n 's/^AGENDA_SCHEDULE_TIME=//p' "$env_file" || :)
+# The timer used to carry no timezone, so it fired at that hour in whatever zone the manager runs
+# in, while the command's own guard reads the same hour in the configured one. Where the two
+# differed the run landed early, returned before_schedule, and no later run replaced it that day.
+#
+# Both halves of that hour are therefore read by the application rather than approximated in shell,
+# so that a configuration the command accepts is never rejected here. sed gets all three of these
+# wrong, and the timers are disabled by the time this runs, so a false rejection leaves the schedule
+# off over a file the application reads without complaint:
+#
+#   AGENDA_SCHEDULE_TIME="21:00"          quotes are dotenv syntax, not part of the value
+#   REMINDER_TIMEZONE=Europe/Berlin # local   a trailing comment, likewise
+#   timezone: null                        absent to the YAML loader, the literal "null" to sed
+#
+# Which reminders file to read is itself a setting: REMINDERS_CONFIG_PATH moves it, and the
+# scheduled command follows it. Reading the fixed path instead would put the timer in one zone and
+# the before_schedule guard in another - the same disagreement, moved rather than removed.
+#
+# A file the application cannot read at all falls back to the defaults and a note on stderr, rather
+# than stopping the install. Validating either config is not this script's job - `2busy1miss doctor`,
+# which it points at below, reports the real problem - and failing here would leave the timers
+# disabled over a file the installer never used to look at. The hour such an install lands on hardly
+# matters: a command that cannot build its own Settings does not run either way, and the summary
+# below says to rerun this script once the file is fixed.
+agenda_schedule=$("$repo_dir/.venv/bin/python" - "$reminders_file" <<'PY'
+import sys
+from pathlib import Path
+
+
+def warn(source: str, error: BaseException) -> None:
+    print(f"could not read {source}: {type(error).__name__}", file=sys.stderr)
+
+
+settings = None
+try:
+    from two_busy_one_miss.config import Settings
+
+    settings = Settings()
+except Exception as error:  # noqa: BLE001 - an unreadable environment file falls back; doctor explains it
+    warn("the environment file", error)
+
+schedule_time = "" if settings is None else settings.agenda_schedule_time.strftime("%H:%M")
+reminders = Path(sys.argv[1]) if settings is None else settings.reminders_config_path
+timezone = ""
+try:
+    from two_busy_one_miss.config import load_reminders
+
+    timezone = load_reminders(reminders).timezone or ""
+except Exception as error:  # noqa: BLE001 - same, for the reminders file
+    warn(str(reminders), error)
+if not timezone and settings is not None:
+    timezone = settings.reminder_timezone
+print(schedule_time)
+print(timezone)
+PY
+)
+agenda_schedule_time=$(printf '%s\n' "$agenda_schedule" | sed -n 1p)
+agenda_schedule_timezone=$(printf '%s\n' "$agenda_schedule" | sed -n 2p)
 agenda_schedule_time=${agenda_schedule_time:-21:00}
+agenda_schedule_timezone=${agenda_schedule_timezone:-America/Montreal}
+
+# Both values are interpolated into a unit file, so they are checked again here whatever produced
+# them.
 case "$agenda_schedule_time" in
   [01][0-9]:[0-5][0-9]|2[0-3]:[0-5][0-9]) ;;
   *)
@@ -199,50 +259,6 @@ case "$agenda_schedule_time" in
     exit 1
     ;;
 esac
-
-# The timer used to carry no timezone, so it fired at that hour in whatever zone the manager runs
-# in, while the command's own guard reads the same hour in the configured one. Where the two
-# differed the run landed early, returned before_schedule, and no later run replaced it that day.
-#
-# reminders.yaml is read by the application's own loader rather than by sed. YAML that the command
-# accepts must not be rejected here: `timezone: America/Montreal # local` is a comment the parser
-# strips and a text match does not, and `timezone: null` means absent to the loader and the literal
-# string "null" to sed. Both would fail the zone check below, and the timers have already been
-# disabled by this point, so a false rejection leaves the schedule off.
-#
-# A file the loader cannot read at all is treated as one that names no timezone, not as a reason to
-# stop. Validating reminders.yaml is not this script's job - `2busy1miss doctor`, which it points at
-# below, reports the real problem - and failing here would leave the timers disabled over a file the
-# installer never used to look at.
-# The environment fallback goes through Settings for the same reason: REMINDER_TIMEZONE="Europe/Berlin"
-# and REMINDER_TIMEZONE=Europe/Berlin # local are both ordinary dotenv, and sed hands back the
-# quotes or the comment along with the value.
-agenda_schedule_timezone=$("$repo_dir/.venv/bin/python" -c '
-import sys
-from pathlib import Path
-
-
-def warn(source: str, error: BaseException) -> None:
-    print(f"could not read a timezone from {source}: {type(error).__name__}", file=sys.stderr)
-
-
-timezone = ""
-try:
-    from two_busy_one_miss.config import load_reminders
-
-    timezone = load_reminders(Path(sys.argv[1])).timezone or ""
-except Exception as error:  # noqa: BLE001 - an unreadable config falls back; doctor explains it
-    warn(sys.argv[1], error)
-if not timezone:
-    try:
-        from two_busy_one_miss.config import Settings
-
-        timezone = Settings().reminder_timezone
-    except Exception as error:  # noqa: BLE001 - same, for the environment file
-        warn("the environment file", error)
-print(timezone)
-' "$reminders_file")
-agenda_schedule_timezone=${agenda_schedule_timezone:-America/Montreal}
 case "$agenda_schedule_timezone" in
   /*|*..*|*[!A-Za-z0-9_+./-]*)
     printf '%s\n' "the agenda timezone must name a system timezone, got '$agenda_schedule_timezone'" >&2

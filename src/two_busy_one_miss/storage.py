@@ -8,7 +8,7 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Self, cast
 
-from two_read_runtime.discord import DiscordDestination
+from two_read_runtime.discord import CorruptMessageIdsError, DiscordDestination, parse_message_ids
 from two_read_runtime.permissions import prepare_private_file, repair_sqlite_files
 
 from .google_calendar import CalendarEvent
@@ -45,6 +45,31 @@ _DELIVERY_RANK = {"delivered": 0, "failed": 1, "pending": 2}
 
 def _delivery_rank(state: str) -> int:
     return _DELIVERY_RANK.get(state, len(_DELIVERY_RANK))
+
+
+# The attempt states that summarise the destinations below them, and may therefore be recomputed
+# from those. `cancelled` and `expired` are decisions about the reminder itself - nothing under it
+# can undo them - so they are never derived.
+_DERIVED_ATTEMPT_STATES = frozenset({"pending", "delivered", "failed"})
+
+
+def _sent_chunk_count(value: object) -> int:
+    """How many chunks a destination already has, which is where a retry resumes.
+
+    `deliver_resumable` sends `chunks[len(message_ids):]`, so this number is the resume cursor and
+    not a detail: two copies of one destination can tie on state and still be one chunk apart.
+    Progress that will not parse counts as none, which is what the delivery path does with it too
+    (CORRUPT_MESSAGE_IDS); guessing higher would skip a chunk that was never sent.
+    """
+    try:
+        return len(parse_message_ids(value))
+    except CorruptMessageIdsError:
+        return 0
+
+
+def _delivery_progress(row: sqlite3.Row) -> tuple[int, int]:
+    """How far one destination got, furthest first, for choosing between two records of it."""
+    return (_delivery_rank(str(row["state"])), -_sent_chunk_count(row["discord_message_ids_json"]))
 
 
 REMINDER_ATTEMPTS_SCHEMA = """
@@ -151,23 +176,31 @@ class Database:
         `rd.state IN ('pending','failed')` in due_reminder_deliveries is the only thing stopping a
         resend to a destination that already has the message. Deleting the loser outright took
         that evidence with it through ON DELETE CASCADE.
+
+        Two records of the same destination are separated by state first and by how many chunks
+        they have already sent second, because state alone does not separate two `failed` copies
+        that stopped at different chunks. attempt_count is the larger of the two either way: it is
+        only ever reported, and understating how often a destination has been tried is the less
+        useful of the two errors.
         """
         for row in self.connection.execute("SELECT * FROM reminder_deliveries WHERE reminder_attempt_id=?", (loser,)).fetchall():
             existing = self.connection.execute(
-                "SELECT id,state FROM reminder_deliveries WHERE reminder_attempt_id=? AND destination_key=?",
+                "SELECT * FROM reminder_deliveries WHERE reminder_attempt_id=? AND destination_key=?",
                 (winner, row["destination_key"]),
             ).fetchone()
             if existing is None:
                 self.connection.execute(
                     "UPDATE reminder_deliveries SET reminder_attempt_id=? WHERE id=?", (winner, int(row["id"]))
                 )
-            elif _delivery_rank(str(row["state"])) < _delivery_rank(str(existing["state"])):
+                continue
+            attempts = max(int(row["attempt_count"]), int(existing["attempt_count"]))
+            if _delivery_progress(row) < _delivery_progress(existing):
                 self.connection.execute(
                     """UPDATE reminder_deliveries SET state=?,attempt_count=?,discord_message_ids_json=?,
                     delivered_at=?,last_error_code=?,retired_at=?,updated_at=? WHERE id=?""",
                     (
                         row["state"],
-                        row["attempt_count"],
+                        attempts,
                         row["discord_message_ids_json"],
                         row["delivered_at"],
                         row["last_error_code"],
@@ -176,6 +209,35 @@ class Database:
                         int(existing["id"]),
                     ),
                 )
+            elif attempts != int(existing["attempt_count"]):
+                self.connection.execute(
+                    "UPDATE reminder_deliveries SET attempt_count=?,updated_at=? WHERE id=?",
+                    (attempts, datetime.now(UTC).isoformat(), int(existing["id"])),
+                )
+
+    def _advance_merged_attempt(self, attempt_id: int, state: str) -> None:
+        """Move a merged attempt's own word forward to what its destinations now say.
+
+        Merging can change it: two copies that both read `failed` because each was missing a
+        different destination leave one row where every destination is delivered. Left at `failed`
+        that reminder stays in due_attempts for good, and the dispatcher expires it the moment the
+        event starts.
+
+        Forwards only, and only from a state that summarises the destinations below it. An attempt
+        delivered through the per-attempt path still has `pending` delivery rows underneath it -
+        finish_delivery writes the one and not the other - so deriving freely would demote it and
+        send the reminder again. `cancelled` and `expired` are decisions about the reminder itself
+        that nothing below it may undo.
+        """
+        if state not in _DERIVED_ATTEMPT_STATES:
+            return
+        derived = self._derived_attempt_state(self.connection, attempt_id)
+        if derived is None or _state_rank(derived) >= _state_rank(state):
+            return
+        self.connection.execute(
+            "UPDATE reminder_attempts SET state=?,updated_at=? WHERE id=?",
+            (derived, datetime.now(UTC).isoformat(), attempt_id),
+        )
 
     def _normalise_stored_instants(self) -> None:
         """Rewrite timestamps written before these columns held UTC.
@@ -233,6 +295,7 @@ class Database:
                 self._merge_reminder_deliveries(winner, loser)
                 self.connection.execute("DELETE FROM reminder_attempts WHERE id=?", (loser,))
                 removed.add(loser)
+                self._advance_merged_attempt(winner, str(occupant["state"] if keep_occupant else row["state"]))
                 if keep_occupant:
                     continue
             self.connection.execute("UPDATE reminder_attempts SET reminder_at=? WHERE id=?", (canonical, row_id))
@@ -494,7 +557,8 @@ class Database:
             (*keys, *due_ids),
         ).fetchall()
 
-    def _refresh_reminder_state(self, connection: sqlite3.Connection, reminder_attempt_id: int) -> None:
+    def _derived_attempt_state(self, connection: sqlite3.Connection, reminder_attempt_id: int) -> str | None:
+        """What an attempt's destinations add up to, or None when it has none to speak for it."""
         states = [
             str(row["state"])
             for row in connection.execute(
@@ -503,8 +567,13 @@ class Database:
             )
         ]
         if not states:
+            return None
+        return "delivered" if all(value == "delivered" for value in states) else "failed" if "failed" in states else "pending"
+
+    def _refresh_reminder_state(self, connection: sqlite3.Connection, reminder_attempt_id: int) -> None:
+        state = self._derived_attempt_state(connection, reminder_attempt_id)
+        if state is None:
             return
-        state = "delivered" if all(value == "delivered" for value in states) else "failed" if "failed" in states else "pending"
         connection.execute(
             "UPDATE reminder_attempts SET state=?,updated_at=? WHERE id=?",
             (state, datetime.now(UTC).isoformat(), reminder_attempt_id),
