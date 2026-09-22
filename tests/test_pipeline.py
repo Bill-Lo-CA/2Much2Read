@@ -2478,3 +2478,116 @@ def test_a_smaller_command_budget_is_still_shared_between_sources(tmp_path: Path
 
     assert offered == [("source-0", 1), ("source-1", 1), ("source-2", 1)]
     assert result.processed == 3
+
+
+def _cursor_gmail_messages(per_source: int) -> tuple[list[str], dict[str, dict[str, object]]]:
+    def encoded(value: str) -> str:
+        return urlsafe_b64encode(value.encode()).decode().rstrip("=")
+
+    message_ids = [f"source-{source}-{message}" for message in range(per_source) for source in range(3)]
+    messages = {
+        message_id: {
+            "threadId": f"thread-{message_id}",
+            "internalDate": "1784786400000",
+            "payload": {
+                "headers": [
+                    {"name": "Subject", "value": message_id},
+                    {"name": "From", "value": "news@example.com"},
+                ],
+                "parts": [{"mimeType": "text/plain", "body": {"data": encoded(f"body of {message_id}")}}],
+            },
+        }
+        for message_id in message_ids
+    }
+    return message_ids, messages
+
+
+@pytest.mark.parametrize(("gmail_budget", "max_messages"), [(2, None), (50, 2)])
+def test_gmail_source_cursor_rotates_across_runs_and_ignores_dry_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gmail_budget: int,
+    max_messages: int | None,
+) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(_gmail_sources_yaml(3), encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        gmail_max_messages_per_run=gmail_budget,
+    )
+    message_ids, messages = _cursor_gmail_messages(3)
+    gmail = PerSourceGmailClient(message_ids, messages)
+    calls: list[str] = []
+
+    class RecordingOllamaClient:
+        def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
+            calls.append(source_id)
+            return EmailExtraction(
+                source_id=source_id,
+                newsletter_title="Newsletter",
+                newsletter_date=None,
+                overview_zh_tw="摘要",
+                items=[],
+            )
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: RecordingOllamaClient())
+
+    formal_orders: list[list[str]] = []
+    for day in range(3):
+        if day == 1:
+            run_pipeline(settings, max_messages=max_messages, no_deliver=True, dry_run=True)
+        calls.clear()
+        run_pipeline(settings, max_messages=max_messages, no_deliver=True, now=datetime(2026, 7, 24 + day, 12, tzinfo=UTC))
+        formal_orders.append(calls.copy())
+
+    assert formal_orders == [
+        ["source-0", "source-1"],
+        ["source-2", "source-0"],
+        ["source-1", "source-2"],
+    ]
+
+
+def test_gmail_source_cursor_is_saved_before_source_processing_can_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(_gmail_sources_yaml(3), encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        gmail_max_messages_per_run=2,
+    )
+    message_ids, messages = _cursor_gmail_messages(1)
+    gmail = PerSourceGmailClient(message_ids, messages)
+    extracted: list[str] = []
+
+    class RecordingOllamaClient:
+        def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
+            extracted.append(source_id)
+            return EmailExtraction(
+                source_id=source_id,
+                newsletter_title="Newsletter",
+                newsletter_date=None,
+                overview_zh_tw="摘要",
+                items=[],
+            )
+
+    def get_message(message_id: str) -> dict[str, object]:
+        if message_id == "source-0-0":
+            raise RuntimeError("source processing interrupted")
+        return messages[message_id]
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: RecordingOllamaClient())
+    monkeypatch.setattr(gmail, "get_message", get_message)
+
+    with pytest.raises(RuntimeError, match="source processing interrupted"):
+        run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, 12, tzinfo=UTC))
+
+    run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 25, 12, tzinfo=UTC))
+
+    assert extracted == ["source-1", "source-2"]

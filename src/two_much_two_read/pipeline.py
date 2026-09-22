@@ -711,12 +711,17 @@ def run_pipeline(
             # this is here to remove.
             effective_budget = gmail_remaining if command_remaining is None else min(gmail_remaining, command_remaining)
             allowance = _fair_share(effective_budget, len(gmail_sources))
-            # Every source is visited once under that guaranteed allowance, and only then are the
-            # Gmail sources revisited for whatever budget is left, so position in the file no
-            # longer decides who gets read. A source that returned less than its allowance has
-            # nothing waiting, so the second pass skips it rather than repeating its query.
+            rotate_gmail = effective_budget < len(gmail_sources)
+            if rotate_gmail:
+                last_source = database.last_gmail_source()
+                start = next((index + 1 for index, source in enumerate(gmail_sources) if source.id == last_source), 0)
+                gmail_sources = gmail_sources[start:] + gmail_sources[:start]
+            # Offer each source its first-pass allowance before revisiting Gmail sources with any
+            # budget left. Small budgets resume after the previous run's last attempt. Sources that
+            # returned less than their allowance are drained and need no second query.
+            gmail_order = iter(gmail_sources)
             schedule: list[tuple[SourceConfig, int | None]] = [
-                (source, allowance if isinstance(source, GmailSource) else None) for source in sources
+                (next(gmail_order), allowance) if isinstance(source, GmailSource) else (source, None) for source in sources
             ]
             schedule.extend((source, None) for source in gmail_sources)
             drained: set[str] = set()
@@ -735,6 +740,9 @@ def run_pipeline(
                         if source_remaining <= 0:
                             continue
                         assert gmail is not None
+                        if rotate_gmail and not dry_run:
+                            # Save before the attempt so a failing source cannot monopolize later runs.
+                            database.record_gmail_source(source.id)
                         used, source_discovered, source_processed, source_failed, source_ids, source_documents = _process_source(
                             database,
                             gmail,

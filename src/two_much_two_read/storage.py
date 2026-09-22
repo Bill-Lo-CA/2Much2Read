@@ -19,7 +19,7 @@ from two_read_runtime.sqlite_snapshot import reading_connection
 from .digest import canonical_url, normalized_title
 from .schemas import DigestItem, EmailExtraction, ItemAnalysis, ResolvedContent, SourceDocument
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 # Deliberately carries no foreign key to items: store_items(replace=True) deletes and re-inserts
 # a document's items on every reprocess, and an audit log has to outlive the rows it describes.
 # document_id and normalized_title keep a scored row traceable after its item id is gone.
@@ -29,6 +29,9 @@ RERANKER_SCORES_SCHEMA = """CREATE TABLE IF NOT EXISTS reranker_scores(
 );
 CREATE INDEX IF NOT EXISTS reranker_scores_item ON reranker_scores(item_id);
 CREATE INDEX IF NOT EXISTS reranker_scores_scored_at ON reranker_scores(scored_at);"""
+GMAIL_SOURCE_CURSOR_SCHEMA = """CREATE TABLE IF NOT EXISTS gmail_source_cursor(
+  id INTEGER PRIMARY KEY CHECK(id=1), source_id TEXT NOT NULL
+);"""
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS documents(
@@ -87,6 +90,7 @@ CREATE TABLE IF NOT EXISTS runs(
   failed_count INTEGER NOT NULL DEFAULT 0, delivered_digest_count INTEGER NOT NULL DEFAULT 0, error_summary TEXT
 );
 {RERANKER_SCORES_SCHEMA}
+{GMAIL_SOURCE_CURSOR_SCHEMA}
 INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES({SCHEMA_VERSION}, datetime('now'));
 """
 
@@ -153,6 +157,11 @@ class Database:
             if version == 8:
                 self._migrate_v8_to_v9()
                 version = 9
+            if version == 9:
+                self.connection.executescript(GMAIL_SOURCE_CURSOR_SCHEMA)
+                self.connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(10, datetime('now'))")
+                self.connection.commit()
+                version = 10
             if version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
                 raise DatabaseSchemaResetRequiredError(
                     f"DATABASE_SCHEMA_RESET_REQUIRED: back up {path} and remove it before rerunning 2much2read"
@@ -327,6 +336,18 @@ class Database:
             (gmail_id,),
         ).fetchone()
         return cast(sqlite3.Row | None, row)
+
+    def last_gmail_source(self) -> str | None:
+        row = self.connection.execute("SELECT source_id FROM gmail_source_cursor WHERE id=1").fetchone()
+        return str(row[0]) if row is not None else None
+
+    def record_gmail_source(self, source_id: str) -> None:
+        self.connection.execute(
+            """INSERT INTO gmail_source_cursor(id,source_id) VALUES(1,?)
+            ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id""",
+            (source_id,),
+        )
+        self.connection.commit()
 
     def store_hackernews_metadata(
         self,
@@ -906,7 +927,7 @@ class Database:
         are what stops an already-delivered newsletter being discovered and sent a second time, and
         on disk they are a rounding error - 115 KB of ledger against 1.4 MB of `items` alone when
         this was written. Everything removed here is either a record of what happened or a cache
-        that regenerates on demand.
+        that regenerates on demand. The Gmail source cursor also survives so pruning cannot reset fairness.
         """
         stamp = cutoff.astimezone(UTC).isoformat()
         deleted: dict[str, int] = {}
@@ -933,6 +954,7 @@ class Database:
             for table in (
                 "documents",
                 "gmail_document_state",
+                "gmail_source_cursor",
                 "hackernews_document_state",
                 "items",
                 "reranker_scores",
@@ -962,6 +984,7 @@ class Database:
                 "reranker_scores",
                 "items",
                 "gmail_document_state",
+                "gmail_source_cursor",
                 "hackernews_document_state",
                 "documents",
                 "digest_deliveries",

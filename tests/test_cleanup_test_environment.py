@@ -37,6 +37,7 @@ def test_reset_database_replaces_a_legacy_database_with_v2(tmp_path: Path) -> No
     assert database.counts() == {
         "documents": 0,
         "gmail_document_state": 0,
+        "gmail_source_cursor": 0,
         "hackernews_document_state": 0,
         "items": 0,
         "reranker_scores": 0,
