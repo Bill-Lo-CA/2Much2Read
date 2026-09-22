@@ -28,6 +28,16 @@ def instant(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
 
 
+# How far a reminder has got, most advanced first. `delivered` outranks everything because
+# discarding it in favour of another row would send the reminder a second time; `pending` is last
+# because it is the only state that still owes the user a message.
+_STATE_RANK = {"delivered": 0, "cancelled": 1, "expired": 2, "failed": 3, "pending": 4}
+
+
+def _state_rank(state: str) -> int:
+    return _STATE_RANK.get(state, len(_STATE_RANK))
+
+
 REMINDER_ATTEMPTS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS reminder_attempts(
   id INTEGER PRIMARY KEY,
@@ -145,24 +155,41 @@ class Database:
                     (instant(parsed_start), instant(parsed_end), int(row["id"])),
                 )
         # reminder_at is part of UNIQUE(calendar_id,event_id,instance_id,rule_id,reminder_at), so two
-        # offsets naming one instant collide once normalised - the same reminder recorded twice,
-        # which is what a re-sync across a DST boundary produces. The furthest-along state is
-        # converted first so that it is the copy that survives.
+        # offsets naming one instant become one key here - the same reminder recorded twice, as a
+        # re-sync across a DST boundary produces. The target key can already be held by a row that
+        # was written in UTC and so never enters this loop, which is why the occupant is looked up
+        # rather than inferred from the order rows are visited in: ordering decides what gets
+        # converted first, not what got there first.
         attempts = self.connection.execute(
-            """SELECT id,reminder_at FROM reminder_attempts ORDER BY CASE state
-            WHEN 'delivered' THEN 0 WHEN 'cancelled' THEN 1 WHEN 'expired' THEN 2 ELSE 3 END, id"""
+            "SELECT id,state,reminder_at,calendar_id,event_id,instance_id,rule_id FROM reminder_attempts"
         ).fetchall()
-        for row in attempts:
+        removed: set[int] = set()
+        for row in sorted(attempts, key=lambda item: (_state_rank(str(item["state"])), int(item["id"]))):
+            row_id = int(row["id"])
+            if row_id in removed:
+                continue
             reminder_at = str(row["reminder_at"])
             parsed = datetime.fromisoformat(reminder_at)
             if parsed.tzinfo is None or instant(parsed) == reminder_at:
                 continue
-            try:
-                self.connection.execute(
-                    "UPDATE reminder_attempts SET reminder_at=? WHERE id=?", (instant(parsed), int(row["id"]))
-                )
-            except sqlite3.IntegrityError:
-                self.connection.execute("DELETE FROM reminder_attempts WHERE id=?", (int(row["id"]),))
+            canonical = instant(parsed)
+            occupant = self.connection.execute(
+                """SELECT id,state FROM reminder_attempts WHERE calendar_id=? AND event_id=? AND instance_id=?
+                AND rule_id=? AND reminder_at=?""",
+                (row["calendar_id"], row["event_id"], row["instance_id"], row["rule_id"], canonical),
+            ).fetchone()
+            if occupant is not None:
+                # One reminder, two rows. Only the copy that has got least far is dropped, so a
+                # delivered one is never discarded in favour of a pending one that would send it
+                # again - and its reminder_deliveries rows, which ON DELETE CASCADE would take with
+                # it, stay with it.
+                keep_occupant = _state_rank(str(occupant["state"])) <= _state_rank(str(row["state"]))
+                loser = row_id if keep_occupant else int(occupant["id"])
+                self.connection.execute("DELETE FROM reminder_attempts WHERE id=?", (loser,))
+                removed.add(loser)
+                if keep_occupant:
+                    continue
+            self.connection.execute("UPDATE reminder_attempts SET reminder_at=? WHERE id=?", (canonical, row_id))
         self.connection.commit()
 
     @classmethod

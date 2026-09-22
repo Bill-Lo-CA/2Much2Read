@@ -203,9 +203,28 @@ esac
 # The timer used to carry no timezone, so it fired at that hour in whatever zone the manager runs
 # in, while the command's own guard reads the same hour in the configured one. Where the two
 # differed the run landed early, returned before_schedule, and no later run replaced it that day.
-# Resolved the way the command resolves it: reminders.yaml wins over the environment file, which
-# wins over the default compiled into Settings.
-agenda_schedule_timezone=$(sed -n 's/^timezone:[[:space:]]*//p' "$reminders_file" | tail -n 1 | tr -d '"'"'"'')
+#
+# reminders.yaml is read by the application's own loader rather than by sed. YAML that the command
+# accepts must not be rejected here: `timezone: America/Montreal # local` is a comment the parser
+# strips and a text match does not, and `timezone: null` means absent to the loader and the literal
+# string "null" to sed. Both would fail the zone check below, and the timers have already been
+# disabled by this point, so a false rejection leaves the schedule off.
+#
+# A file the loader cannot read at all is treated as one that names no timezone, not as a reason to
+# stop. Validating reminders.yaml is not this script's job - `2busy1miss doctor`, which it points at
+# below, reports the real problem - and failing here would leave the timers disabled over a file the
+# installer never used to look at.
+agenda_schedule_timezone=$("$repo_dir/.venv/bin/python" -c '
+import sys
+from pathlib import Path
+
+from two_busy_one_miss.config import load_reminders
+
+try:
+    print(load_reminders(Path(sys.argv[1])).timezone or "")
+except Exception as error:  # noqa: BLE001 - any unreadable config falls back, and doctor explains it
+    print(f"could not read a timezone from {sys.argv[1]}: {type(error).__name__}", file=sys.stderr)
+' "$reminders_file")
 if [ -z "$agenda_schedule_timezone" ]; then
   agenda_schedule_timezone=$(sed -n 's/^REMINDER_TIMEZONE=//p' "$env_file" | tail -n 1)
 fi

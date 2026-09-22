@@ -291,31 +291,71 @@ def test_opening_an_older_database_normalises_its_timestamps(tmp_path: Path) -> 
     reopened.close()
 
 
-def test_normalising_collapses_two_offsets_naming_one_instant_keeping_the_delivered_copy(tmp_path: Path) -> None:
-    """A re-sync across a DST boundary can record one reminder under two offsets.
+def _twin(database: Database, delivered_at_offset: str, pending_at_offset: str) -> int:
+    """One reminder written twice, once per offset, with the delivered copy carrying a checkpoint.
 
-    Normalised they collide on UNIQUE(calendar_id,event_id,instance_id,rule_id,reminder_at). They
-    are the same reminder, so one has to go, and it must not be the one already sent - otherwise
-    the survivor is pending and the reminder goes out twice.
+    Returns the id of the delivered row so a test can check it, and its deliveries, are still there.
     """
-    path = tmp_path / "test.sqlite3"
-    database = Database(path)
-    delivered_id = database.create_attempt(_candidate_at(datetime(2026, 7, 8, 9, 55, tzinfo=MONTREAL)), "delivered copy")
+    delivered_id = database.create_attempt(
+        _candidate_at(datetime(2026, 7, 8, 9, 55, tzinfo=MONTREAL)),
+        "delivered copy",
+        configured_destinations("webhook", "https://discord.com/api/webhooks/123456789012345678/test-webhook-token", "", ""),
+    )
     assert delivered_id is not None
     database.finish_delivery(delivered_id, ["123"])
-    database.connection.execute("UPDATE reminder_attempts SET reminder_at='2026-07-08T13:55:00+00:00'")
+    database.connection.execute("UPDATE reminder_attempts SET reminder_at=? WHERE id=?", (delivered_at_offset, delivered_id))
     database.connection.execute(
         """INSERT INTO reminder_attempts
         (event_row_id,calendar_id,event_id,instance_id,rule_id,reminder_at,content,state,created_at,updated_at)
-        SELECT event_row_id,calendar_id,event_id,instance_id,rule_id,'2026-07-08T09:55:00-04:00','pending copy',
-               'pending',created_at,updated_at FROM reminder_attempts WHERE id=?""",
-        (delivered_id,),
+        SELECT event_row_id,calendar_id,event_id,instance_id,rule_id,?,'pending copy','pending',created_at,updated_at
+        FROM reminder_attempts WHERE id=?""",
+        (pending_at_offset, delivered_id),
     )
     database.connection.commit()
+    return delivered_id
+
+
+def test_normalising_keeps_the_delivered_copy_when_a_pending_row_already_holds_the_key(tmp_path: Path) -> None:
+    """The occupant can be a row already in UTC, which therefore never enters the conversion loop.
+
+    Ordering the rows cannot help there: the occupant reached the key without being converted. A
+    handler that dropped whichever row it was updating would delete the delivered copy, take its
+    delivery checkpoints with it through ON DELETE CASCADE, and leave a pending row behind to send
+    the reminder a second time.
+    """
+    path = tmp_path / "test.sqlite3"
+    database = Database(path)
+    delivered_id = _twin(database, "2026-07-08T09:55:00-04:00", "2026-07-08T13:55:00+00:00")
     database.close()
 
     reopened = Database(path)
 
-    rows = reopened.connection.execute("SELECT content,state,reminder_at FROM reminder_attempts").fetchall()
-    assert [tuple(row) for row in rows] == [("delivered copy", "delivered", "2026-07-08T13:55:00+00:00")]
+    rows = reopened.connection.execute("SELECT id,content,state,reminder_at FROM reminder_attempts").fetchall()
+    assert [(row["content"], row["state"], row["reminder_at"]) for row in rows] == [
+        ("delivered copy", "delivered", "2026-07-08T13:55:00+00:00")
+    ]
+    assert int(rows[0]["id"]) == delivered_id
+    assert (
+        reopened.connection.execute(
+            "SELECT COUNT(*) FROM reminder_deliveries WHERE reminder_attempt_id=?", (delivered_id,)
+        ).fetchone()[0]
+        == 1
+    )
+    reopened.close()
+
+
+def test_normalising_drops_the_pending_copy_when_the_delivered_one_is_already_canonical(tmp_path: Path) -> None:
+    """The mirror case: the row needing conversion is the one that has got least far."""
+    path = tmp_path / "test.sqlite3"
+    database = Database(path)
+    delivered_id = _twin(database, "2026-07-08T13:55:00+00:00", "2026-07-08T09:55:00-04:00")
+    database.close()
+
+    reopened = Database(path)
+
+    rows = reopened.connection.execute("SELECT id,content,state,reminder_at FROM reminder_attempts").fetchall()
+    assert [(row["content"], row["state"], row["reminder_at"]) for row in rows] == [
+        ("delivered copy", "delivered", "2026-07-08T13:55:00+00:00")
+    ]
+    assert int(rows[0]["id"]) == delivered_id
     reopened.close()
