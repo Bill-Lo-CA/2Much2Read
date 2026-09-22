@@ -816,3 +816,49 @@ def test_agenda_timer_falls_back_to_the_environment_timezone(tmp_path: Path) -> 
 
     timer = (home / ".config/systemd/user/2busy1miss-runtime-agenda.timer").read_text(encoding="utf-8")
     assert "OnCalendar=*-*-* 07:15:00 Europe/Berlin" in timer
+
+
+@pytest.mark.parametrize(
+    ("env_line", "expected"),
+    [
+        ('REMINDER_TIMEZONE="Europe/Berlin"\n', "Europe/Berlin"),
+        ("REMINDER_TIMEZONE=Europe/Berlin # local\n", "Europe/Berlin"),
+        ("REMINDER_TIMEZONE='Asia/Taipei'\n", "Asia/Taipei"),
+    ],
+)
+def test_agenda_timer_reads_the_environment_timezone_with_dotenv_semantics(tmp_path: Path, env_line: str, expected: str) -> None:
+    """Quotes and trailing comments are ordinary dotenv; sed hands them back with the value.
+
+    Each of these would have failed the zoneinfo check, and the timers are disabled by the time
+    this runs, so a reinstall would have left the schedule off over a file the application reads
+    without complaint.
+    """
+    root = Path(__file__).parents[1]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        '#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+    home = tmp_path / "home"
+    config_root = home / ".config/2much2read-runtime"
+    config_root.mkdir(parents=True)
+    (config_root / ".2busy1miss.env").write_text(f"AGENDA_SCHEDULE_TIME=21:00\n{env_line}", encoding="utf-8")
+    (config_root / "reminders.yaml").write_text("calendars:\n  - id: primary\n    name: Main\n", encoding="utf-8")
+    client_secret = tmp_path / "client-secret.json"
+    client_secret.write_text("client secret", encoding="utf-8")
+
+    subprocess.run(
+        ["sh", "scripts/install-2busy1miss-user-service.sh", "--calendar-client-secret", str(client_secret)],
+        cwd=root,
+        env=os.environ | {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        check=True,
+        text=True,
+        capture_output=True,
+        input="n\n",
+    )
+
+    timer = (home / ".config/systemd/user/2busy1miss-runtime-agenda.timer").read_text(encoding="utf-8")
+    assert f"OnCalendar=*-*-* 21:00:00 {expected}" in timer

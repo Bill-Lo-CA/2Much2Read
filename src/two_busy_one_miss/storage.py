@@ -38,6 +38,15 @@ def _state_rank(state: str) -> int:
     return _STATE_RANK.get(state, len(_STATE_RANK))
 
 
+# The same idea one level down, per destination. `delivered` must win for the same reason; between
+# the other two, `failed` carries an attempt count and an error code that `pending` does not.
+_DELIVERY_RANK = {"delivered": 0, "failed": 1, "pending": 2}
+
+
+def _delivery_rank(state: str) -> int:
+    return _DELIVERY_RANK.get(state, len(_DELIVERY_RANK))
+
+
 REMINDER_ATTEMPTS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS reminder_attempts(
   id INTEGER PRIMARY KEY,
@@ -133,6 +142,41 @@ class Database:
             self.connection.close()
             raise
 
+    def _merge_reminder_deliveries(self, winner: int, loser: int) -> None:
+        """Carry the loser's per-destination progress across before its rows cascade away.
+
+        The attempt's own state is one word for what may be several destinations at different
+        points: an attempt reads `failed` while one of its destinations is already `delivered`.
+        Two copies can therefore tie on attempt state and still hold different evidence, and
+        `rd.state IN ('pending','failed')` in due_reminder_deliveries is the only thing stopping a
+        resend to a destination that already has the message. Deleting the loser outright took
+        that evidence with it through ON DELETE CASCADE.
+        """
+        for row in self.connection.execute("SELECT * FROM reminder_deliveries WHERE reminder_attempt_id=?", (loser,)).fetchall():
+            existing = self.connection.execute(
+                "SELECT id,state FROM reminder_deliveries WHERE reminder_attempt_id=? AND destination_key=?",
+                (winner, row["destination_key"]),
+            ).fetchone()
+            if existing is None:
+                self.connection.execute(
+                    "UPDATE reminder_deliveries SET reminder_attempt_id=? WHERE id=?", (winner, int(row["id"]))
+                )
+            elif _delivery_rank(str(row["state"])) < _delivery_rank(str(existing["state"])):
+                self.connection.execute(
+                    """UPDATE reminder_deliveries SET state=?,attempt_count=?,discord_message_ids_json=?,
+                    delivered_at=?,last_error_code=?,retired_at=?,updated_at=? WHERE id=?""",
+                    (
+                        row["state"],
+                        row["attempt_count"],
+                        row["discord_message_ids_json"],
+                        row["delivered_at"],
+                        row["last_error_code"],
+                        row["retired_at"],
+                        datetime.now(UTC).isoformat(),
+                        int(existing["id"]),
+                    ),
+                )
+
     def _normalise_stored_instants(self) -> None:
         """Rewrite timestamps written before these columns held UTC.
 
@@ -184,7 +228,9 @@ class Database:
                 # again - and its reminder_deliveries rows, which ON DELETE CASCADE would take with
                 # it, stay with it.
                 keep_occupant = _state_rank(str(occupant["state"])) <= _state_rank(str(row["state"]))
+                winner = int(occupant["id"]) if keep_occupant else row_id
                 loser = row_id if keep_occupant else int(occupant["id"])
+                self._merge_reminder_deliveries(winner, loser)
                 self.connection.execute("DELETE FROM reminder_attempts WHERE id=?", (loser,))
                 removed.add(loser)
                 if keep_occupant:
@@ -346,13 +392,25 @@ class Database:
         ).fetchall()
 
     def due_attempts(self, now: datetime) -> list[sqlite3.Row]:
-        return self.connection.execute(
+        """Selected by state in SQL, then compared and ordered as instants in Python.
+
+        `Database.reading` deliberately does not migrate, because a reporting command must not
+        write; so the read-only path - `run --dry-run` - can still meet rows carrying a local
+        offset, and comparing those as text against a UTC parameter is the defect this change
+        exists to remove. An old `09:55:00-04:00` row sorts before `13:50:00+00:00` and a dry run
+        would report it due five minutes early.
+
+        Parsing each candidate costs nothing at these sizes - a few hundred rows - and gives the
+        migrated and unmigrated paths one answer instead of two.
+        """
+        rows = self.connection.execute(
             """SELECT reminder_attempts.*, events.start_at AS event_start_at, events.end_at AS event_end_at
             FROM reminder_attempts JOIN events ON events.id=reminder_attempts.event_row_id
-            WHERE reminder_attempts.state IN ('pending','failed') AND reminder_attempts.reminder_at<=?
-            ORDER BY reminder_attempts.reminder_at, reminder_attempts.id""",
-            (instant(now),),
+            WHERE reminder_attempts.state IN ('pending','failed')"""
         ).fetchall()
+        moment = now.astimezone(UTC)
+        due = [(datetime.fromisoformat(str(row["reminder_at"])).astimezone(UTC), int(row["id"]), row) for row in rows]
+        return [row for reminder_at, _, row in sorted(due, key=lambda item: item[:2]) if reminder_at <= moment]
 
     def ensure_reminder_deliveries(self, reminder_attempt_id: int, destinations: list[DiscordDestination]) -> None:
         with self.transaction() as connection:
@@ -417,17 +475,23 @@ class Database:
     def due_reminder_deliveries(self, now: datetime, destinations: list[DiscordDestination]) -> list[sqlite3.Row]:
         if not destinations:
             return []
-        for attempt in self.due_attempts(now):
-            self.reconcile_reminder_deliveries(int(attempt["id"]), destinations)
+        # Which attempts are due is decided once, by due_attempts, rather than repeated here as a
+        # second text comparison that the read-only path would get wrong in its own way.
+        due_ids = [int(attempt["id"]) for attempt in self.due_attempts(now)]
+        if not due_ids:
+            return []
+        for attempt_id in due_ids:
+            self.reconcile_reminder_deliveries(attempt_id, destinations)
         keys = [destination.key for destination in destinations]
         placeholders = ",".join("?" for _ in keys)
+        attempt_placeholders = ",".join("?" for _ in due_ids)
         return self.connection.execute(
             f"""SELECT rd.*,ra.content,e.start_at AS event_start_at FROM reminder_deliveries rd
             JOIN reminder_attempts ra ON ra.id=rd.reminder_attempt_id JOIN events e ON e.id=ra.event_row_id
             WHERE rd.destination_key IN ({placeholders}) AND rd.state IN ('pending','failed')
-            AND rd.retired_at IS NULL AND ra.state IN ('pending','failed') AND ra.reminder_at<=?
+            AND rd.retired_at IS NULL AND ra.id IN ({attempt_placeholders})
             ORDER BY ra.reminder_at,rd.id""",
-            (*keys, instant(now)),
+            (*keys, *due_ids),
         ).fetchall()
 
     def _refresh_reminder_state(self, connection: sqlite3.Connection, reminder_attempt_id: int) -> None:

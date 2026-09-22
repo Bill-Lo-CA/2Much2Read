@@ -1,4 +1,5 @@
 import os
+import sqlite3
 import stat
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
@@ -359,3 +360,91 @@ def test_normalising_drops_the_pending_copy_when_the_delivered_one_is_already_ca
     ]
     assert int(rows[0]["id"]) == delivered_id
     reopened.close()
+
+
+WEBHOOK = "https://discord.com/api/webhooks/123456789012345678/test-webhook-token"
+
+
+def test_a_dry_run_on_an_unmigrated_database_reads_the_same_instants(tmp_path: Path) -> None:
+    """Database.reading skips the migration on purpose, so due_attempts must not need it.
+
+    A legacy `09:55:00-04:00` row sorts before `13:50:00+00:00` as text, so a dry run five minutes
+    short of the reminder reported it as due.
+    """
+    path = tmp_path / "test.sqlite3"
+    database = Database(path)
+    database.create_attempt(_candidate_at(datetime(2026, 7, 8, 9, 55, tzinfo=MONTREAL)), "message")
+    database.connection.execute("UPDATE reminder_attempts SET reminder_at='2026-07-08T09:55:00-04:00'")
+    database.connection.commit()
+    database.close()
+
+    connection = sqlite3.connect(path)
+    connection.row_factory = sqlite3.Row
+    try:
+        reading = Database.reading(connection)
+        five_minutes_early = datetime(2026, 7, 8, 13, 50, tzinfo=UTC)
+        on_time = datetime(2026, 7, 8, 13, 55, tzinfo=UTC)
+
+        assert reading.due_attempts(five_minutes_early) == []
+        assert [str(row["content"]) for row in reading.due_attempts(on_time)] == ["message"]
+        # Untouched: a read must not migrate.
+        assert str(connection.execute("SELECT reminder_at FROM reminder_attempts").fetchone()[0]) == ("2026-07-08T09:55:00-04:00")
+    finally:
+        connection.close()
+
+
+def test_normalising_two_failed_copies_keeps_each_destination_that_already_has_the_message(tmp_path: Path) -> None:
+    """An attempt is one word for several destinations that can be at different points.
+
+    Both copies read `failed`, so nothing in the attempt state separates them - but one has already
+    delivered to the webhook and the other to the bot. Dropping either outright takes its
+    reminder_deliveries rows with it through ON DELETE CASCADE, and due_reminder_deliveries selects
+    on `rd.state IN ('pending','failed')`, so the survivor would send again to a destination that
+    already has the message.
+    """
+    path = tmp_path / "test.sqlite3"
+    database = Database(path)
+    destinations = configured_destinations("both", WEBHOOK, "token", "123")
+    webhook_key, bot_key = destinations[0].key, destinations[1].key
+    legacy = database.create_attempt(_candidate_at(datetime(2026, 7, 8, 9, 55, tzinfo=MONTREAL)), "copy", destinations)
+    assert legacy is not None
+    database.connection.execute("UPDATE reminder_attempts SET state='failed' WHERE id=?", (legacy,))
+    database.connection.execute(
+        "UPDATE reminder_deliveries SET state='delivered' WHERE reminder_attempt_id=? AND destination_key=?",
+        (legacy, webhook_key),
+    )
+    database.connection.execute("UPDATE reminder_attempts SET reminder_at='2026-07-08T09:55:00-04:00' WHERE id=?", (legacy,))
+    database.connection.execute(
+        """INSERT INTO reminder_attempts
+        (event_row_id,calendar_id,event_id,instance_id,rule_id,reminder_at,content,state,created_at,updated_at)
+        SELECT event_row_id,calendar_id,event_id,instance_id,rule_id,'2026-07-08T13:55:00+00:00','copy','failed',
+               created_at,updated_at FROM reminder_attempts WHERE id=?""",
+        (legacy,),
+    )
+    canonical = int(database.connection.execute("SELECT id FROM reminder_attempts WHERE id<>?", (legacy,)).fetchone()[0])
+    database.ensure_reminder_deliveries(canonical, destinations)
+    database.connection.execute(
+        "UPDATE reminder_deliveries SET state='delivered' WHERE reminder_attempt_id=? AND destination_key=?",
+        (canonical, bot_key),
+    )
+    database.connection.commit()
+    # The two copies hold different halves of the evidence.
+    assert _delivery_states(database, legacy) == {webhook_key: "delivered", bot_key: "pending"}
+    assert _delivery_states(database, canonical) == {webhook_key: "pending", bot_key: "delivered"}
+    database.close()
+
+    reopened = Database(path)
+
+    survivors = [int(row["id"]) for row in reopened.connection.execute("SELECT id FROM reminder_attempts")]
+    assert survivors == [canonical]
+    assert _delivery_states(reopened, canonical) == {webhook_key: "delivered", bot_key: "delivered"}
+    reopened.close()
+
+
+def _delivery_states(database: Database, attempt_id: int) -> dict[str, str]:
+    return {
+        str(row["destination_key"]): str(row["state"])
+        for row in database.connection.execute(
+            "SELECT destination_key,state FROM reminder_deliveries WHERE reminder_attempt_id=?", (attempt_id,)
+        )
+    }

@@ -214,20 +214,34 @@ esac
 # stop. Validating reminders.yaml is not this script's job - `2busy1miss doctor`, which it points at
 # below, reports the real problem - and failing here would leave the timers disabled over a file the
 # installer never used to look at.
+# The environment fallback goes through Settings for the same reason: REMINDER_TIMEZONE="Europe/Berlin"
+# and REMINDER_TIMEZONE=Europe/Berlin # local are both ordinary dotenv, and sed hands back the
+# quotes or the comment along with the value.
 agenda_schedule_timezone=$("$repo_dir/.venv/bin/python" -c '
 import sys
 from pathlib import Path
 
-from two_busy_one_miss.config import load_reminders
 
+def warn(source: str, error: BaseException) -> None:
+    print(f"could not read a timezone from {source}: {type(error).__name__}", file=sys.stderr)
+
+
+timezone = ""
 try:
-    print(load_reminders(Path(sys.argv[1])).timezone or "")
-except Exception as error:  # noqa: BLE001 - any unreadable config falls back, and doctor explains it
-    print(f"could not read a timezone from {sys.argv[1]}: {type(error).__name__}", file=sys.stderr)
+    from two_busy_one_miss.config import load_reminders
+
+    timezone = load_reminders(Path(sys.argv[1])).timezone or ""
+except Exception as error:  # noqa: BLE001 - an unreadable config falls back; doctor explains it
+    warn(sys.argv[1], error)
+if not timezone:
+    try:
+        from two_busy_one_miss.config import Settings
+
+        timezone = Settings().reminder_timezone
+    except Exception as error:  # noqa: BLE001 - same, for the environment file
+        warn("the environment file", error)
+print(timezone)
 ' "$reminders_file")
-if [ -z "$agenda_schedule_timezone" ]; then
-  agenda_schedule_timezone=$(sed -n 's/^REMINDER_TIMEZONE=//p' "$env_file" | tail -n 1)
-fi
 agenda_schedule_timezone=${agenda_schedule_timezone:-America/Montreal}
 case "$agenda_schedule_timezone" in
   /*|*..*|*[!A-Za-z0-9_+./-]*)
