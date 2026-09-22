@@ -12,13 +12,17 @@ from two_read_runtime.endpoint_policy import (
     validate_ollama_endpoint,
 )
 from two_read_runtime.oauth import token_status
-from two_read_runtime.paths import directory_is_creatable
+from two_read_runtime.paths import directory_is_creatable, env_file
 from two_read_runtime.permissions import runtime_permission_checks
+from two_read_runtime.settings_validation import unknown_env_keys
 
 from .command_models import DoctorResult
 from .config import Settings, load_sources
 
 _HEALTHY_CHECKS = {"ok", "not_created", "webhook", "bot", "both", "local", "remote_https"}
+# Read out of the environment file by install-2much2read-user-service.sh with sed, to render the
+# timer's OnCalendar line. They are not settings and never will be, so they are not misspellings.
+INSTALLER_ENV_KEYS = ("DIGEST_SCHEDULE_TIME", "DIGEST_SCHEDULE_TIMEZONE")
 
 
 def _config_error_status(error: Exception) -> str:
@@ -101,5 +105,7 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
                     checks[f"discord_test_{destination.transport}"] = "ok"
                 except DiscordDeliveryError:
                     checks[f"discord_test_{destination.transport}"] = "failed"
+    unknown_keys = unknown_env_keys(env_file("2much2read"), type(settings).model_fields, also_allowed=INSTALLER_ENV_KEYS)
+    checks["env_keys"] = "ok" if not unknown_keys else "unknown"
     status = "ok" if all(value in _HEALTHY_CHECKS for value in checks.values()) else "warning"
-    return DoctorResult(status=status, checks=checks)
+    return DoctorResult(status=status, checks=checks, unknown_env_keys=unknown_keys or None)

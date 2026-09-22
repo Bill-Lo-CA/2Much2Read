@@ -8,8 +8,9 @@ import typer
 from pydantic import BaseModel
 
 from two_read_runtime.discord import DiscordDeliveryError, deliver, delivery_error_code
-from two_read_runtime.paths import directory_is_creatable, env_file
+from two_read_runtime.paths import config_dir, data_dir, directory_is_creatable, env_file
 from two_read_runtime.permissions import private_directory_status, private_file_status, sqlite_files_status
+from two_read_runtime.settings_validation import unknown_env_keys
 
 from .config import NudgesConfigNotFound, Settings, load_nudges
 from .pipeline import reset as reset_nudge
@@ -81,12 +82,21 @@ def doctor() -> None:
         checks["nudges"] = "missing" if isinstance(error, NudgesConfigNotFound) else "invalid"
         checks["nudges_deliverable"] = "unknown"
     checks["nudges_file"] = private_file_status(settings.nudges_config_path, missing_ok=True)
+    # This tool has no installer, so README.md carries the setup and nothing chmods the shared
+    # roots on its behalf. Checking only the leaf is what let the documented commands leave
+    # ~/.local/share/2much2read-runtime at the default mode without anything saying so.
+    checks["config_dir"] = private_directory_status(config_dir(), missing_ok=True)
+    checks["data_root"] = private_directory_status(data_dir(), missing_ok=True)
     checks["data_dir"] = private_directory_status(settings.database_path.parent, missing_ok=True)
     checks["database"] = sqlite_files_status(settings.database_path)
     checks["lock_file"] = private_file_status(settings.lock_path, missing_ok=True)
     checks["database_directory"] = "ok" if directory_is_creatable(settings.database_path.parent) else "not_writable"
+    unknown_keys = unknown_env_keys(env_file("2bored1made"), type(settings).model_fields)
+    checks["env_keys"] = "ok" if not unknown_keys else "unknown"
     status = "ok" if all(value in _HEALTHY_CHECKS for value in checks.values()) else "warning"
     payload: dict[str, object] = {"status": status, "checks": checks}
+    if unknown_keys:
+        payload["unknown_env_keys"] = unknown_keys
     # Which nudge, and why. The check above only says that something is wrong; an operator fixing it
     # needs the id and the error code the send path would have raised.
     if problems:
@@ -128,9 +138,16 @@ def send(
     if invalid_ids := set(mention_ids) - settings.allowed_mention_ids:
         raise typer.BadParameter(f"mention IDs are not allowed: {', '.join(sorted(invalid_ids))}")
     content = message.replace("@", "@\u200b")
+    # Resolved once, and inside the handler: every other command in this file reports a broken
+    # Discord configuration as a parameter error, and calling this in the loop header made `send`
+    # the one that answered with a traceback instead.
+    try:
+        destinations = settings.discord_destinations()
+    except DiscordDeliveryError as error:
+        raise typer.BadParameter(str(error)) from error
     message_ids: list[str] = []
     failed_by_error_code: dict[str, int] = {}
-    for destination in settings.discord_destinations():
+    for destination in destinations:
         try:
             message_ids.extend(
                 deliver(
@@ -144,11 +161,15 @@ def send(
         except DiscordDeliveryError as error:
             code = delivery_error_code(error)
             failed_by_error_code[code] = failed_by_error_code.get(code, 0) + 1
+    failed = sum(failed_by_error_code.values())
     result = SendResult(
-        status="partial" if failed_by_error_code else "ok",
+        # The same three-way verdict the scheduled path already computes: nothing delivered is a
+        # failure, not a partial one. With a single destination - the default - "partial" was the
+        # only word this command could say about a send that reached nobody.
+        status="failed" if failed and not message_ids else "partial" if failed else "ok",
         discord_message_ids=message_ids,
-        delivery_succeeded=len(settings.discord_destinations()) - sum(failed_by_error_code.values()),
-        delivery_failed=sum(failed_by_error_code.values()),
+        delivery_succeeded=len(destinations) - failed,
+        delivery_failed=failed,
         failed_by_error_code=failed_by_error_code,
     )
-    typer.echo(json.dumps(result.model_dump()))
+    emit_delivery_result(result)

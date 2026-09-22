@@ -197,6 +197,14 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, mon
 
 
 class FakeDigestDatabase:
+    """A stand-in that speaks the per-destination delivery interface the real Database has.
+
+    It used to omit those methods, which only worked because retry_delivery asked `hasattr` before
+    calling them and fell back to a pre-per-destination path. Production never took that branch -
+    Database has always defined all three - so the fallback existed for this fake alone. The fake
+    now models one delivery per pending digest, which is what a single-webhook deployment has.
+    """
+
     def __init__(self, pending: list[dict[str, object]], failure_error: Exception | None = None) -> None:
         self.pending = pending
         self.failure_error = failure_error
@@ -204,23 +212,38 @@ class FakeDigestDatabase:
         self.finished: list[tuple[int, list[str]]] = []
         self.progress: list[tuple[int, list[str]]] = []
         self.closed = False
+        self.reconciled: list[int] = []
 
     def pending_digests(self) -> list[dict[str, object]]:
         return self.pending
 
-    def delivery_checkpoint(self, digest_id: int, destination_key: str) -> object:
-        return next(digest for digest in self.pending if digest["id"] == digest_id)["discord_message_ids_json"]
+    def has_digest_deliveries(self, digest_id: int) -> bool:
+        return True
 
-    def record_delivery_progress(self, digest_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
-        self.progress.append((digest_id, message_ids))
+    def reconcile_digest_deliveries(self, digest_id: int, destinations: list[DiscordDestination]) -> None:
+        self.reconciled.append(digest_id)
 
-    def finish_delivery(self, digest_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
-        self.finished.append((digest_id, message_ids))
+    def pending_digest_deliveries(self, destinations: list[DiscordDestination]) -> list[dict[str, object]]:
+        return [
+            {
+                "id": digest["id"],
+                "destination_key": destinations[0].key,
+                "rendered_content": digest["rendered_content"],
+                "discord_message_ids_json": digest["discord_message_ids_json"],
+            }
+            for digest in self.pending
+        ]
 
-    def fail_delivery(self, digest_id: int, error_code: str) -> None:
+    def record_digest_delivery_progress(self, delivery_id: int, message_ids: list[str]) -> None:
+        self.progress.append((delivery_id, message_ids))
+
+    def finish_digest_delivery(self, delivery_id: int, message_ids: list[str], destinations: list[DiscordDestination]) -> None:
+        self.finished.append((delivery_id, message_ids))
+
+    def fail_digest_delivery(self, delivery_id: int, error_code: str, destinations: list[DiscordDestination]) -> None:
         if self.failure_error is not None:
             raise self.failure_error
-        self.failed.append((digest_id, error_code))
+        self.failed.append((delivery_id, error_code))
 
     def close(self) -> None:
         self.closed = True
@@ -508,9 +531,9 @@ def test_mixed_gmail_and_hackernews_sources_run_together(tmp_path: Path, monkeyp
         seen.append(("gmail", budget))
         return budget if budget == settings.gmail_max_messages_per_run else 1, 1, 1, 0, [], []
 
-    def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int]]:
+    def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], int]:
         seen.append(("hackernews", int(args[4])))
-        return 1, 1, 1, 0, []
+        return 1, 1, 1, 0, [], 0
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
@@ -543,9 +566,9 @@ def test_hacker_news_force_respects_explicit_command_budget(tmp_path: Path, monk
         def close(self) -> None:
             pass
 
-    def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int]]:
+    def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], int]:
         assert args[4] == 1
-        return 0, 0, 0, 0, []
+        return 0, 0, 0, 0, [], 0
 
     monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
@@ -648,6 +671,7 @@ def test_empty_news_day_records_no_content_run(newsletter_settings: Settings, mo
         "discovered": 0,
         "processed": 0,
         "failed": 0,
+        "skipped": None,
         "delivered": 0,
         "delivery_succeeded": 0,
         "delivery_failed": 0,
@@ -1335,6 +1359,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
         "discovered": 2,
         "processed": 1,
         "failed": 1,
+        "skipped": None,
         "delivered": 0,
         "delivery_succeeded": 0,
         "delivery_failed": 0,
@@ -1436,6 +1461,7 @@ def test_mime_failure_marks_one_message_failed_and_continues(
         "discovered": 2,
         "processed": 1,
         "failed": 1,
+        "skipped": None,
         "delivered": 0,
         "delivery_succeeded": 0,
         "delivery_failed": 0,
@@ -1563,6 +1589,7 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
         "discovered": 1,
         "processed": 1,
         "failed": 0,
+        "skipped": None,
         "delivered": 0,
         "delivery_succeeded": 0,
         "delivery_failed": 0,
@@ -1598,6 +1625,7 @@ def test_existing_daily_digest_skips_before_gmail_access(tmp_path: Path, monkeyp
         "discovered": 0,
         "processed": 0,
         "failed": 0,
+        "skipped": None,
         "delivered": 0,
         "delivery_succeeded": 0,
         "delivery_failed": 0,
@@ -1969,3 +1997,119 @@ def test_only_shortlisted_pairs_reach_the_model() -> None:
 
     assert len(ollama.seen) == 1
     assert [entry.item.title for entry in merged] == ["GPT-5.6 Sol 發表", "Rust 1.94 釋出"]
+
+
+def test_hacker_news_skipped_items_reach_the_run_result(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Unreadable feed items fail the run while normally filtered items remain skipped.
+
+    The old aggregate count could not distinguish an API failure from an ineligible story, so a
+    broken item endpoint looked like a quiet news day and exited zero.
+    """
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n  - id: hn-best\n    name: HN\n    type: hackernews\n    category: OTHER\n", encoding="utf-8"
+    )
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
+    )
+
+    class FakeHackerNewsClient:
+        def discover(self, *args: object, **kwargs: object) -> HackerNewsDiscovery:
+            return HackerNewsDiscovery([], skipped=17, unreadable=17)
+
+        def close(self) -> None:
+            pass
+
+    monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_unload_model", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pipeline, "close_ollama_client", lambda _: None)
+    monkeypatch.setattr(pipeline, "RelevanceReranker", lambda *args: _NoopReranker())
+
+    result = run_pipeline(settings, no_deliver=True)
+
+    assert (result.status, result.processed, result.failed, result.skipped) == ("partial", 0, 17, 17)
+
+
+class _NoopReranker:
+    model_name = "test-reranker"
+    prompt_version = "v1"
+
+    def rank(self, entries: list[object]) -> list[object]:
+        return entries
+
+    def close(self) -> None:
+        pass
+
+
+def test_a_message_without_a_mime_payload_is_recorded_as_failed_not_skipped(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare continue left no trace, so the same message came back every run.
+
+    Nothing was stored, no failed label was applied, and it cost nothing against the run limit - so
+    the next run's query still matched it and paid for another get_message. It is now recorded the
+    way every other unusable message is.
+    """
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        discord_webhook_url="",
+    )
+    good_body = urlsafe_b64encode(b"good newsletter").decode().rstrip("=")
+    gmail = StubGmailClient(
+        ["bad", "good"],
+        {
+            "bad": {"internalDate": "0", "threadId": "bad", "payload": "not a MIME structure"},
+            "good": {
+                "internalDate": "0",
+                "threadId": "good",
+                "payload": {
+                    "mimeType": "text/plain",
+                    "headers": [{"name": "Subject", "value": "Good"}],
+                    "body": {"data": good_body},
+                },
+            },
+        },
+    )
+    extraction = EmailExtraction(
+        source_id="alphasignal",
+        newsletter_title="Good news",
+        newsletter_date=None,
+        overview_zh_tw="摘要",
+        items=[
+            {
+                "title": "Good item",
+                "source_title": "Good item",
+                "category": "AI_MODEL",
+                "summary_zh_tw": "內容",
+                "why_it_matters_zh_tw": "原因",
+                "importance": 8,
+                "confidence": 0.9,
+            }
+        ],
+    )
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: StubOllamaClient(extraction))
+
+    result = run_pipeline(settings, no_deliver=True)
+
+    assert (result.status, result.discovered, result.processed, result.failed) == ("partial", 2, 1, 1)
+    assert gmail.applied_labels == [("bad", "failed"), ("good", "processed")]
+    database = Database(settings.database_path)
+    try:
+        row = database.connection.execute(
+            "SELECT documents.state, documents.last_error_code FROM documents"
+            " JOIN gmail_document_state ON gmail_document_state.document_id = documents.id"
+            " WHERE gmail_document_state.gmail_message_id = 'bad'"
+        ).fetchone()
+    finally:
+        database.close()
+    assert tuple(row) == ("failed", "EMAIL_PAYLOAD_INVALID")

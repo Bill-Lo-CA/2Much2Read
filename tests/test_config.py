@@ -266,3 +266,25 @@ def test_the_merge_judgement_budget_bounds_what_one_digest_may_spend() -> None:
 
     with pytest.raises(ValidationError):
         Settings(digest_merge_judgements=-1)
+
+
+def test_an_unknown_timezone_is_rejected_when_the_settings_are_built() -> None:
+    """Not deep inside a run, where ZoneInfoNotFoundError arrives as a KeyError past every handler.
+
+    The other two tools already validated theirs; this one used the value in run_pipeline after the
+    process lock had been taken and the database opened.
+    """
+    assert Settings(digest_timezone="Europe/Paris").digest_timezone == "Europe/Paris"
+
+    with pytest.raises(ValidationError, match="unknown IANA timezone"):
+        Settings(digest_timezone="Not/AZone")
+
+
+def test_implausible_ollama_limits_are_rejected() -> None:
+    for value in (0, -1, 512):
+        with pytest.raises(ValidationError):
+            Settings(ollama_num_ctx=value)
+
+    for value in (0, -30):
+        with pytest.raises(ValidationError):
+            Settings(ollama_timeout_seconds=value)

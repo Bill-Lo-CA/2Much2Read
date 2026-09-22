@@ -4,7 +4,6 @@ import hashlib
 import json
 import re
 import time
-import unicodedata
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 from typing import Literal
@@ -12,6 +11,7 @@ from typing import Literal
 import httpx
 
 from .endpoint_policy import DISCORD_WEBHOOK_INVALID, EndpointPolicyError, validate_discord_webhook
+from .text import is_inert
 
 CORRUPT_MESSAGE_IDS = "DISCORD_MESSAGE_IDS_CORRUPT"
 DISCORD_CONFIG_INVALID = "DISCORD_CONFIG_INVALID"
@@ -65,12 +65,7 @@ _DISCORD_MARKDOWN_ESCAPES = str.maketrans(
 def sanitize_discord_text(value: str) -> str:
     """Make untrusted text inert in Discord while keeping it readable."""
     value = value.replace("\r\n", "\n").replace("\r", "\n")
-    value = "".join(
-        character
-        for character in value
-        if character in "\n\t"
-        or (ord(character) >= 0x20 and not 0x7F <= ord(character) <= 0x9F and unicodedata.category(character) != "Cf")
-    )
+    value = "".join(character for character in value if is_inert(character))
     value = _DISCORD_MENTION.sub(lambda match: match.group().replace("@", "＠", 1), value)
     value = _DISCORD_URL.sub(lambda match: "www[.]" if match.group().lower() == "www." else match.group()[:-3] + "[:]//", value)
     value = re.sub(r"(?m)^([ \t]*)([-+]|\d+[.)])(?=\s|#)", r"\1\\\2", value)
@@ -105,16 +100,6 @@ def configured_destination(mode: str, webhook_url: str, bot_token: str, bot_chan
     if len(destinations) != 1:
         raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
     return destinations[0]
-
-
-def legacy_destination(destinations: list[DiscordDestination], destination_key: str | None = None) -> DiscordDestination:
-    if destination_key:
-        destination = next((item for item in destinations if item.key == destination_key), None)
-        if destination is not None:
-            return destination
-        if destination_key != "webhook":
-            raise DiscordDeliveryError(DISCORD_CONFIG_INVALID)
-    return next((destination for destination in destinations if destination.transport == "webhook"), destinations[0])
 
 
 def parse_message_ids(value: object) -> list[str]:

@@ -1,6 +1,5 @@
 [Unit]
 Description=2busy1miss Next-Day Calendar Agenda
-After=network-online.target
 
 [Service]
 Type=oneshot
@@ -21,3 +20,8 @@ LockPersonality=true
 RestrictSUIDSGID=true
 RestrictRealtime=true
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictNamespaces=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+PrivateDevices=true

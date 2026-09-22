@@ -14,6 +14,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from two_read_runtime.discord import DiscordDestination, configured_destination, configured_destinations
 from two_read_runtime.paths import app_config_file, app_data_file, config_dir, env_file
+from two_read_runtime.settings_validation import valid_timezone
 
 from .digest import SUPPORTED_DIGEST_LANGUAGES, digest_language_code
 
@@ -131,8 +132,8 @@ class Settings(BaseSettings):
     ollama_trust_env: bool = False
     ollama_model: str = "llama3.2:3b"
     ollama_review_model: str = "qwen3:8b"
-    ollama_num_ctx: int = 16384
-    ollama_timeout_seconds: float = 300
+    ollama_num_ctx: int = Field(default=16384, ge=2048)
+    ollama_timeout_seconds: float = Field(default=300, gt=0)
     ollama_keep_alive: str = "10m"
     reranker_model: str = "Qwen/Qwen3-Reranker-0.6B"
     reranker_device: str = "cpu"
@@ -154,6 +155,17 @@ class Settings(BaseSettings):
     digest_review_candidate_limit: int = Field(default=20, ge=1)
     digest_rerank_candidate_limit: int = Field(default=100, ge=1)
     digest_security_candidate_slots: int = Field(default=7, ge=0)
+
+    @field_validator("digest_timezone")
+    @classmethod
+    def supported_digest_timezone(cls, value: str) -> str:
+        """Rejected here, like the other two tools do, rather than deep inside a run.
+
+        This value was first used in run_pipeline after the process lock had been taken and the
+        database opened, and ZoneInfoNotFoundError subclasses KeyError rather than ValueError, so
+        a misspelling arrived as a traceback past every handler in the CLI.
+        """
+        return valid_timezone(value)
 
     @field_validator("digest_language")
     @classmethod

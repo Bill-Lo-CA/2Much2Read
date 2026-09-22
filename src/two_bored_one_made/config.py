@@ -4,7 +4,6 @@ import re
 from datetime import time
 from pathlib import Path
 from typing import Any, Literal, Self
-from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
@@ -13,6 +12,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 from two_read_runtime.discord import DiscordDestination, configured_destination, configured_destinations
 from two_read_runtime.endpoint_policy import EndpointPolicyError, validate_discord_webhook
 from two_read_runtime.paths import app_data_file, config_dir, env_file
+from two_read_runtime.settings_validation import valid_timezone as _timezone
 
 NUDGE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 # Discord's own limit is 2000 characters. The rest of the budget belongs to the mention prefix the
@@ -20,14 +20,6 @@ NUDGE_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")
 MAX_MESSAGE_CHARACTERS = 1800
 MAX_DAILY_TIMES = 24
 MAX_TOTAL_SENDS = 10_000
-
-
-def _timezone(value: str) -> str:
-    try:
-        ZoneInfo(value)
-    except ZoneInfoNotFoundError as error:
-        raise ValueError(f"unknown IANA timezone {value!r}") from error
-    return value
 
 
 def settings_env_file() -> Path:

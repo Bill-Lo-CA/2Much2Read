@@ -16,32 +16,58 @@ from two_busy_one_miss.pipeline import event_query_lookahead
 from two_busy_one_miss.renderer import render_agenda
 from two_busy_one_miss.rules import ReminderCandidate
 from two_busy_one_miss.storage import Database
-from two_read_runtime.discord import DiscordDeliveryError
+from two_read_runtime.discord import DiscordDeliveryError, DiscordDestination
 from two_read_runtime.locking import ProcessLock
 
 
 class FakeReminderDatabase:
+    """A stand-in that speaks the per-destination delivery interface the real Database has.
+
+    It used to omit those methods, which only worked because _dispatch_due_reminders asked
+    `hasattr` first and fell back to a pre-per-destination dispatcher. Production never took that
+    branch - Database has always defined due_reminder_deliveries - so the fallback existed for this
+    fake alone. The fake now yields one delivery per due attempt, which is what a single-webhook
+    deployment has.
+    """
+
     def __init__(self, attempts: list[dict[str, object]]) -> None:
         self.attempts = attempts
         self.failed: list[tuple[int, str]] = []
         self.finished: list[tuple[int, list[str]]] = []
         self.progress: list[tuple[int, list[str]]] = []
         self.closed = False
+        self.expired: list[int] = []
 
     def due_attempts(self, now: datetime) -> list[dict[str, object]]:
         return self.attempts
 
-    def delivery_checkpoint(self, attempt_id: int, destination_key: str) -> object:
-        return next(attempt for attempt in self.attempts if attempt["id"] == attempt_id)["discord_message_ids_json"]
+    def has_reminder_deliveries(self, attempt_id: int) -> bool:
+        return True
 
-    def record_delivery_progress(self, attempt_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
-        self.progress.append((attempt_id, message_ids))
+    def due_reminder_deliveries(self, now: datetime, destinations: list[DiscordDestination]) -> list[dict[str, object]]:
+        return [
+            {
+                "id": attempt["id"],
+                "reminder_attempt_id": attempt["id"],
+                "destination_key": destinations[0].key,
+                "content": attempt["content"],
+                "event_start_at": attempt["event_start_at"],
+                "discord_message_ids_json": attempt["discord_message_ids_json"],
+            }
+            for attempt in self.attempts
+        ]
 
-    def finish_delivery(self, attempt_id: int, message_ids: list[str], destination_key: str | None = None) -> None:
-        self.finished.append((attempt_id, message_ids))
+    def expire_attempt(self, attempt_id: int) -> None:
+        self.expired.append(attempt_id)
 
-    def fail_delivery(self, attempt_id: int, error_code: str) -> None:
-        self.failed.append((attempt_id, error_code))
+    def record_reminder_delivery_progress(self, delivery_id: int, message_ids: list[str]) -> None:
+        self.progress.append((delivery_id, message_ids))
+
+    def finish_reminder_delivery(self, delivery_id: int, message_ids: list[str], destinations: list[DiscordDestination]) -> None:
+        self.finished.append((delivery_id, message_ids))
+
+    def fail_reminder_delivery(self, delivery_id: int, error_code: str, destinations: list[DiscordDestination]) -> None:
+        self.failed.append((delivery_id, error_code))
 
     def close(self) -> None:
         self.closed = True

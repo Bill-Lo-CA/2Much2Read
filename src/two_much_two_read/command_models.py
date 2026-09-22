@@ -17,6 +17,9 @@ class NewsletterRunResult(CommandResult):
     discovered: int
     processed: int
     failed: int
+    # Hacker News feed items rejected before processing, including normal filtering and unreadable
+    # items. Omitted when zero so an ordinary run's output is unchanged.
+    skipped: int | None = None
     delivered: int
     delivery_succeeded: int = 0
     delivery_failed: int = 0
@@ -148,6 +151,10 @@ class FiltersResult(CommandResult):
 
 class DoctorResult(CommandResult):
     checks: dict[str, str]
+    # Which keys, not just that something is wrong. `checks` values are status words from a closed
+    # vocabulary because that is what the healthy/warning verdict reads; the operator's own key
+    # names would break it, so they are reported alongside.
+    unknown_env_keys: list[str] | None = None
 
 
 HackerNewsFetchStatus = Literal[

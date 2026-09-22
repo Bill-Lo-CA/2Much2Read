@@ -14,8 +14,9 @@ from two_read_runtime.oauth import token_status
 from two_read_runtime.paths import directory_is_creatable
 from two_read_runtime.permissions import runtime_permission_checks
 from two_read_runtime.progress import run_with_elapsed
+from two_read_runtime.settings_validation import unknown_env_keys
 
-from .config import Settings, load_reminders
+from .config import Settings, load_reminders, settings_env_file
 from .google_calendar import credentials
 from .pipeline import (
     agenda,
@@ -129,8 +130,13 @@ def doctor(send_test: Annotated[bool, typer.Option()] = False) -> None:
                     checks[f"discord_test_{destination.transport}"] = "ok"
                 except DiscordDeliveryError:
                     checks[f"discord_test_{destination.transport}"] = "failed"
+    unknown_keys = unknown_env_keys(settings_env_file(), type(settings).model_fields)
+    checks["env_keys"] = "ok" if not unknown_keys else "unknown"
     status = "ok" if all(value in _HEALTHY_CHECKS for value in checks.values()) else "warning"
-    emit({"status": status, "checks": checks})
+    payload: dict[str, object] = {"status": status, "checks": checks}
+    if unknown_keys:
+        payload["unknown_env_keys"] = unknown_keys
+    emit(payload)
 
 
 @app.command("discover")
@@ -162,7 +168,7 @@ def agenda_command(
         parsed = date.fromisoformat(day)
     except ValueError as error:
         raise typer.BadParameter("date must use YYYY-MM-DD") from error
-    emit(run_with_elapsed("2busy1miss agenda", lambda: agenda(Settings(), parsed, dry_run, force)))
+    emit_delivery_result(run_with_elapsed("2busy1miss agenda", lambda: agenda(Settings(), parsed, dry_run, force)))
 
 
 @app.command("agenda-next-day")
@@ -171,7 +177,9 @@ def agenda_next_day_command(
     force: Annotated[bool, typer.Option()] = False,
     scheduled: Annotated[bool, typer.Option()] = False,
 ) -> None:
-    emit(run_with_elapsed("2busy1miss agenda next day", lambda: next_day_agenda(Settings(), dry_run, force, scheduled=scheduled)))
+    emit_delivery_result(
+        run_with_elapsed("2busy1miss agenda next day", lambda: next_day_agenda(Settings(), dry_run, force, scheduled=scheduled))
+    )
 
 
 @app.command("agenda-retry")

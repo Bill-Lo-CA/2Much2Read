@@ -1,4 +1,5 @@
 import json
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -6,7 +7,7 @@ from typer.testing import CliRunner
 
 from two_busy_one_miss import cli
 from two_busy_one_miss.config import Settings
-from two_busy_one_miss.pipeline import AgendaRetryResult, ReminderRetryResult, ReminderRunResult
+from two_busy_one_miss.pipeline import AgendaDeliveryResult, AgendaRetryResult, ReminderRetryResult, ReminderRunResult
 from two_read_runtime.discord import DiscordDeliveryError
 
 
@@ -100,34 +101,51 @@ def test_doctor_redacts_missing_config_path_and_reports_custom_runtime(tmp_path:
 
 
 @pytest.mark.parametrize(
-    ("command", "operation", "delivery_result"),
+    ("command", "operation", "delivery_result", "expected_status"),
     [
         (
             ["run"],
             "run",
             ReminderRunResult(status="failed", sent=0, failed=1, failed_by_error_code={}, expired=0),
+            "failed",
         ),
         (
             ["agenda-retry", "2026-07-09"],
             "retry_agenda",
             AgendaRetryResult(status="failed", day="2026-07-09", delivered=0, failed=1, failed_by_error_code={}),
+            "failed",
         ),
         (
             ["retry-delivery"],
             "retry_delivery",
             ReminderRetryResult(status="failed", delivered=0, failed=1, failed_by_error_code={}, expired=0),
+            "failed",
+        ),
+        # The two the timers actually execute. Both reported a failed delivery and exited zero, so
+        # a systemd unit that could not reach Discord still looked like a clean run.
+        (
+            ["agenda", "2026-07-09"],
+            "agenda",
+            AgendaDeliveryResult(status="partial", sent=0, day=date(2026, 7, 9)),
+            "partial",
+        ),
+        (
+            ["agenda-next-day", "--scheduled"],
+            "next_day_agenda",
+            AgendaDeliveryResult(status="partial", sent=0, day=date(2026, 7, 9)),
+            "partial",
         ),
     ],
 )
 def test_delivery_commands_exit_nonzero_when_delivery_fails(
-    command: list[str], operation: str, delivery_result: object, monkeypatch: pytest.MonkeyPatch
+    command: list[str], operation: str, delivery_result: object, expected_status: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr(cli, operation, lambda *args: delivery_result)
+    monkeypatch.setattr(cli, operation, lambda *args, **kwargs: delivery_result)
 
     result = CliRunner().invoke(cli.app, command)
 
     assert result.exit_code == 1
-    assert json.loads(result.stdout)["status"] == "failed"
+    assert json.loads(result.stdout)["status"] == expected_status
 
 
 def test_reset_delivery_checkpoint_requires_an_explicit_delivery_id(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -146,3 +164,29 @@ def test_reset_agenda_checkpoint_requires_an_explicit_delivery_id(monkeypatch: p
 
     assert result.exit_code == 0
     assert json.loads(result.stdout) == {"status": "ok", "delivery_id": 9}
+
+
+def test_doctor_names_a_misspelled_environment_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, isolated_home: Path) -> None:
+    env_path = isolated_home / ".config" / "2much2read-runtime" / ".2busy1miss.env"
+    env_path.parent.mkdir(parents=True)
+    env_path.write_text("DISCORD_WEBHOOK_URL=ignored\nREMINDER_TIMEZON=typo\n", encoding="utf-8")
+    reminders_path = tmp_path / "reminders.yaml"
+    reminders_path.write_text("calendars:\n  - id: primary\n", encoding="utf-8")
+    monkeypatch.setattr(
+        cli,
+        "Settings",
+        lambda: Settings(
+            reminders_config_path=reminders_path,
+            database_path=tmp_path / "reminders.sqlite3",
+            lock_path=tmp_path / "reminders.lock",
+            discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
+        ),
+    )
+
+    result = CliRunner().invoke(cli.app, ["doctor"])
+
+    payload = json.loads(result.stdout)
+    assert payload["status"] == "warning"
+    assert payload["checks"]["env_keys"] == "unknown"
+    # AGENDA_SCHEDULE_TIME really is a setting here, unlike the newsletter tool's DIGEST_SCHEDULE_*
+    assert payload["unknown_env_keys"] == ["REMINDER_TIMEZON"]

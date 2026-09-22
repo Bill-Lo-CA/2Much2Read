@@ -9,7 +9,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 
-from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code, legacy_destination
+from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code
 from two_read_runtime.locking import ProcessLock
 
 from .article_extractor import ArticleExtractionError, extract_article
@@ -345,12 +345,16 @@ def _process_source(
             continue
         message = gmail.get_message(gmail_id)
         payload = message.get("payload")
-        if not isinstance(payload, dict):
-            continue
         headers = message_headers(message)
         received = datetime.fromtimestamp(int(str(message.get("internalDate", "0"))) / 1000, tz=UTC)
         subject = headers.get("subject") or gmail_id
         try:
+            if not isinstance(payload, dict):
+                # Recorded as a failure rather than skipped. A bare continue stored nothing, applied
+                # no failed label, and cost nothing against the run limit, so the query matched the
+                # same message on every run: it reappeared daily and paid for a get_message each
+                # time. Raising here reuses the failure path the extractor's own errors already take.
+                raise EmailExtractionError("message payload is not a MIME structure", "EMAIL_PAYLOAD_INVALID")
             content = _email_content(extract_gmail_payload(payload))
             body = content.analysis_text
         except EmailExtractionError as error:
@@ -459,12 +463,13 @@ def _process_hackernews_source(
     *,
     force: bool,
     now: datetime,
-) -> tuple[int, int, int, int, list[int]]:
+) -> tuple[int, int, int, int, list[int], int]:
     limit = min(remaining, source.max_articles_per_run)
     discovered = 0
     processed = 0
     failed = 0
     attempted = 0
+    skipped = 0
     processed_document_ids: list[int] = []
     fetcher = ArticleFetcher()
     if force:
@@ -489,7 +494,14 @@ def _process_hackernews_source(
             candidates.append(candidate)
     else:
         status(f"{source.id}: scanning stories")
-        candidates = hackernews.discover(source, now, limit=source.max_story_candidates).candidates
+        # Keep normal filtering in `skipped`, but count unreadable items as failures so a broken
+        # item endpoint cannot make a scheduled run look like a quiet news day.
+        discovery = hackernews.discover(source, now, limit=source.max_story_candidates)
+        candidates = discovery.candidates
+        skipped = discovery.skipped
+        failed += discovery.unreadable
+        if discovery.unreadable:
+            status(f"{source.id}: failed to read {discovery.unreadable} stor{'y' if discovery.unreadable == 1 else 'ies'}")
 
     for candidate in candidates:
         if attempted >= limit:
@@ -566,7 +578,7 @@ def _process_hackernews_source(
         processed += 1
         processed_document_ids.append(document_id)
         status(f"{source.id}: processed {candidate.document.title}")
-    return attempted, discovered, processed, failed, processed_document_ids
+    return attempted, discovered, processed, failed, processed_document_ids, skipped
 
 
 def run_pipeline(
@@ -592,6 +604,7 @@ def run_pipeline(
     processed_document_ids: list[int] = []
     discovered = 0
     failed = 0
+    skipped = 0
     delivered = 0
     delivery_succeeded = 0
     delivery_failed = 0
@@ -650,9 +663,17 @@ def run_pipeline(
                             else source.max_articles_per_run
                         )
                         assert hackernews is not None
-                        used, source_discovered, source_processed, source_failed, source_ids = _process_hackernews_source(
+                        (
+                            used,
+                            source_discovered,
+                            source_processed,
+                            source_failed,
+                            source_ids,
+                            source_skipped,
+                        ) = _process_hackernews_source(
                             database, hackernews, ollama, source, source_remaining, status, force=force, now=now
                         )
+                        skipped += source_skipped
                         source_documents = []
                     if command_remaining is not None:
                         command_remaining -= used
@@ -739,6 +760,7 @@ def run_pipeline(
                 discovered=discovered,
                 processed=processed,
                 failed=failed,
+                skipped=skipped or None,
                 delivered=delivered,
                 delivery_succeeded=delivery_succeeded if digest_id is not None and not no_deliver else 0,
                 delivery_failed=delivery_failed if digest_id is not None and not no_deliver else 0,
@@ -773,44 +795,13 @@ def retry_delivery(settings: Settings, database: Database | None = None) -> News
             assert active_database is not None
             for digest in active_database.pending_digests():
                 digest_id = int(digest["id"])
-                if not hasattr(active_database, "has_digest_deliveries"):
-                    try:
-                        try:
-                            destination_key = digest["discord_destination_key"]
-                        except (IndexError, KeyError):
-                            destination_key = None
-
-                        def save_legacy_progress(message_ids: list[str], target_id: int = digest_id) -> None:
-                            active_database.record_delivery_progress(target_id, message_ids)
-
-                        def finish_legacy_delivery(message_ids: list[str], target_id: int = digest_id) -> None:
-                            active_database.finish_delivery(target_id, message_ids)
-
-                        deliver_resumable(
-                            legacy_destination(destinations, str(destination_key) if destination_key is not None else None),
-                            str(digest["rendered_content"]),
-                            settings.discord_username,
-                            digest["discord_message_ids_json"],
-                            save_legacy_progress,
-                            finish_legacy_delivery,
-                            sender=deliver,
-                        )
-                        delivered += 1
-                    except DiscordDeliveryError as error:
-                        error_code = delivery_error_code(error)
-                        active_database.fail_delivery(digest_id, error_code)
-                        failed += 1
-                        failed_by_error_code[error_code] = failed_by_error_code.get(error_code, 0) + 1
-                    continue
+                # Migrating the rows a pre-per-destination digest left behind is still reachable and
+                # stays; what was removed here is the branch that asked whether this Database object
+                # was old enough to lack the method, which it never is.
                 if not active_database.has_digest_deliveries(digest_id) and digest["discord_message_ids_json"] is not None:
                     active_database.migrate_legacy_digest_deliveries(digest_id, destinations)
                 active_database.reconcile_digest_deliveries(digest_id, destinations)
-            deliveries = (
-                active_database.pending_digest_deliveries(destinations)
-                if hasattr(active_database, "pending_digest_deliveries")
-                else []
-            )
-            for delivery in deliveries:
+            for delivery in active_database.pending_digest_deliveries(destinations):
                 try:
                     delivery_id = int(delivery["id"])
                     destination = next(

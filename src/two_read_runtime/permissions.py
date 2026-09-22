@@ -6,7 +6,7 @@ import stat
 from pathlib import Path
 from typing import Literal
 
-from .paths import app_config_dir, app_data_dir, config_dir, env_file
+from .paths import app_config_dir, app_data_dir, config_dir, data_dir, env_file
 
 PermissionStatus = Literal["ok", "missing", "not_created", "unsafe"]
 
@@ -75,6 +75,10 @@ def runtime_permission_checks(
     return {
         "config_dir": private_directory_status(config_dir(), missing_ok=True),
         "token_dir": private_directory_status(token_dir, missing_ok=True),
+        # The two roots are shared by all three tools, and only the installers ever chmod them.
+        # Leaving data_root unchecked is how a documented setup that creates it with the default
+        # mode - `install -d -m 700` applies the mode to the leaf only - stayed invisible.
+        "data_root": private_directory_status(data_dir(), missing_ok=True),
         "data_dir": private_directory_status(application_data_dir, missing_ok=True),
         "env_file": private_file_status(env_file(application)),
         "config_file": private_file_status(config_path),
@@ -134,8 +138,11 @@ def prepare_private_directory(path: Path) -> None:
         try:
             os.mkdir(directory, 0o700)
         except FileExistsError:
+            # Something created this between the walk above and now. Hold it to all three of the
+            # properties the walk enforces, ownership included: checking only the first two let a
+            # directory belonging to someone else through on the one path that races.
             metadata = directory.lstat()
-            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode):
+            if not stat.S_ISDIR(metadata.st_mode) or stat.S_ISLNK(metadata.st_mode) or metadata.st_uid != os.getuid():
                 raise _unsafe() from None
 
 

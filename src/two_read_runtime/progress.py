@@ -7,6 +7,8 @@ from threading import Event, Lock, Thread
 from time import monotonic
 from typing import TypeVar
 
+from .text import is_inert
+
 Result = TypeVar("Result")
 StatusReporter = Callable[[str], None]
 
@@ -73,7 +75,10 @@ def run_with_live_progress(label: str, operation: Callable[[StatusReporter], Res
         output.flush()
 
     def report(message: str) -> None:
-        safe_message = "".join(" " if ord(character) < 32 or ord(character) == 127 else character for character in message)
+        # Status lines carry Gmail subjects and Hacker News titles, so this is untrusted text on its
+        # way to a terminal. keep="" because a status line is one line: a newline here would break
+        # out of the scroll region this display sets up.
+        safe_message = "".join(character if is_inert(character, keep="") else " " for character in message)
         with lock:
             refresh_timer()
             output.write(f"\r\033[K{safe_message}\n")

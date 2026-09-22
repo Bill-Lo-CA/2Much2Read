@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import re
-import unicodedata
 from datetime import date, datetime, time, timedelta
 from urllib.parse import urlsplit
+
+from two_read_runtime.text import is_inert
 
 from .google_calendar import CalendarEvent
 from .rules import ReminderCandidate
@@ -35,12 +36,7 @@ def render_reminder(candidate: ReminderCandidate) -> str:
 
 def _agenda_cell(value: str) -> str:
     value = URL.sub("", value).replace("\r\n", "\n").replace("\r", "\n")
-    value = "".join(
-        character
-        for character in value
-        if character in "\n\t"
-        or (ord(character) >= 0x20 and not 0x7F <= ord(character) <= 0x9F and unicodedata.category(character) != "Cf")
-    )
+    value = "".join(character for character in value if is_inert(character))
     return " ".join(value.replace("@", "@\u200b").replace("`", "ˋ").split())
 
 
@@ -66,13 +62,22 @@ def _valid_link(raw_url: str) -> tuple[str, str] | None:
 
 
 def _event_links(event: CalendarEvent) -> list[tuple[str, str, str]]:
+    """Every link this event carries, from the displayed fields and from the event itself.
+
+    The adapter already collects the Meet, Zoom, htmlLink and description URLs into
+    CalendarEvent.links, and nothing read that tuple: a meeting's join link only reached the reader
+    if someone had also typed it into the title. The displayed fields come first so a link the
+    reader can see in the table above keeps the label naming where it came from.
+    """
     links: list[tuple[str, str, str]] = []
     seen: set[str] = set()
-    for label, value in (
+    sources: list[tuple[str, str]] = [
         ("Title", event.title),
         ("Calendar", event.calendar_name or ""),
         ("Location", event.location),
-    ):
+    ]
+    sources.extend(("Event", url) for url in event.links)
+    for label, value in sources:
         for raw_url in URL.findall(value):
             link = _valid_link(raw_url)
             if link is None or link[0] in seen:

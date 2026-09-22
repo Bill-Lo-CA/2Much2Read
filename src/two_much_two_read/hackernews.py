@@ -76,6 +76,7 @@ class StoredHackerNewsState:
 class HackerNewsDiscovery:
     candidates: list[HackerNewsCandidate]
     skipped: int
+    unreadable: int = 0
 
 
 class HackerNewsClient:
@@ -177,14 +178,17 @@ class HackerNewsClient:
         candidate_limit = min(source.max_story_candidates, limit) if limit is not None else source.max_articles_per_run
         candidates: list[HackerNewsCandidate] = []
         skipped = 0
+        unreadable = 0
         for feed_rank, story_id in enumerate(self.feed_ids(source), start=1):
             try:
                 item = self.item(story_id)
             except HackerNewsError:
                 skipped += 1
+                unreadable += 1
                 continue
             if item is None:
                 skipped += 1
+                unreadable += 1
                 continue
             candidate = self._candidate(source, item, feed_rank, active_now)
             if candidate is None:
@@ -193,7 +197,7 @@ class HackerNewsClient:
             candidates.append(candidate)
             if len(candidates) >= candidate_limit:
                 break
-        return HackerNewsDiscovery(candidates, skipped)
+        return HackerNewsDiscovery(candidates, skipped, unreadable)
 
     def retry_candidate(
         self, source: HackerNewsSource, story_id: int, feed_rank: int, now: datetime | None = None

@@ -70,7 +70,7 @@ def test_discovery_filters_items_preserves_rank_and_bounds_requests() -> None:
         ("3", 3, "external"),
         ("4", 4, "self_post"),
     ]
-    assert discovery.skipped == 2
+    assert (discovery.skipped, discovery.unreadable) == (2, 0)
 
 
 def test_discovery_skips_item_fetch_failures_and_continues() -> None:
@@ -87,7 +87,7 @@ def test_discovery_skips_item_fetch_failures_and_continues() -> None:
         http_client.close()
 
     assert [candidate.document.external_id for candidate in discovery.candidates] == ["2"]
-    assert discovery.skipped == 1
+    assert (discovery.skipped, discovery.unreadable) == (1, 1)
 
 
 def test_discovery_limit_stops_before_fetching_later_items() -> None:
@@ -119,7 +119,7 @@ def test_discovery_rejects_item_payloads_with_the_wrong_id() -> None:
         http_client.close()
 
     assert [candidate.document.external_id for candidate in discovery.candidates] == ["2"]
-    assert discovery.skipped == 1
+    assert (discovery.skipped, discovery.unreadable) == (1, 1)
 
 
 def test_malformed_feed_is_a_source_error() -> None:
