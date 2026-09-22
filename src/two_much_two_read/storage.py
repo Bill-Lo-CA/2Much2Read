@@ -14,11 +14,12 @@ from urllib.parse import urlsplit
 
 from two_read_runtime.discord import DiscordDestination
 from two_read_runtime.permissions import prepare_private_file, repair_sqlite_files
+from two_read_runtime.sqlite_snapshot import reading_connection
 
 from .digest import canonical_url, normalized_title
 from .schemas import DigestItem, EmailExtraction, ItemAnalysis, ResolvedContent, SourceDocument
 
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 # Deliberately carries no foreign key to items: store_items(replace=True) deletes and re-inserts
 # a document's items on every reprocess, and an audit log has to outlive the rows it describes.
 # document_id and normalized_title keep a scored row traceable after its item id is gone.
@@ -28,6 +29,9 @@ RERANKER_SCORES_SCHEMA = """CREATE TABLE IF NOT EXISTS reranker_scores(
 );
 CREATE INDEX IF NOT EXISTS reranker_scores_item ON reranker_scores(item_id);
 CREATE INDEX IF NOT EXISTS reranker_scores_scored_at ON reranker_scores(scored_at);"""
+GMAIL_SOURCE_CURSOR_SCHEMA = """CREATE TABLE IF NOT EXISTS gmail_source_cursor(
+  id INTEGER PRIMARY KEY CHECK(id=1), source_id TEXT NOT NULL
+);"""
 SCHEMA = f"""
 CREATE TABLE IF NOT EXISTS schema_version(version INTEGER PRIMARY KEY, applied_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS documents(
@@ -86,6 +90,7 @@ CREATE TABLE IF NOT EXISTS runs(
   failed_count INTEGER NOT NULL DEFAULT 0, delivered_digest_count INTEGER NOT NULL DEFAULT 0, error_summary TEXT
 );
 {RERANKER_SCORES_SCHEMA}
+{GMAIL_SOURCE_CURSOR_SCHEMA}
 INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES({SCHEMA_VERSION}, datetime('now'));
 """
 
@@ -152,6 +157,11 @@ class Database:
             if version == 8:
                 self._migrate_v8_to_v9()
                 version = 9
+            if version == 9:
+                self.connection.executescript(GMAIL_SOURCE_CURSOR_SCHEMA)
+                self.connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(10, datetime('now'))")
+                self.connection.commit()
+                version = 10
             if version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
                 raise DatabaseSchemaResetRequiredError(
                     f"DATABASE_SCHEMA_RESET_REQUIRED: back up {path} and remove it before rerunning 2much2read"
@@ -326,6 +336,18 @@ class Database:
             (gmail_id,),
         ).fetchone()
         return cast(sqlite3.Row | None, row)
+
+    def last_gmail_source(self) -> str | None:
+        row = self.connection.execute("SELECT source_id FROM gmail_source_cursor WHERE id=1").fetchone()
+        return str(row[0]) if row is not None else None
+
+    def record_gmail_source(self, source_id: str) -> None:
+        self.connection.execute(
+            """INSERT INTO gmail_source_cursor(id,source_id) VALUES(1,?)
+            ON CONFLICT(id) DO UPDATE SET source_id=excluded.source_id""",
+            (source_id,),
+        )
+        self.connection.commit()
 
     def store_hackernews_metadata(
         self,
@@ -857,12 +879,82 @@ class Database:
         )
         self.connection.commit()
 
+    # What a prune may remove, and the column that dates each row. `digests` is narrowed further in
+    # _prune_predicate; the other four are safe to delete on age alone. `digest_deliveries` is
+    # absent because it cascades from `digests`.
+    PRUNABLE: tuple[tuple[str, str], ...] = (
+        ("items", "created_at"),
+        ("reranker_scores", "scored_at"),
+        ("url_resolution_cache", "checked_at"),
+        ("digests", "created_at"),
+        ("runs", "started_at"),
+    )
+
+    @staticmethod
+    def _prune_predicate(table: str, column: str) -> str:
+        """A digest that was never delivered is kept whatever its age.
+
+        It holds rendered content nobody has received. Deleting it on age would destroy that
+        content and hide the reason it is still sitting there, which is a bug worth seeing rather
+        than collecting.
+        """
+        if table == "digests":
+            return f"{column} < ? AND state = 'delivered'"
+        return f"{column} < ?"
+
+    @classmethod
+    def prunable(cls, path: Path, cutoff: datetime) -> dict[str, int]:
+        """Count a snapshot's aged rows without creating or migrating the live database."""
+        stamp = cutoff.astimezone(UTC).isoformat()
+        counts = dict.fromkeys((table for table, _ in cls.PRUNABLE), 0)
+        with reading_connection(path, ()) as connection:
+            if connection is not None:
+                # Older schemas may not have every derived table yet.
+                tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                for table, column in cls.PRUNABLE:
+                    if table in tables:
+                        counts[table] = int(
+                            connection.execute(
+                                f"SELECT COUNT(*) FROM {table} WHERE {cls._prune_predicate(table, column)}", (stamp,)
+                            ).fetchone()[0]
+                        )
+        return counts
+
+    def prune(self, cutoff: datetime) -> dict[str, int]:
+        """Delete run history and derived rows older than `cutoff`, keeping the deduplication ledger.
+
+        `documents`, `gmail_document_state` and `hackernews_document_state` are never pruned: they
+        are what stops an already-delivered newsletter being discovered and sent a second time, and
+        on disk they are a rounding error - 115 KB of ledger against 1.4 MB of `items` alone when
+        this was written. Everything removed here is either a record of what happened or a cache
+        that regenerates on demand. The Gmail source cursor also survives so pruning cannot reset fairness.
+        """
+        stamp = cutoff.astimezone(UTC).isoformat()
+        deleted: dict[str, int] = {}
+        with self.connection:
+            for table, column in self.PRUNABLE:
+                cursor = self.connection.execute(f"DELETE FROM {table} WHERE {self._prune_predicate(table, column)}", (stamp,))
+                deleted[table] = cursor.rowcount
+        return deleted
+
+    def vacuum(self) -> int:
+        """Reclaim the freed pages, returning the bytes given back. Cannot run inside a transaction."""
+        before = self._file_bytes()
+        self.connection.execute("VACUUM")
+        return max(0, before - self._file_bytes())
+
+    def _file_bytes(self) -> int:
+        page_count = int(self.connection.execute("PRAGMA page_count").fetchone()[0])
+        page_size = int(self.connection.execute("PRAGMA page_size").fetchone()[0])
+        return page_count * page_size
+
     def counts(self) -> dict[str, int]:
         return {
             table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
             for table in (
                 "documents",
                 "gmail_document_state",
+                "gmail_source_cursor",
                 "hackernews_document_state",
                 "items",
                 "reranker_scores",
@@ -892,6 +984,7 @@ class Database:
                 "reranker_scores",
                 "items",
                 "gmail_document_state",
+                "gmail_source_cursor",
                 "hackernews_document_state",
                 "documents",
                 "digest_deliveries",

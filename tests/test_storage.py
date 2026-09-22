@@ -7,7 +7,7 @@ from pathlib import Path
 import pytest
 
 from two_much_two_read.schemas import EmailExtraction, NewsletterItemAnalysis, ResolvedContent, SourceDocument
-from two_much_two_read.storage import Database, DatabaseSchemaResetRequiredError
+from two_much_two_read.storage import SCHEMA_VERSION, Database, DatabaseSchemaResetRequiredError
 from two_read_runtime.discord import configured_destinations
 
 
@@ -280,7 +280,7 @@ def test_v2_schema_upgrades_without_losing_documents(tmp_path: Path) -> None:
 
     upgraded = Database(path)
 
-    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == 9
+    assert upgraded.connection.execute("SELECT version FROM schema_version ORDER BY version DESC").fetchone()[0] == SCHEMA_VERSION
     assert upgraded.connection.execute("SELECT gmail_message_id FROM gmail_document_state").fetchone()[0] == "gmail-1"
     assert upgraded.connection.execute("SELECT 1 FROM sqlite_master WHERE name='hackernews_document_state'").fetchone()[0] == 1
     upgraded.close()
@@ -328,7 +328,7 @@ def test_v3_hackernews_state_upgrades_without_losing_metadata(tmp_path: Path) ->
 
     row = upgraded.connection.execute("SELECT hn_item_id,requested_url,fetch_status FROM hackernews_document_state").fetchone()
     assert tuple(row) == (123, "https://example.com", "not_requested")
-    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
+    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == SCHEMA_VERSION
     upgraded.close()
 
 
@@ -350,8 +350,30 @@ def test_v6_schema_adds_parent_checkpoint_destination(tmp_path: Path) -> None:
     ).fetchone()
     assert tuple(row) == ('["message"]', "webhook")
     assert "retired_at" in {column["name"] for column in upgraded.connection.execute("PRAGMA table_info(digest_deliveries)")}
-    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 9
+    assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == SCHEMA_VERSION
     upgraded.close()
+
+
+def test_v9_schema_adds_gmail_cursor_without_losing_documents(tmp_path: Path) -> None:
+    path = tmp_path / "v9.sqlite3"
+    database = Database(path)
+    assert discover(database, "gmail-1") is not None
+    database.connection.executescript(
+        "DROP TABLE gmail_source_cursor; DELETE FROM schema_version; INSERT INTO schema_version VALUES(9,'now');"
+    )
+    database.close()
+
+    upgraded = Database(path)
+    try:
+        assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+        assert upgraded.last_gmail_source() is None
+        assert upgraded.gmail_document("gmail-1") is not None
+        upgraded.record_gmail_source("first")
+        upgraded.record_gmail_source("second")
+        assert upgraded.last_gmail_source() == "second"
+        assert upgraded.counts()["gmail_source_cursor"] == 1
+    finally:
+        upgraded.close()
 
 
 def test_digest_checkpoint_is_reset_for_a_new_destination(tmp_path: Path) -> None:
@@ -401,15 +423,19 @@ def test_migrating_legacy_digest_does_not_adopt_unknown_webhook_checkpoint(tmp_p
 def test_backup_and_reset(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     assert discover(database, "gmail-1") is not None
+    database.record_gmail_source("source")
     backup_path = tmp_path / "backup.sqlite3"
 
     database.backup(backup_path)
     counts = database.reset()
 
     assert counts["documents"] == 1
+    assert counts["gmail_source_cursor"] == 1
+    assert database.last_gmail_source() is None
     assert database.counts() == {
         "documents": 0,
         "gmail_document_state": 0,
+        "gmail_source_cursor": 0,
         "hackernews_document_state": 0,
         "items": 0,
         "reranker_scores": 0,
@@ -421,5 +447,146 @@ def test_backup_and_reset(tmp_path: Path) -> None:
     assert backup_path.stat().st_mode & 0o777 == 0o600
     backup = Database(backup_path)
     assert backup.counts()["documents"] == 1
+    assert backup.last_gmail_source() == "source"
     backup.close()
     database.close()
+
+
+def _aged_row(database: Database, table: str, column: str, stamp: str, **columns: object) -> None:
+    columns[column] = stamp
+    names = ",".join(columns)
+    placeholders = ",".join("?" for _ in columns)
+    database.connection.execute(f"INSERT INTO {table}({names}) VALUES({placeholders})", tuple(columns.values()))
+    database.connection.commit()
+
+
+def _seed_for_prune(database: Database, old: str, recent: str) -> int:
+    document_id = discover(database, "keep-me")
+    assert document_id is not None
+    for stamp in (old, recent):
+        _aged_row(
+            database,
+            "items",
+            "created_at",
+            stamp,
+            document_id=document_id,
+            normalized_title="t",
+            title="T",
+            category="AI",
+            summary_zh_tw="s",
+            why_it_matters_zh_tw="w",
+            importance=1,
+            confidence=0.5,
+            tags_json="[]",
+        )
+        _aged_row(database, "runs", "started_at", stamp, run_type="newsletter_digest", status="ok")
+        _aged_row(
+            database,
+            "reranker_scores",
+            "scored_at",
+            stamp,
+            item_id=1,
+            document_id=document_id,
+            normalized_title="t",
+            score=0.5,
+            model="m",
+            prompt_version="v1",
+        )
+        _aged_row(
+            database,
+            "url_resolution_cache",
+            "checked_at",
+            stamp,
+            raw_url_hash=f"hash-{stamp}",
+            raw_url_host="example.com",
+            status="resolved",
+            expires_at=recent,
+        )
+    return document_id
+
+
+def _digest(database: Database, key: str, state: str, stamp: str) -> None:
+    _aged_row(
+        database,
+        "digests",
+        "created_at",
+        stamp,
+        digest_key=key,
+        period_start=stamp,
+        period_end=stamp,
+        timezone="UTC",
+        content_sha256="sha",
+        rendered_content="body",
+        state=state,
+        updated_at=stamp,
+    )
+
+
+def test_prune_removes_aged_derived_rows_but_never_the_deduplication_ledger(tmp_path: Path) -> None:
+    """Pruning documents or gmail_document_state would re-deliver newsletters already sent.
+
+    They are also the smallest tables in the database, so exempting them costs nothing: when this
+    was written the ledger held 115 KB against 1.4 MB of items alone.
+    """
+    database = Database(tmp_path / "prune.sqlite3")
+    try:
+        old = datetime(2026, 1, 1, tzinfo=UTC).isoformat()
+        recent = datetime.now(UTC).isoformat()
+        document_id = _seed_for_prune(database, old, recent)
+        _digest(database, "old-delivered", "delivered", old)
+        database.record_gmail_source("source")
+
+        deleted = database.prune(datetime(2026, 6, 1, tzinfo=UTC))
+
+        assert deleted == {
+            "items": 1,
+            "reranker_scores": 1,
+            "url_resolution_cache": 1,
+            "digests": 1,
+            "runs": 1,
+        }
+        assert database.counts()["documents"] == 1
+        assert database.last_gmail_source() == "source"
+        assert (
+            database.connection.execute(
+                "SELECT COUNT(*) FROM gmail_document_state WHERE document_id=?", (document_id,)
+            ).fetchone()[0]
+            == 1
+        )
+        for table in ("items", "runs", "reranker_scores", "url_resolution_cache"):
+            assert database.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 1
+    finally:
+        database.close()
+
+
+def test_prune_keeps_an_undelivered_digest_whatever_its_age(tmp_path: Path) -> None:
+    """A pending digest holds content nobody received; deleting it on age would destroy it."""
+    database = Database(tmp_path / "prune.sqlite3")
+    try:
+        old = datetime(2026, 1, 1, tzinfo=UTC).isoformat()
+        _digest(database, "old-pending", "pending", old)
+        _digest(database, "old-failed", "failed", old)
+        _digest(database, "old-delivered", "delivered", old)
+
+        deleted = database.prune(datetime(2026, 6, 1, tzinfo=UTC))
+
+        assert deleted["digests"] == 1
+        remaining = {str(row["digest_key"]) for row in database.connection.execute("SELECT digest_key FROM digests")}
+        assert remaining == {"old-pending", "old-failed"}
+    finally:
+        database.close()
+
+
+def test_prunable_counts_the_same_rows_prune_would_delete(tmp_path: Path) -> None:
+    database = Database(tmp_path / "prune.sqlite3")
+    try:
+        old = datetime(2026, 1, 1, tzinfo=UTC).isoformat()
+        recent = datetime.now(UTC).isoformat()
+        _seed_for_prune(database, old, recent)
+        _digest(database, "old-delivered", "delivered", old)
+        cutoff = datetime(2026, 6, 1, tzinfo=UTC)
+
+        preview = Database.prunable(tmp_path / "prune.sqlite3", cutoff)
+        assert preview == database.prune(cutoff)
+    finally:
+        database.close()

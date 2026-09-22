@@ -38,6 +38,15 @@ class DeliveryCheckpointResetResult(CommandResult):
     delivery_id: int
 
 
+class MaintenancePruneResult(CommandResult):
+    retention_days: int
+    cutoff: str
+    dry_run: bool = False
+    # Per table, so it is visible that the document and Gmail-state ledgers were not touched.
+    deleted: dict[str, int]
+    reclaimed_bytes: int = 0
+
+
 class MailSelector(BaseModel):
     source: str | None = None
     query: str | None = None

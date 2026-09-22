@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from base64 import urlsafe_b64encode
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+from conftest import directory_digest
 
 from two_much_two_read import mail_operations, pipeline
 from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl
@@ -804,7 +806,18 @@ def test_credentials_failure_records_a_failed_run(tmp_path: Path, monkeypatch: p
     row = database.connection.execute(
         "SELECT run_type,status,discovered_count,processed_count,failed_count,delivered_digest_count,error_summary FROM runs"
     ).fetchone()
-    assert tuple(row) == ("newsletter_digest", "failed", 0, 0, 0, 0, "ValueError")
+    # The run row is the only record a scheduled failure leaves, so it carries the code that says
+    # what to do - not just the exception class, which is what six consecutive daily failures in
+    # September 2026 left behind.
+    assert tuple(row) == (
+        "newsletter_digest",
+        "failed",
+        0,
+        0,
+        0,
+        0,
+        "ValueError: AUTH_REAUTH_REQUIRED: run '2much2read auth gmail'",
+    )
     database.close()
 
 
@@ -1290,7 +1303,11 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
 
     result = run_pipeline(settings, max_messages=3, no_deliver=True)
 
-    assert len(iter_calls) == 2
+    # Three scans rather than two. `first` holds two messages and its share of the capped budget is
+    # one, so the leftover pass has to ask it again to reach the second - that is what the second
+    # pass is for. Messages the first pass already handled are skipped without a get_message, so
+    # the extra cost is a single list call, and the totals are unchanged.
+    assert ["first@example.com" in query for query in iter_calls] == [True, False, True]
     assert result.processed == 3
 
 
@@ -1562,7 +1579,10 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
     assert gmail.applied_labels == []
     database = Database(settings.database_path)
     assert database.connection.execute("SELECT state FROM documents").fetchone()["state"] == "discovered"
-    assert tuple(database.connection.execute("SELECT status,error_summary FROM runs").fetchone()) == ("failed", "ConnectError")
+    assert tuple(database.connection.execute("SELECT status,error_summary FROM runs").fetchone()) == (
+        "failed",
+        "ConnectError: Ollama unavailable",
+    )
     database.close()
 
     ollama.error = None
@@ -2113,3 +2133,461 @@ def test_a_message_without_a_mime_payload_is_recorded_as_failed_not_skipped(
     finally:
         database.close()
     assert tuple(row) == ("failed", "EMAIL_PAYLOAD_INVALID")
+
+
+def _gmail_sources_yaml(count: int) -> str:
+    lines = ["sources:"]
+    for index in range(count):
+        lines.append(f"  - type: gmail\n    id: source-{index}\n    name: Source {index}\n    gmail_query: from:s{index}.example")
+    return "\n".join(lines) + "\n"
+
+
+def test_every_gmail_source_is_read_before_any_source_takes_a_second_helping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget used to be spent in file order, so a busy source starved everything after it.
+
+    source-0 here always consumes whatever it is offered, which under the old loop left nothing
+    for source-1 through source-4 - they were skipped by a bare `continue` that recorded nothing.
+    """
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(_gmail_sources_yaml(5), encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        gmail_max_messages_per_run=6,
+    )
+    offered: list[tuple[str, int]] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
+        source = args[4]
+        budget = int(args[5])
+        offered.append((source.id, budget))  # type: ignore[attr-defined]
+        return (budget, budget, budget, 0, [], []) if source.id == "source-0" else (0, 0, 0, 0, [], [])  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_process_source", process_gmail)
+
+    run_pipeline(settings, no_deliver=True)
+
+    first_pass = offered[:5]
+    assert [source_id for source_id, _ in first_pass] == [f"source-{index}" for index in range(5)]
+    assert {budget for _, budget in first_pass} == {1}
+    # Only the source that used its whole allowance is asked again; the four that came back empty
+    # have nothing waiting, so their queries are not repeated.
+    assert offered[5:] == [("source-0", 5)]
+
+
+def test_a_source_that_exhausts_its_allowance_gets_the_leftover_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(_gmail_sources_yaml(2), encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        gmail_max_messages_per_run=10,
+    )
+    offered: list[tuple[str, int]] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
+        source = args[4]
+        budget = int(args[5])
+        offered.append((source.id, budget))  # type: ignore[attr-defined]
+        return budget, budget, budget, 0, [], []
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_process_source", process_gmail)
+
+    result = run_pipeline(settings, no_deliver=True)
+
+    assert offered == [("source-0", 5), ("source-1", 5)]
+    assert result.processed == 10
+
+
+def test_fair_share_never_offers_a_source_nothing() -> None:
+    assert pipeline._fair_share(50, 34) == 1
+    assert pipeline._fair_share(10, 2) == 5
+    assert pipeline._fair_share(3, 10) == 1
+    assert pipeline._fair_share(50, 0) == 0
+
+
+def test_error_summary_keeps_the_message_and_the_cause() -> None:
+    """The six silent failures of 2026-09-13..18 recorded only the word "ValueError"."""
+    cause = RuntimeError("invalid_grant: token expired")
+    error = ValueError("AUTH_REAUTH_REQUIRED: run '2much2read auth'")
+    error.__cause__ = cause
+
+    summary = pipeline._error_summary(error)
+
+    assert summary == ("ValueError: AUTH_REAUTH_REQUIRED: run '2much2read auth' <- RuntimeError: invalid_grant: token expired")
+
+
+def test_error_summary_flattens_control_characters_and_bounds_its_length() -> None:
+    # U+009B is the C1 CSI, which most terminals read as ESC [ - it becomes a space rather than
+    # being dropped, so the two words either side of it stay separate words.
+    summary = pipeline._error_summary(ValueError("line\u009bone\nline\ttwo   spaced"))
+
+    assert summary == "ValueError: line one line two spaced"
+
+    long_summary = pipeline._error_summary(ValueError("x" * (pipeline.MAX_ERROR_SUMMARY * 2)))
+
+    assert len(long_summary) == pipeline.MAX_ERROR_SUMMARY
+    assert long_summary.endswith("…")
+
+
+def test_prune_dry_run_reports_what_it_would_delete_and_deletes_nothing(
+    newsletter_settings: Settings, newsletter_database: Database
+) -> None:
+    old = datetime(2026, 1, 1, tzinfo=UTC).isoformat()
+    newsletter_database.connection.execute(
+        "INSERT INTO runs(run_type,started_at,status) VALUES('newsletter_digest',?,'ok')", (old,)
+    )
+    newsletter_database.connection.commit()
+
+    with pipeline.ProcessLock(newsletter_settings.lock_path):
+        before = directory_digest(newsletter_settings.database_path.parent)
+        preview = pipeline.prune_database(newsletter_settings, days=1, dry_run=True)
+        assert directory_digest(newsletter_settings.database_path.parent) == before
+
+    assert preview.dry_run is True
+    assert preview.retention_days == 1
+    assert preview.deleted["runs"] == 1
+    assert preview.reclaimed_bytes == 0
+    assert newsletter_database.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+
+    applied = pipeline.prune_database(newsletter_settings, days=1)
+
+    assert applied.dry_run is False
+    assert applied.deleted["runs"] == 1
+    assert newsletter_database.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("database_state", ["missing", "empty", "initialized"])
+def test_prune_dry_run_on_missing_or_empty_database_is_read_only(newsletter_settings: Settings, database_state: str) -> None:
+    if database_state == "empty":
+        newsletter_settings.database_path.touch()
+    elif database_state == "initialized":
+        database = Database(newsletter_settings.database_path)
+        database.close()
+
+    before = directory_digest(newsletter_settings.database_path.parent)
+    result = pipeline.prune_database(newsletter_settings, days=1, dry_run=True)
+
+    assert result.deleted == {
+        "items": 0,
+        "reranker_scores": 0,
+        "url_resolution_cache": 0,
+        "digests": 0,
+        "runs": 0,
+    }
+    assert result.reclaimed_bytes == 0
+    assert directory_digest(newsletter_settings.database_path.parent) == before
+    assert newsletter_settings.database_path.exists() is (database_state != "missing")
+    assert not newsletter_settings.lock_path.exists()
+
+
+def test_prune_dry_run_reads_schema_v8_without_migrating(newsletter_settings: Settings) -> None:
+    database = Database(newsletter_settings.database_path)
+    database.connection.execute("DROP TABLE reranker_scores")
+    database.connection.execute("DELETE FROM schema_version")
+    database.connection.execute("INSERT INTO schema_version(version,applied_at) VALUES(8,datetime('now'))")
+    database.connection.execute(
+        "INSERT INTO runs(run_type,started_at,status) VALUES('newsletter_digest',?,'ok')",
+        (datetime(2026, 1, 1, tzinfo=UTC).isoformat(),),
+    )
+    database.connection.commit()
+    database.close()
+
+    before = directory_digest(newsletter_settings.database_path.parent)
+    result = pipeline.prune_database(newsletter_settings, days=1, dry_run=True)
+
+    assert result.deleted == {
+        "items": 0,
+        "reranker_scores": 0,
+        "url_resolution_cache": 0,
+        "digests": 0,
+        "runs": 1,
+    }
+    assert directory_digest(newsletter_settings.database_path.parent) == before
+
+    connection = sqlite3.connect(newsletter_settings.database_path)
+    try:
+        assert connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8
+        assert connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reranker_scores'").fetchone() is None
+    finally:
+        connection.close()
+
+
+def test_prune_defaults_to_the_configured_retention_window(newsletter_settings: Settings, newsletter_database: Database) -> None:
+    within = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+    beyond = (datetime.now(UTC) - timedelta(days=40)).isoformat()
+    for stamp in (within, beyond):
+        newsletter_database.connection.execute(
+            "INSERT INTO runs(run_type,started_at,status) VALUES('newsletter_digest',?,'ok')", (stamp,)
+        )
+    newsletter_database.connection.commit()
+
+    result = pipeline.prune_database(newsletter_settings)
+
+    assert result.retention_days == 30
+    assert result.deleted["runs"] == 1
+    assert newsletter_database.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+
+
+class PerSourceGmailClient(StubGmailClient):
+    """Returns only the messages whose id matches the querying source, as real Gmail queries do.
+
+    A single StubGmailClient hands every source the same ids, which is not merely unrealistic: two
+    documents then claim one gmail_message_id and gmail_document_state's UNIQUE index aborts the
+    run. That is worth knowing about separately - it is what the catalog's rule against two sources
+    sharing a query is protecting - but it is not what this test is about.
+    """
+
+    def iter_messages(self, query: str):
+        match = re.search(r"from:s(\d+)\.example", query)
+        assert match is not None, query
+        prefix = f"source-{match.group(1)}-"
+        yield from (message_id for message_id in self.message_ids if message_id.startswith(prefix))
+
+
+def test_the_leftover_pass_does_not_re_extract_what_the_first_pass_already_did(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second pass restarts the Gmail query, so it meets the first pass's own messages again.
+
+    They are still `discovered` - store_items(finalize=False) leaves them there and the Processed
+    label is not synchronised until the digest exists - so neither guard stops them: the state
+    check only skips `processed` and `failed`, and discover_document returns the existing id for a
+    `discovered` row rather than None. Without an exclusion the run pays for get_message and a
+    second ollama.extract per message, ~47s each on this hardware, and counts them again against
+    the budget that should be reaching new mail.
+
+    The scheduler tests above stub _process_source out entirely, which is why they cannot see it.
+    """
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(_gmail_sources_yaml(2), encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        gmail_max_messages_per_run=10,
+    )
+
+    def encoded(value: str) -> str:
+        return urlsafe_b64encode(value.encode()).decode().rstrip("=")
+
+    # source-0 has six waiting against an allowance of five, so it is the one the leftover pass
+    # comes back to. source-1 has none.
+    message_ids = [f"source-0-{index}" for index in range(6)]
+    gmail = PerSourceGmailClient(
+        message_ids,
+        {
+            gmail_id: {
+                "threadId": f"thread-{gmail_id}",
+                "internalDate": "1784786400000",
+                "payload": {
+                    "headers": [{"name": "Subject", "value": gmail_id}, {"name": "From", "value": "news@example.com"}],
+                    "parts": [{"mimeType": "text/plain", "body": {"data": encoded(f"body of {gmail_id}")}}],
+                },
+            }
+            for gmail_id in message_ids
+        },
+    )
+
+    extracted: list[str] = []
+
+    class CountingOllamaClient:
+        def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
+            extracted.append(content)
+            return EmailExtraction(
+                source_id=source_id,
+                newsletter_title="Newsletter",
+                newsletter_date=None,
+                overview_zh_tw="摘要",
+                items=[
+                    NewsletterItemAnalysis(
+                        title="Item",
+                        source_title="Item",
+                        category="OTHER",
+                        summary_zh_tw="摘要",
+                        why_it_matters_zh_tw="原因",
+                        importance=7,
+                        confidence=0.9,
+                    )
+                ],
+            )
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: CountingOllamaClient())
+
+    result = run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, tzinfo=UTC))
+
+    assert sorted(extracted) == sorted(f"body of {gmail_id}" for gmail_id in message_ids)
+    assert result.discovered == 6
+    assert result.processed == 6
+
+
+def test_a_smaller_command_budget_is_still_shared_between_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--max-messages has to shrink the allowance too, or capped runs keep the old starvation.
+
+    The allowance was derived from GMAIL_MAX_MESSAGES_PER_RUN alone: with three sources and the
+    default 50 that is 16 each, so a `--max-messages 3` run offered all three of its messages to
+    the first source and left at command_remaining == 0 before reaching the other two. Source order
+    is stable, so it was the same two sources every time - exactly what this scheduling is for.
+    """
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(_gmail_sources_yaml(3), encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        gmail_max_messages_per_run=50,
+    )
+    offered: list[tuple[str, int]] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
+        source = args[4]
+        budget = int(args[5])
+        offered.append((source.id, budget))  # type: ignore[attr-defined]
+        return budget, budget, budget, 0, [], []
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_process_source", process_gmail)
+
+    result = run_pipeline(settings, max_messages=3, no_deliver=True)
+
+    assert offered == [("source-0", 1), ("source-1", 1), ("source-2", 1)]
+    assert result.processed == 3
+
+
+def _cursor_gmail_messages(per_source: int) -> tuple[list[str], dict[str, dict[str, object]]]:
+    def encoded(value: str) -> str:
+        return urlsafe_b64encode(value.encode()).decode().rstrip("=")
+
+    message_ids = [f"source-{source}-{message}" for message in range(per_source) for source in range(3)]
+    messages = {
+        message_id: {
+            "threadId": f"thread-{message_id}",
+            "internalDate": "1784786400000",
+            "payload": {
+                "headers": [
+                    {"name": "Subject", "value": message_id},
+                    {"name": "From", "value": "news@example.com"},
+                ],
+                "parts": [{"mimeType": "text/plain", "body": {"data": encoded(f"body of {message_id}")}}],
+            },
+        }
+        for message_id in message_ids
+    }
+    return message_ids, messages
+
+
+@pytest.mark.parametrize(("gmail_budget", "max_messages"), [(2, None), (50, 2)])
+def test_gmail_source_cursor_rotates_across_runs_and_ignores_dry_run(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    gmail_budget: int,
+    max_messages: int | None,
+) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(_gmail_sources_yaml(3), encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        gmail_max_messages_per_run=gmail_budget,
+    )
+    message_ids, messages = _cursor_gmail_messages(3)
+    gmail = PerSourceGmailClient(message_ids, messages)
+    calls: list[str] = []
+
+    class RecordingOllamaClient:
+        def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
+            calls.append(source_id)
+            return EmailExtraction(
+                source_id=source_id,
+                newsletter_title="Newsletter",
+                newsletter_date=None,
+                overview_zh_tw="摘要",
+                items=[],
+            )
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: RecordingOllamaClient())
+
+    formal_orders: list[list[str]] = []
+    for day in range(3):
+        if day == 1:
+            run_pipeline(settings, max_messages=max_messages, no_deliver=True, dry_run=True)
+        calls.clear()
+        run_pipeline(settings, max_messages=max_messages, no_deliver=True, now=datetime(2026, 7, 24 + day, 12, tzinfo=UTC))
+        formal_orders.append(calls.copy())
+
+    assert formal_orders == [
+        ["source-0", "source-1"],
+        ["source-2", "source-0"],
+        ["source-1", "source-2"],
+    ]
+
+
+def test_gmail_source_cursor_is_saved_before_source_processing_can_fail(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(_gmail_sources_yaml(3), encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        gmail_max_messages_per_run=2,
+    )
+    message_ids, messages = _cursor_gmail_messages(1)
+    gmail = PerSourceGmailClient(message_ids, messages)
+    extracted: list[str] = []
+
+    class RecordingOllamaClient:
+        def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
+            extracted.append(source_id)
+            return EmailExtraction(
+                source_id=source_id,
+                newsletter_title="Newsletter",
+                newsletter_date=None,
+                overview_zh_tw="摘要",
+                items=[],
+            )
+
+    def get_message(message_id: str) -> dict[str, object]:
+        if message_id == "source-0-0":
+            raise RuntimeError("source processing interrupted")
+        return messages[message_id]
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: RecordingOllamaClient())
+    monkeypatch.setattr(gmail, "get_message", get_message)
+
+    with pytest.raises(RuntimeError, match="source processing interrupted"):
+        run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, 12, tzinfo=UTC))
+
+    run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 25, 12, tzinfo=UTC))
+
+    assert extracted == ["source-1", "source-2"]

@@ -11,11 +11,17 @@ import httpx
 
 from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code
 from two_read_runtime.locking import ProcessLock
+from two_read_runtime.text import is_inert
 
 from .article_extractor import ArticleExtractionError, extract_article
 from .article_fetcher import ArticleFetcher, ArticleFetchError, ResolvedUrl, UrlResolutionError
-from .command_models import DeliveryCheckpointResetResult, NewsletterRetryResult, NewsletterRunResult
-from .config import GmailSource, HackerNewsSource, Settings, load_sources
+from .command_models import (
+    DeliveryCheckpointResetResult,
+    MaintenancePruneResult,
+    NewsletterRetryResult,
+    NewsletterRunResult,
+)
+from .config import GmailSource, HackerNewsSource, Settings, SourceConfig, load_sources
 from .digest import (
     DigestEntry,
     canonical_url,
@@ -310,6 +316,55 @@ def _sync_processing_label(database: Database, gmail: GmailClient, gmail_id: str
     return True
 
 
+MAX_ERROR_SUMMARY = 500
+
+
+def _error_summary(error: BaseException) -> str:
+    """The run row's only record of a failure, so it has to carry the message, not just the type.
+
+    Storing `type(error).__name__` alone cost six days of diagnosis: every scheduled run from
+    2026-09-13 to 2026-09-18 failed in under a second and left the single word "ValueError",
+    while the exception it came from already read `AUTH_REAUTH_REQUIRED: run '...'` - oauth.py
+    had identified an expired refresh token and named the remedy, and the run log threw it away.
+
+    The cause chain is followed because that code is raised `from` the transport or refresh error
+    that explains it, and control characters are flattened because the text comes from libraries
+    and, further down a chain, can quote message content.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).strip()
+        parts.append(f"{type(current).__name__}: {message}" if message else type(current).__name__)
+        current = current.__cause__
+    joined = " <- ".join(parts)
+    flattened = " ".join("".join(character if is_inert(character, keep="") else " " for character in joined).split())
+    if len(flattened) > MAX_ERROR_SUMMARY:
+        return flattened[: MAX_ERROR_SUMMARY - 1] + "…"
+    return flattened
+
+
+def _fair_share(budget: int, sources: int) -> int:
+    """The slice of a run's Gmail budget each source is guaranteed before any source takes more.
+
+    `budget` is whichever cap binds - the configured GMAIL_MAX_MESSAGES_PER_RUN, or a smaller
+    --max-messages when one is given.
+
+    The budget used to be spent in file order: `gmail_remaining` was decremented as the loop went,
+    so a source with a backlog - or simply several editions a day - could exhaust it before the
+    loop reached the rest, and every source after it was skipped by a bare `continue` that left no
+    record anywhere. The starvation was silent and always hit the same tail of the file.
+
+    Never less than one, so that a run with more sources than budget still reaches a source per
+    slot rather than spending everything on the first one.
+    """
+    if sources <= 0:
+        return 0
+    return max(1, budget // sources)
+
+
 def _process_source(
     database: Database,
     gmail: GmailClient,
@@ -321,6 +376,7 @@ def _process_source(
     *,
     force: bool,
     dry_run: bool,
+    seen: set[str],
 ) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
     processed_label = "NewsletterBot/Processed"
     failed_label = "NewsletterBot/Failed"
@@ -338,6 +394,14 @@ def _process_source(
     for gmail_id in gmail.iter_messages(query):
         if discovered >= remaining:
             break
+        # The leftover pass restarts this query, so it meets the messages the first pass already
+        # handled. Nothing else stops them: they are left `discovered` by store_items(finalize=
+        # False), their Processed label is not synchronised until the digest exists, and
+        # discover_document returns the existing id for a `discovered` row rather than None - so
+        # they would reach ollama.extract a second time and be counted against the budget again.
+        if gmail_id in seen:
+            continue
+        seen.add(gmail_id)
         existing = database.gmail_document(gmail_id)
         if not force and existing is not None and existing["state"] in ("processed", "failed"):
             if not dry_run and not _sync_processing_label(database, gmail, gmail_id, int(existing["id"]), str(existing["state"])):
@@ -640,22 +704,60 @@ def run_pipeline(
             ollama = create_ollama_client(settings)
             gmail_remaining = settings.gmail_max_messages_per_run
             command_remaining = max_messages
+            gmail_sources = [source for source in sources if isinstance(source, GmailSource)]
+            # From whichever budget actually binds. Sharing out the configured one while
+            # --max-messages holds a smaller cap hands the whole command budget to the sources at
+            # the front of the file and exits before reaching the rest, which is the starvation
+            # this is here to remove.
+            effective_budget = gmail_remaining if command_remaining is None else min(gmail_remaining, command_remaining)
+            allowance = _fair_share(effective_budget, len(gmail_sources))
+            rotate_gmail = effective_budget < len(gmail_sources)
+            if rotate_gmail:
+                last_source = database.last_gmail_source()
+                start = next((index + 1 for index, source in enumerate(gmail_sources) if source.id == last_source), 0)
+                gmail_sources = gmail_sources[start:] + gmail_sources[:start]
+            # Offer each source its first-pass allowance before revisiting Gmail sources with any
+            # budget left. Small budgets resume after the previous run's last attempt. Sources that
+            # returned less than their allowance are drained and need no second query.
+            gmail_order = iter(gmail_sources)
+            schedule: list[tuple[SourceConfig, int | None]] = [
+                (next(gmail_order), allowance) if isinstance(source, GmailSource) else (source, None) for source in sources
+            ]
+            schedule.extend((source, None) for source in gmail_sources)
+            drained: set[str] = set()
+            seen_by_source: dict[str, set[str]] = {source.id: set() for source in gmail_sources}
             status(f"Starting {len(sources)} source(s)")
             try:
-                for source in sources:
+                for source, source_allowance in schedule:
                     if command_remaining is not None and command_remaining <= 0:
                         break
                     if isinstance(source, GmailSource):
-                        source_remaining = (
-                            min(gmail_remaining, command_remaining) if command_remaining is not None else gmail_remaining
-                        )
+                        if source.id in drained:
+                            continue
+                        source_remaining = gmail_remaining if source_allowance is None else min(source_allowance, gmail_remaining)
+                        if command_remaining is not None:
+                            source_remaining = min(source_remaining, command_remaining)
                         if source_remaining <= 0:
                             continue
                         assert gmail is not None
+                        if rotate_gmail and not dry_run:
+                            # Save before the attempt so a failing source cannot monopolize later runs.
+                            database.record_gmail_source(source.id)
                         used, source_discovered, source_processed, source_failed, source_ids, source_documents = _process_source(
-                            database, gmail, ollama, settings, source, source_remaining, status, force=force, dry_run=dry_run
+                            database,
+                            gmail,
+                            ollama,
+                            settings,
+                            source,
+                            source_remaining,
+                            status,
+                            force=force,
+                            dry_run=dry_run,
+                            seen=seen_by_source[source.id],
                         )
                         gmail_remaining -= used
+                        if used < source_remaining:
+                            drained.add(source.id)
                     else:
                         source_remaining = (
                             min(source.max_articles_per_run, command_remaining)
@@ -769,7 +871,7 @@ def run_pipeline(
             run_status = result.status
             return result
     except Exception as error:
-        error_summary = type(error).__name__
+        error_summary = _error_summary(error)
         raise
     finally:
         if database is not None:
@@ -852,6 +954,33 @@ def reset_corrupt_delivery(settings: Settings, delivery_id: int) -> DeliveryChec
         finally:
             database.close()
     return DeliveryCheckpointResetResult(delivery_id=delivery_id)
+
+
+def prune_database(settings: Settings, days: int | None = None, *, dry_run: bool = False) -> MaintenancePruneResult:
+    """Drop run history and derived rows past the retention window.
+
+    Deletion uses the pipeline's process lock; previews read a snapshot without touching live files.
+    """
+    retention = settings.retention_days if days is None else days
+    cutoff = datetime.now(UTC) - timedelta(days=retention)
+    if dry_run:
+        deleted = Database.prunable(settings.database_path, cutoff)
+        reclaimed = 0
+    else:
+        with ProcessLock(settings.lock_path):
+            database = Database(settings.database_path)
+            try:
+                deleted = database.prune(cutoff)
+                reclaimed = database.vacuum()
+            finally:
+                database.close()
+    return MaintenancePruneResult(
+        retention_days=retention,
+        cutoff=cutoff.isoformat(),
+        dry_run=dry_run,
+        deleted=deleted,
+        reclaimed_bytes=reclaimed,
+    )
 
 
 def deliver_digest(settings: Settings, database: Database, digest_id: int) -> tuple[int, int, int]:

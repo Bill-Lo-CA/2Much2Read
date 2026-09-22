@@ -24,7 +24,7 @@ from .mail_operations import (
     reconcile_labels,
 )
 from .ollama import OllamaClient, OllamaSchemaError, close_ollama_client, create_ollama_client
-from .pipeline import reset_corrupt_delivery, retry_delivery, run_pipeline
+from .pipeline import prune_database, reset_corrupt_delivery, retry_delivery, run_pipeline
 from .subscription_operations import (
     CATEGORY_OPTIONS,
     list_subscriptions,
@@ -39,6 +39,7 @@ mails_app = typer.Typer(no_args_is_help=True)
 subscriptions_app = typer.Typer(no_args_is_help=True)
 delivery_app = typer.Typer(no_args_is_help=True)
 hackernews_app = typer.Typer(no_args_is_help=True)
+maintenance_app = typer.Typer(no_args_is_help=True)
 app.add_typer(auth_app, name="auth")
 app.add_typer(labels_app, name="labels")
 app.add_typer(filters_app, name="filters")
@@ -46,6 +47,7 @@ app.add_typer(mails_app, name="mails")
 app.add_typer(subscriptions_app, name="subscriptions")
 app.add_typer(delivery_app, name="delivery")
 app.add_typer(hackernews_app, name="hackernews")
+app.add_typer(maintenance_app, name="maintenance")
 
 SourceOption = Annotated[str | None, typer.Option("--source")]
 QueryOption = Annotated[str | None, typer.Option("--query")]
@@ -190,6 +192,14 @@ def delivery_retry() -> None:
 @delivery_app.command("reset-checkpoint")
 def delivery_reset_checkpoint(delivery_id: Annotated[int, typer.Option("--delivery-id", min=1)]) -> None:
     invoke(lambda: reset_corrupt_delivery(Settings(), delivery_id))
+
+
+@maintenance_app.command("prune")
+def maintenance_prune(
+    days: Annotated[int | None, typer.Option(min=1, help="Override RETENTION_DAYS for this run.")] = None,
+    dry_run: Annotated[bool, typer.Option(help="Report what would be deleted without deleting it.")] = False,
+) -> None:
+    invoke(lambda: prune_database(Settings(), days, dry_run=dry_run))
 
 
 @hackernews_app.command("list")
