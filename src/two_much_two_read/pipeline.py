@@ -11,11 +11,12 @@ import httpx
 
 from two_read_runtime.discord import DiscordDeliveryError, deliver, deliver_resumable, delivery_error_code
 from two_read_runtime.locking import ProcessLock
+from two_read_runtime.text import is_inert
 
 from .article_extractor import ArticleExtractionError, extract_article
 from .article_fetcher import ArticleFetcher, ArticleFetchError, ResolvedUrl, UrlResolutionError
 from .command_models import DeliveryCheckpointResetResult, NewsletterRetryResult, NewsletterRunResult
-from .config import GmailSource, HackerNewsSource, Settings, load_sources
+from .config import GmailSource, HackerNewsSource, Settings, SourceConfig, load_sources
 from .digest import (
     DigestEntry,
     canonical_url,
@@ -308,6 +309,52 @@ def _sync_processing_label(database: Database, gmail: GmailClient, gmail_id: str
         return False
     database.mark_label_synced(document_id)
     return True
+
+
+MAX_ERROR_SUMMARY = 500
+
+
+def _error_summary(error: BaseException) -> str:
+    """The run row's only record of a failure, so it has to carry the message, not just the type.
+
+    Storing `type(error).__name__` alone cost six days of diagnosis: every scheduled run from
+    2026-09-13 to 2026-09-18 failed in under a second and left the single word "ValueError",
+    while the exception it came from already read `AUTH_REAUTH_REQUIRED: run '...'` - oauth.py
+    had identified an expired refresh token and named the remedy, and the run log threw it away.
+
+    The cause chain is followed because that code is raised `from` the transport or refresh error
+    that explains it, and control characters are flattened because the text comes from libraries
+    and, further down a chain, can quote message content.
+    """
+    parts: list[str] = []
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        message = str(current).strip()
+        parts.append(f"{type(current).__name__}: {message}" if message else type(current).__name__)
+        current = current.__cause__
+    joined = " <- ".join(parts)
+    flattened = " ".join("".join(character if is_inert(character, keep="") else " " for character in joined).split())
+    if len(flattened) > MAX_ERROR_SUMMARY:
+        return flattened[: MAX_ERROR_SUMMARY - 1] + "…"
+    return flattened
+
+
+def _fair_share(budget: int, sources: int) -> int:
+    """The slice of a run's Gmail budget each source is guaranteed before any source takes more.
+
+    The budget used to be spent in file order: `gmail_remaining` was decremented as the loop went,
+    so a source with a backlog - or simply several editions a day - could exhaust it before the
+    loop reached the rest, and every source after it was skipped by a bare `continue` that left no
+    record anywhere. The starvation was silent and always hit the same tail of the file.
+
+    Never less than one, so that a run with more sources than budget still reaches a source per
+    slot rather than spending everything on the first one.
+    """
+    if sources <= 0:
+        return 0
+    return max(1, budget // sources)
 
 
 def _process_source(
@@ -640,15 +687,28 @@ def run_pipeline(
             ollama = create_ollama_client(settings)
             gmail_remaining = settings.gmail_max_messages_per_run
             command_remaining = max_messages
+            gmail_sources = [source for source in sources if isinstance(source, GmailSource)]
+            allowance = _fair_share(gmail_remaining, len(gmail_sources))
+            # Every source is visited once under that guaranteed allowance, and only then are the
+            # Gmail sources revisited for whatever budget is left, so position in the file no
+            # longer decides who gets read. A source that returned less than its allowance has
+            # nothing waiting, so the second pass skips it rather than repeating its query.
+            schedule: list[tuple[SourceConfig, int | None]] = [
+                (source, allowance if isinstance(source, GmailSource) else None) for source in sources
+            ]
+            schedule.extend((source, None) for source in gmail_sources)
+            drained: set[str] = set()
             status(f"Starting {len(sources)} source(s)")
             try:
-                for source in sources:
+                for source, source_allowance in schedule:
                     if command_remaining is not None and command_remaining <= 0:
                         break
                     if isinstance(source, GmailSource):
-                        source_remaining = (
-                            min(gmail_remaining, command_remaining) if command_remaining is not None else gmail_remaining
-                        )
+                        if source.id in drained:
+                            continue
+                        source_remaining = gmail_remaining if source_allowance is None else min(source_allowance, gmail_remaining)
+                        if command_remaining is not None:
+                            source_remaining = min(source_remaining, command_remaining)
                         if source_remaining <= 0:
                             continue
                         assert gmail is not None
@@ -656,6 +716,8 @@ def run_pipeline(
                             database, gmail, ollama, settings, source, source_remaining, status, force=force, dry_run=dry_run
                         )
                         gmail_remaining -= used
+                        if used < source_remaining:
+                            drained.add(source.id)
                     else:
                         source_remaining = (
                             min(source.max_articles_per_run, command_remaining)
@@ -769,7 +831,7 @@ def run_pipeline(
             run_status = result.status
             return result
     except Exception as error:
-        error_summary = type(error).__name__
+        error_summary = _error_summary(error)
         raise
     finally:
         if database is not None:

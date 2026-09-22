@@ -804,7 +804,18 @@ def test_credentials_failure_records_a_failed_run(tmp_path: Path, monkeypatch: p
     row = database.connection.execute(
         "SELECT run_type,status,discovered_count,processed_count,failed_count,delivered_digest_count,error_summary FROM runs"
     ).fetchone()
-    assert tuple(row) == ("newsletter_digest", "failed", 0, 0, 0, 0, "ValueError")
+    # The run row is the only record a scheduled failure leaves, so it carries the code that says
+    # what to do - not just the exception class, which is what six consecutive daily failures in
+    # September 2026 left behind.
+    assert tuple(row) == (
+        "newsletter_digest",
+        "failed",
+        0,
+        0,
+        0,
+        0,
+        "ValueError: AUTH_REAUTH_REQUIRED: run '2much2read auth gmail'",
+    )
     database.close()
 
 
@@ -1562,7 +1573,10 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
     assert gmail.applied_labels == []
     database = Database(settings.database_path)
     assert database.connection.execute("SELECT state FROM documents").fetchone()["state"] == "discovered"
-    assert tuple(database.connection.execute("SELECT status,error_summary FROM runs").fetchone()) == ("failed", "ConnectError")
+    assert tuple(database.connection.execute("SELECT status,error_summary FROM runs").fetchone()) == (
+        "failed",
+        "ConnectError: Ollama unavailable",
+    )
     database.close()
 
     ollama.error = None
@@ -2113,3 +2127,116 @@ def test_a_message_without_a_mime_payload_is_recorded_as_failed_not_skipped(
     finally:
         database.close()
     assert tuple(row) == ("failed", "EMAIL_PAYLOAD_INVALID")
+
+
+def _gmail_sources_yaml(count: int) -> str:
+    lines = ["sources:"]
+    for index in range(count):
+        lines.append(f"  - type: gmail\n    id: source-{index}\n    name: Source {index}\n    gmail_query: from:s{index}.example")
+    return "\n".join(lines) + "\n"
+
+
+def test_every_gmail_source_is_read_before_any_source_takes_a_second_helping(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The budget used to be spent in file order, so a busy source starved everything after it.
+
+    source-0 here always consumes whatever it is offered, which under the old loop left nothing
+    for source-1 through source-4 - they were skipped by a bare `continue` that recorded nothing.
+    """
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(_gmail_sources_yaml(5), encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        gmail_max_messages_per_run=6,
+    )
+    offered: list[tuple[str, int]] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
+        source = args[4]
+        budget = int(args[5])
+        offered.append((source.id, budget))  # type: ignore[attr-defined]
+        return (budget, budget, budget, 0, [], []) if source.id == "source-0" else (0, 0, 0, 0, [], [])  # type: ignore[attr-defined]
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_process_source", process_gmail)
+
+    run_pipeline(settings, no_deliver=True)
+
+    first_pass = offered[:5]
+    assert [source_id for source_id, _ in first_pass] == [f"source-{index}" for index in range(5)]
+    assert {budget for _, budget in first_pass} == {1}
+    # Only the source that used its whole allowance is asked again; the four that came back empty
+    # have nothing waiting, so their queries are not repeated.
+    assert offered[5:] == [("source-0", 5)]
+
+
+def test_a_source_that_exhausts_its_allowance_gets_the_leftover_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(_gmail_sources_yaml(2), encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        gmail_max_messages_per_run=10,
+    )
+    offered: list[tuple[str, int]] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
+        source = args[4]
+        budget = int(args[5])
+        offered.append((source.id, budget))  # type: ignore[attr-defined]
+        return budget, budget, budget, 0, [], []
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_process_source", process_gmail)
+
+    result = run_pipeline(settings, no_deliver=True)
+
+    assert offered == [("source-0", 5), ("source-1", 5)]
+    assert result.processed == 10
+
+
+def test_fair_share_never_offers_a_source_nothing() -> None:
+    assert pipeline._fair_share(50, 34) == 1
+    assert pipeline._fair_share(10, 2) == 5
+    assert pipeline._fair_share(3, 10) == 1
+    assert pipeline._fair_share(50, 0) == 0
+
+
+def test_error_summary_keeps_the_message_and_the_cause() -> None:
+    """The six silent failures of 2026-09-13..18 recorded only the word "ValueError"."""
+    cause = RuntimeError("invalid_grant: token expired")
+    error = ValueError("AUTH_REAUTH_REQUIRED: run '2much2read auth'")
+    error.__cause__ = cause
+
+    summary = pipeline._error_summary(error)
+
+    assert summary == ("ValueError: AUTH_REAUTH_REQUIRED: run '2much2read auth' <- RuntimeError: invalid_grant: token expired")
+
+
+def test_error_summary_flattens_control_characters_and_bounds_its_length() -> None:
+    # U+009B is the C1 CSI, which most terminals read as ESC [ - it becomes a space rather than
+    # being dropped, so the two words either side of it stay separate words.
+    summary = pipeline._error_summary(ValueError("line\u009bone\nline\ttwo   spaced"))
+
+    assert summary == "ValueError: line one line two spaced"
+
+    long_summary = pipeline._error_summary(ValueError("x" * (pipeline.MAX_ERROR_SUMMARY * 2)))
+
+    assert len(long_summary) == pipeline.MAX_ERROR_SUMMARY
+    assert long_summary.endswith("…")
