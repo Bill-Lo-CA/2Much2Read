@@ -43,9 +43,17 @@ def credentials(credentials_path: Path, token_path: Path, port: int = 8765, *, i
 
 
 def _parse_datetime(value: str, timezone: ZoneInfo) -> datetime:
+    """Google's instant, expressed in the configured zone.
+
+    The offset Google supplies is the event's own, which is not the reader's: an invitation from
+    another region came back as, say, 09:00+09:00 and the agenda printed "09:00", a time that is
+    correct for the organiser and wrong for everyone reading it here. Converting on the way in
+    gives every event one zone to be displayed in; storage normalises to UTC separately, so the
+    two concerns no longer share a representation.
+    """
     if "T" in value:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone)
+        return parsed.astimezone(timezone) if parsed.tzinfo else parsed.replace(tzinfo=timezone)
     return datetime.combine(date.fromisoformat(value), time.min, timezone)
 
 

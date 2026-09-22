@@ -14,6 +14,20 @@ from two_read_runtime.permissions import prepare_private_file, repair_sqlite_fil
 from .google_calendar import CalendarEvent
 from .rules import ReminderCandidate
 
+
+def instant(value: datetime) -> str:
+    """A timestamp normalised to UTC, for the columns that are compared as text.
+
+    SQLite orders these lexically, and two ISO strings carrying different offsets are not in
+    absolute-time order: `01:45:00-04:00` sorts after `01:30:00-05:00` although it is 45 minutes
+    earlier. So `reminder_at<=?` and `ORDER BY reminder_at` give the wrong answer the moment one
+    database holds more than one offset - which happens on every DST boundary, and on any event
+    Google returns in another zone. Normalising here makes text order and absolute order the same
+    thing again. Converting back for display is the renderer's job, off the comparison path.
+    """
+    return value.astimezone(UTC).isoformat()
+
+
 REMINDER_ATTEMPTS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS reminder_attempts(
   id INTEGER PRIMARY KEY,
@@ -103,10 +117,53 @@ class Database:
             if "retired_at" not in delivery_columns:
                 self.connection.execute("ALTER TABLE reminder_deliveries ADD COLUMN retired_at TEXT")
                 self.connection.commit()
+            self._normalise_stored_instants()
             repair_sqlite_files(path)
         except Exception:
             self.connection.close()
             raise
+
+    def _normalise_stored_instants(self) -> None:
+        """Rewrite timestamps written before these columns held UTC.
+
+        Detect-and-fix, like the two column additions above: a row is converted only when its text
+        differs from its own UTC form, so every later open is a no-op over a few hundred rows.
+
+        A naive value is left alone. None should exist - everything written here comes from an
+        aware datetime - and converting one would mean guessing a zone from the machine's locale,
+        which is how the offsets got mixed in the first place.
+        """
+        events = self.connection.execute("SELECT id,start_at,end_at FROM events").fetchall()
+        for row in events:
+            start, end = str(row["start_at"]), str(row["end_at"])
+            parsed_start, parsed_end = datetime.fromisoformat(start), datetime.fromisoformat(end)
+            if parsed_start.tzinfo is None or parsed_end.tzinfo is None:
+                continue
+            if (instant(parsed_start), instant(parsed_end)) != (start, end):
+                self.connection.execute(
+                    "UPDATE events SET start_at=?,end_at=? WHERE id=?",
+                    (instant(parsed_start), instant(parsed_end), int(row["id"])),
+                )
+        # reminder_at is part of UNIQUE(calendar_id,event_id,instance_id,rule_id,reminder_at), so two
+        # offsets naming one instant collide once normalised - the same reminder recorded twice,
+        # which is what a re-sync across a DST boundary produces. The furthest-along state is
+        # converted first so that it is the copy that survives.
+        attempts = self.connection.execute(
+            """SELECT id,reminder_at FROM reminder_attempts ORDER BY CASE state
+            WHEN 'delivered' THEN 0 WHEN 'cancelled' THEN 1 WHEN 'expired' THEN 2 ELSE 3 END, id"""
+        ).fetchall()
+        for row in attempts:
+            reminder_at = str(row["reminder_at"])
+            parsed = datetime.fromisoformat(reminder_at)
+            if parsed.tzinfo is None or instant(parsed) == reminder_at:
+                continue
+            try:
+                self.connection.execute(
+                    "UPDATE reminder_attempts SET reminder_at=? WHERE id=?", (instant(parsed), int(row["id"]))
+                )
+            except sqlite3.IntegrityError:
+                self.connection.execute("DELETE FROM reminder_attempts WHERE id=?", (int(row["id"]),))
+        self.connection.commit()
 
     @classmethod
     def reading(cls, connection: sqlite3.Connection) -> Self:
@@ -146,8 +203,8 @@ class Database:
                 event.instance_id,
                 event.title,
                 event.location,
-                event.start.isoformat(),
-                event.end.isoformat(),
+                instant(event.start),
+                instant(event.end),
                 int(event.all_day),
                 now,
             ),
@@ -186,7 +243,7 @@ class Database:
                 candidate.event.event_id,
                 candidate.event.instance_id,
                 candidate.rule_id,
-                candidate.reminder_time.isoformat(),
+                instant(candidate.reminder_time),
                 content,
                 now,
                 now,
@@ -207,7 +264,7 @@ class Database:
                     candidate.event.event_id,
                     candidate.event.instance_id,
                     candidate.rule_id,
-                    candidate.reminder_time.isoformat(),
+                    instant(candidate.reminder_time),
                     content,
                 ),
             )
@@ -220,7 +277,7 @@ class Database:
                         candidate.event.event_id,
                         candidate.event.instance_id,
                         candidate.rule_id,
-                        candidate.reminder_time.isoformat(),
+                        instant(candidate.reminder_time),
                     ),
                 ).fetchone()
                 assert row is not None
@@ -234,7 +291,7 @@ class Database:
                     candidate.event.event_id,
                     candidate.event.instance_id,
                     candidate.rule_id,
-                    candidate.reminder_time.isoformat(),
+                    instant(candidate.reminder_time),
                 ),
             ).fetchone()
             assert row is not None
@@ -267,7 +324,7 @@ class Database:
             FROM reminder_attempts JOIN events ON events.id=reminder_attempts.event_row_id
             WHERE reminder_attempts.state IN ('pending','failed') AND reminder_attempts.reminder_at<=?
             ORDER BY reminder_attempts.reminder_at, reminder_attempts.id""",
-            (now.isoformat(),),
+            (instant(now),),
         ).fetchall()
 
     def ensure_reminder_deliveries(self, reminder_attempt_id: int, destinations: list[DiscordDestination]) -> None:
@@ -343,7 +400,7 @@ class Database:
             WHERE rd.destination_key IN ({placeholders}) AND rd.state IN ('pending','failed')
             AND rd.retired_at IS NULL AND ra.state IN ('pending','failed') AND ra.reminder_at<=?
             ORDER BY ra.reminder_at,rd.id""",
-            (*keys, now.isoformat()),
+            (*keys, instant(now)),
         ).fetchall()
 
     def _refresh_reminder_state(self, connection: sqlite3.Connection, reminder_attempt_id: int) -> None:
@@ -417,21 +474,21 @@ class Database:
                 candidate.event.event_id,
                 candidate.event.instance_id,
                 candidate.rule_id,
-                candidate.reminder_time.isoformat(),
+                instant(candidate.reminder_time),
             )
             for candidate in candidates
         }
         synced_events = tuple({(event.calendar_id, event.event_id, event.instance_id) for event in events})
         query = """SELECT id,calendar_id,event_id,instance_id,rule_id,reminder_at FROM reminder_attempts
             WHERE state IN ('pending','failed') AND reminder_at>=? AND reminder_at<=?"""
-        parameters: list[str] = [window_start.isoformat(), window_end.isoformat()]
+        parameters: list[str] = [instant(window_start), instant(window_end)]
         if synced_events:
             event_matches = " OR ".join("(calendar_id=? AND event_id=? AND instance_id=?)" for _ in synced_events)
             query = f"""SELECT id,calendar_id,event_id,instance_id,rule_id,reminder_at FROM reminder_attempts
                 WHERE state IN ('pending','failed') AND (
                     (reminder_at>=? AND reminder_at<=?) OR (reminder_at<? AND ({event_matches}))
                 )"""
-            parameters.extend([window_start.isoformat(), *(value for event in synced_events for value in event)])
+            parameters.extend([instant(window_start), *(value for event in synced_events for value in event)])
         rows = self.connection.execute(query, parameters).fetchall()
         cancelled = [
             int(row["id"])

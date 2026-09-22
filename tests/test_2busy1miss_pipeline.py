@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from hashlib import sha256
 from pathlib import Path
 from unittest.mock import MagicMock, call
@@ -840,3 +840,33 @@ def test_a_reminder_dry_run_reads_an_uninitialized_database_as_empty(tmp_path: P
     assert settings.database_path.stat().st_size == 0
 
     assert pipeline.run(settings, dry_run=True).due == []
+
+
+def test_an_event_from_another_zone_is_shown_in_the_configured_one() -> None:
+    """Google returns each event with its organiser's offset, which is not the reader's.
+
+    An invitation created in Tokyo came back as 09:00+09:00 and the agenda printed "09:00" - right
+    for whoever sent it, four hours out for whoever reads this one. The instant is unchanged; only
+    the zone it is expressed in is.
+    """
+    timezone = ZoneInfo("America/Montreal")
+    client = CalendarClient.__new__(CalendarClient)
+    client.service = MagicMock()
+    client.timezone = timezone
+    client.service.events.return_value.list.return_value.execute.return_value = {
+        "items": [
+            {
+                "id": "tokyo-1",
+                "summary": "Handover",
+                "start": {"dateTime": "2026-07-09T09:00:00+09:00"},
+                "end": {"dateTime": "2026-07-09T10:00:00+09:00"},
+            }
+        ]
+    }
+
+    events = client.list_events("primary", "Main", datetime(2026, 7, 8, tzinfo=timezone), datetime(2026, 7, 10, tzinfo=timezone))
+
+    assert len(events) == 1
+    assert events[0].start.tzinfo is timezone
+    assert f"{events[0].start:%H:%M}" == "20:00"
+    assert events[0].start == datetime(2026, 7, 9, 0, 0, tzinfo=UTC)
