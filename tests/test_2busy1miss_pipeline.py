@@ -384,7 +384,7 @@ def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkey
     assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True, now=now).day == date(2026, 3, 9)
     assert pipeline.next_day_agenda(settings, dry_run=False, force=False, scheduled=True, now=now).skipped == 1
     assert pipeline.next_day_agenda(settings, dry_run=False, force=True, scheduled=True, now=now).sent == 1
-    assert deliveries == [render_agenda(date(2026, 3, 9), [])] * 2
+    assert deliveries == [render_agenda(date(2026, 3, 9), [], ZoneInfo("America/Montreal"))] * 2
     assert windows[0] == (datetime(2026, 3, 8, 21, tzinfo=timezone), datetime(2026, 3, 15, 21, tzinfo=timezone))
 
 
@@ -631,7 +631,7 @@ def test_resync_cancels_overdue_job_after_an_event_changes(calendar_database: Da
     now = datetime(2026, 7, 9, 9, 56, tzinfo=timezone)
 
     created, cancelled = pipeline._sync_scheduled_reminders(
-        database, config, [updated], now, datetime(2026, 7, 9, 12, tzinfo=timezone)
+        database, config, [updated], now, datetime(2026, 7, 9, 12, tzinfo=timezone), timezone
     )
 
     assert (created, cancelled) == (1, 1)
@@ -846,8 +846,11 @@ def test_an_event_from_another_zone_is_shown_in_the_configured_one() -> None:
     """Google returns each event with its organiser's offset, which is not the reader's.
 
     An invitation created in Tokyo came back as 09:00+09:00 and the agenda printed "09:00" - right
-    for whoever sent it, four hours out for whoever reads this one. The instant is unchanged; only
-    the zone it is expressed in is.
+    for whoever sent it, four hours out for whoever reads this one.
+
+    The event itself keeps the instant: a CalendarEvent that carried a zone would be the wrong
+    thing to subtract a reminder offset from. Converting is the renderer's job, so that is where
+    this is asserted.
     """
     timezone = ZoneInfo("America/Montreal")
     client = CalendarClient.__new__(CalendarClient)
@@ -867,6 +870,5 @@ def test_an_event_from_another_zone_is_shown_in_the_configured_one() -> None:
     events = client.list_events("primary", "Main", datetime(2026, 7, 8, tzinfo=timezone), datetime(2026, 7, 10, tzinfo=timezone))
 
     assert len(events) == 1
-    assert events[0].start.tzinfo is timezone
-    assert f"{events[0].start:%H:%M}" == "20:00"
     assert events[0].start == datetime(2026, 7, 9, 0, 0, tzinfo=UTC)
+    assert "20:00-21:00 | Handover" in render_agenda(date(2026, 7, 8), events, timezone)

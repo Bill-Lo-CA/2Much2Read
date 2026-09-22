@@ -217,9 +217,19 @@ agenda_schedule=$("$repo_dir/.venv/bin/python" - "$reminders_file" <<'PY'
 import sys
 from pathlib import Path
 
+# Named lines rather than the first and second, so that anything else reaching stdout one day -
+# an import-time notice from a dependency, say - cannot silently shift both values by one.
+# The reason for a fallback goes to stderr, and names only the exception type: a ValidationError
+# over this file quotes the value it rejected, and that value may be the Discord webhook or the
+# bot token.
 
-def warn(source: str, error: BaseException) -> None:
-    print(f"could not read {source}: {type(error).__name__}", file=sys.stderr)
+
+def warn(what_failed: str, error: BaseException, consequence: str) -> None:
+    print(
+        f"{what_failed} could not be read ({type(error).__name__}), so {consequence}. "
+        "Run `2busy1miss doctor` to see what is wrong with it.",
+        file=sys.stderr,
+    )
 
 
 settings = None
@@ -227,8 +237,13 @@ try:
     from two_busy_one_miss.config import Settings
 
     settings = Settings()
-except Exception as error:  # noqa: BLE001 - an unreadable environment file falls back; doctor explains it
-    warn("the environment file", error)
+except Exception as error:  # noqa: BLE001 - the defaults are installed instead; doctor explains why
+    warn(
+        "the environment file",
+        error,
+        "AGENDA_SCHEDULE_TIME and REMINDER_TIMEZONE are both taken from their defaults, even if "
+        "only one of them is at fault",
+    )
 
 schedule_time = "" if settings is None else settings.agenda_schedule_time.strftime("%H:%M")
 reminders = Path(sys.argv[1]) if settings is None else settings.reminders_config_path
@@ -238,15 +253,15 @@ try:
 
     timezone = load_reminders(reminders).timezone or ""
 except Exception as error:  # noqa: BLE001 - same, for the reminders file
-    warn(str(reminders), error)
+    warn(str(reminders), error, "the timer falls back to the timezone in the environment file")
 if not timezone and settings is not None:
     timezone = settings.reminder_timezone
-print(schedule_time)
-print(timezone)
+print(f"time={schedule_time}")
+print(f"timezone={timezone}")
 PY
 )
-agenda_schedule_time=$(printf '%s\n' "$agenda_schedule" | sed -n 1p)
-agenda_schedule_timezone=$(printf '%s\n' "$agenda_schedule" | sed -n 2p)
+agenda_schedule_time=$(printf '%s\n' "$agenda_schedule" | sed -n 's/^time=//p' | tail -n1)
+agenda_schedule_timezone=$(printf '%s\n' "$agenda_schedule" | sed -n 's/^timezone=//p' | tail -n1)
 agenda_schedule_time=${agenda_schedule_time:-21:00}
 agenda_schedule_timezone=${agenda_schedule_timezone:-America/Montreal}
 

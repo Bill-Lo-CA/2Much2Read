@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
-from datetime import date, datetime, time
+from dataclasses import dataclass, replace
+from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any
 from zoneinfo import ZoneInfo
@@ -43,18 +43,32 @@ def credentials(credentials_path: Path, token_path: Path, port: int = 8765, *, i
 
 
 def _parse_datetime(value: str, timezone: ZoneInfo) -> datetime:
-    """Google's instant, expressed in the configured zone.
+    """Google's value as an instant, in UTC.
 
-    The offset Google supplies is the event's own, which is not the reader's: an invitation from
-    another region came back as, say, 09:00+09:00 and the agenda printed "09:00", a time that is
-    correct for the organiser and wrong for everyone reading it here. Converting on the way in
-    gives every event one zone to be displayed in; storage normalises to UTC separately, so the
-    two concerns no longer share a representation.
+    A CalendarEvent carries instants and never the zone it will be shown in. Google's own offset is
+    the organiser's - an invitation from another region came back as 09:00+09:00 and the agenda
+    printed "09:00", right for whoever sent it and four hours out for whoever reads this one - so
+    something has to convert. `in_zone` does, on the way out, because a zone-aware value is the
+    wrong thing to do arithmetic on:
+
+    - `value - timedelta` on a zone-aware datetime is wall-clock arithmetic, not absolute. An event
+      the morning after a DST change, with a `1d` reminder, came out 25 hours early: the
+      subtraction crossed the boundary and the zone recomputed the offset underneath it.
+    - two aware datetimes in the same zone compare by wall clock and ignore `fold` (PEP 495), so
+      inside a repeated hour the agenda ordered 01:30 EST before 01:30 EDT.
+
+    Neither can happen to an instant. `timezone` is used here only to give a value Google sent
+    without an offset, and an all-day date, the zone the calendar is read in.
     """
     if "T" in value:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        return parsed.astimezone(timezone) if parsed.tzinfo else parsed.replace(tzinfo=timezone)
-    return datetime.combine(date.fromisoformat(value), time.min, timezone)
+        return (parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone)).astimezone(UTC)
+    return datetime.combine(date.fromisoformat(value), time.min, timezone).astimezone(UTC)
+
+
+def in_zone(event: CalendarEvent, timezone: ZoneInfo) -> CalendarEvent:
+    """The same event with its instants expressed in one zone, for display."""
+    return replace(event, start=event.start.astimezone(timezone), end=event.end.astimezone(timezone))
 
 
 def _event_links(item: dict[str, Any]) -> tuple[str, ...]:

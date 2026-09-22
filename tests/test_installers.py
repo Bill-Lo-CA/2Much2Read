@@ -744,7 +744,12 @@ def test_installers_do_not_migrate_when_runtime_state_is_unsafe(
 
 
 def _agenda_timer_for(tmp_path: Path, environment_file: str, *reminders_files: tuple[str, str]) -> str:
-    """Install 2busy1miss against one environment file, and return the agenda timer it rendered.
+    """The agenda timer an install rendered, for the tests that do not care what it said."""
+    return _install_2busy1miss(tmp_path, environment_file, *reminders_files)[0]
+
+
+def _install_2busy1miss(tmp_path: Path, environment_file: str, *reminders_files: tuple[str, str]) -> tuple[str, str]:
+    """Install 2busy1miss against one environment file; return the agenda timer and what it warned.
 
     The zone the timer carries has to be the one `agenda-next-day --scheduled` reads, and every
     question about that is a question about how these two config files are parsed, so the tests
@@ -768,7 +773,7 @@ def _agenda_timer_for(tmp_path: Path, environment_file: str, *reminders_files: t
     client_secret = tmp_path / "client-secret.json"
     client_secret.write_text("client secret", encoding="utf-8")
 
-    subprocess.run(
+    result = subprocess.run(
         ["sh", "scripts/install-2busy1miss-user-service.sh", "--calendar-client-secret", str(client_secret)],
         cwd=root,
         env=os.environ | {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
@@ -778,7 +783,8 @@ def _agenda_timer_for(tmp_path: Path, environment_file: str, *reminders_files: t
         input="n\n",
     )
 
-    return (home / ".config/systemd/user/2busy1miss-runtime-agenda.timer").read_text(encoding="utf-8")
+    timer = (home / ".config/systemd/user/2busy1miss-runtime-agenda.timer").read_text(encoding="utf-8")
+    return timer, result.stderr
 
 
 PRIMARY = "calendars:\n  - id: primary\n    name: Main\n"
@@ -859,3 +865,48 @@ def test_agenda_timer_reads_the_scheduled_hour_with_dotenv_semantics(tmp_path: P
     timer = _agenda_timer_for(tmp_path, env_line, ("reminders.yaml", f"timezone: Asia/Taipei\n{PRIMARY}"))
 
     assert "OnCalendar=*-*-* 20:30:00 Asia/Taipei" in timer
+
+
+def test_an_unreadable_environment_file_installs_the_defaults_and_says_so(tmp_path: Path) -> None:
+    """One bad key takes the whole file with it, so the note has to say that much.
+
+    Exiting here instead would leave the schedule off - both timers are disabled by the time this
+    runs - so the install continues on the defaults. What it must not do is continue quietly: the
+    hour the user asked for is not the hour they get.
+    """
+    timer, stderr = _install_2busy1miss(
+        tmp_path,
+        "AGENDA_SCHEDULE_TIME=20:30\nREMINDER_TIMEZONE=Nope/Nope\n",
+        ("reminders.yaml", f"timezone: Asia/Taipei\n{PRIMARY}"),
+    )
+
+    assert "OnCalendar=*-*-* 21:00:00 Asia/Taipei" in timer
+    assert "the environment file could not be read (ValidationError)" in stderr
+    assert "AGENDA_SCHEDULE_TIME and REMINDER_TIMEZONE are both taken from their defaults" in stderr
+    assert "2busy1miss doctor" in stderr
+    # The rejected value is quoted inside a pydantic ValidationError, and for this file that value
+    # can be the Discord webhook or the bot token. Only the exception type is printed.
+    assert "Nope/Nope" not in stderr
+
+
+def test_an_unreadable_reminders_file_falls_back_to_the_environment_timezone(tmp_path: Path) -> None:
+    timer, stderr = _install_2busy1miss(
+        tmp_path,
+        "AGENDA_SCHEDULE_TIME=20:30\nREMINDER_TIMEZONE=Europe/Berlin\n",
+        ("reminders.yaml", "legacy yaml\n"),
+    )
+
+    assert "OnCalendar=*-*-* 20:30:00 Europe/Berlin" in timer
+    assert "the timer falls back to the timezone in the environment file" in stderr
+
+
+def test_the_schedule_is_read_from_named_lines_not_by_position(tmp_path: Path) -> None:
+    """A stray line on stdout must not shift both values by one.
+
+    Nothing prints on import today - this is what keeps that from mattering the day something does.
+    """
+    script = (Path(__file__).parents[1] / "scripts/install-2busy1miss-user-service.sh").read_text(encoding="utf-8")
+
+    assert "sed -n 's/^time=//p'" in script
+    assert "sed -n 's/^timezone=//p'" in script
+    assert 'print(f"time={schedule_time}")' in script

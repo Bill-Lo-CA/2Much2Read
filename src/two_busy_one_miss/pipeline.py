@@ -18,7 +18,7 @@ from two_read_runtime.locking import ProcessLock
 from two_read_runtime.sqlite_snapshot import reading_connection
 
 from .config import RemindersConfig, Settings, load_reminders
-from .google_calendar import CalendarClient, CalendarEvent, credentials
+from .google_calendar import CalendarClient, CalendarEvent, credentials, in_zone
 from .renderer import render_agenda, render_reminder
 from .rules import ReminderCandidate, parse_offset, schedule_reminders
 from .storage import Database
@@ -147,7 +147,8 @@ def event_query_lookahead(config: RemindersConfig, days: int) -> timedelta:
     return max([timedelta(days=days), *offsets])
 
 
-def event_view(event: CalendarEvent) -> EventView:
+def event_view(event: CalendarEvent, timezone: ZoneInfo) -> EventView:
+    event = in_zone(event, timezone)
     return EventView(
         calendar_id=event.calendar_id,
         calendar_name=event.calendar_name,
@@ -161,12 +162,12 @@ def event_view(event: CalendarEvent) -> EventView:
     )
 
 
-def reminder_view(candidate: ReminderCandidate) -> ReminderView:
+def reminder_view(candidate: ReminderCandidate, timezone: ZoneInfo) -> ReminderView:
     return ReminderView(
         rule_id=candidate.rule_id,
         before=candidate.before,
-        reminder_time=candidate.reminder_time,
-        event=event_view(candidate.event),
+        reminder_time=candidate.reminder_time.astimezone(timezone),
+        event=event_view(candidate.event, timezone),
     )
 
 
@@ -176,6 +177,7 @@ def _sync_scheduled_reminders(
     events: list[CalendarEvent],
     window_start: datetime,
     window_end: datetime,
+    timezone: ZoneInfo,
     settings: Settings | None = None,
 ) -> tuple[int, int]:
     candidates = schedule_reminders(config, events)
@@ -183,7 +185,11 @@ def _sync_scheduled_reminders(
     if settings is not None:
         with suppress(DiscordDeliveryError):
             destinations = settings.discord_destinations()
-    created = database.create_attempts([(candidate, render_reminder(candidate)) for candidate in candidates], destinations)
+    # The message is written once, when the reminder is scheduled, so it has to carry the zone the
+    # reader is in rather than the one the organiser happened to send.
+    created = database.create_attempts(
+        [(candidate, render_reminder(candidate, timezone)) for candidate in candidates], destinations
+    )
     return created, database.cancel_unmatched_attempts(candidates, events, window_start, window_end)
 
 
@@ -297,13 +303,15 @@ def _dispatch_due_reminders(database: Database, settings: Settings, now: datetim
 def discover(settings: Settings, days: int) -> DiscoverResult:
     config = load_reminders(settings.reminders_config_path)
     events = list_events(settings, config, days)
-    return DiscoverResult(events=[event_view(event) for event in events])
+    timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
+    return DiscoverResult(events=[event_view(event, timezone) for event in events])
 
 
 def test_rules(settings: Settings, days: int) -> RulesTestResult:
     config = load_reminders(settings.reminders_config_path)
     candidates = schedule_reminders(config, list_events(settings, config, days))
-    return RulesTestResult(reminders=[reminder_view(candidate) for candidate in candidates])
+    timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
+    return RulesTestResult(reminders=[reminder_view(candidate, timezone) for candidate in candidates])
 
 
 def agenda(settings: Settings, day: date, dry_run: bool, force: bool = False) -> AgendaPreviewResult | AgendaDeliveryResult:
@@ -312,9 +320,9 @@ def agenda(settings: Settings, day: date, dry_run: bool, force: bool = False) ->
     start = datetime.combine(day, time.min, timezone)
     end = datetime.combine(day + timedelta(days=1), time.min, timezone)
     events = list_events_between(settings, config, start, end)
-    content = render_agenda(day, events)
+    content = render_agenda(day, events, timezone)
     if dry_run:
-        return AgendaPreviewResult(content=content, events=[event_view(event) for event in events])
+        return AgendaPreviewResult(content=content, events=[event_view(event, timezone) for event in events])
     with ProcessLock(settings.lock_path):
         database = Database(settings.database_path)
         try:
@@ -354,12 +362,12 @@ def next_day_agenda(
     sync_end = now + event_query_lookahead(config, settings.reminder_lookahead_days)
     events = list_events_between(settings, config, now, sync_end)
     agenda_events = [event for event in events if event.end > start and event.start < end]
-    content = render_agenda(day, agenda_events)
+    content = render_agenda(day, agenda_events, timezone)
     if dry_run:
         return AgendaPreviewResult(
             day=day,
             content=content,
-            events=[event_view(event) for event in agenda_events],
+            events=[event_view(event, timezone) for event in agenda_events],
             scheduled_reminders=len(schedule_reminders(config, events)),
         )
 
@@ -367,7 +375,7 @@ def next_day_agenda(
         database = Database(settings.database_path)
         try:
             scheduled_reminders, cancelled_reminders = _sync_scheduled_reminders(
-                database, config, events, now, sync_end, settings
+                database, config, events, now, sync_end, timezone, settings
             )
             deliveries = _create_agenda_deliveries(database, settings, day, timezone, content, force=force)
             if not deliveries:

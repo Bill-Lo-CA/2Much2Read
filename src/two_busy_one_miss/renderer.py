@@ -1,12 +1,13 @@
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, time, timedelta
+from datetime import UTC, date, datetime, time, timedelta
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from two_read_runtime.text import is_inert
 
-from .google_calendar import CalendarEvent
+from .google_calendar import CalendarEvent, in_zone
 from .rules import ReminderCandidate
 
 URL = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
@@ -16,8 +17,8 @@ def _when(value: datetime) -> str:
     return value.strftime("%Y-%m-%d %H:%M %Z").strip()
 
 
-def render_reminder(candidate: ReminderCandidate) -> str:
-    event = candidate.event
+def render_reminder(candidate: ReminderCandidate, timezone: ZoneInfo) -> str:
+    event = in_zone(candidate.event, timezone)
     when = "All day" if event.all_day else f"{event.start:%H:%M}-{event.end:%H:%M}"
     lines = [
         "```text",
@@ -115,8 +116,12 @@ def _agenda_when(day: date, event: CalendarEvent) -> str:
     return f"{start}-{end}"
 
 
-def render_agenda(day: date, events: list[CalendarEvent]) -> str:
-    ordered_events = sorted(events, key=lambda item: (item.start, item.calendar_id, item.instance_id))
+def render_agenda(day: date, events: list[CalendarEvent], timezone: ZoneInfo) -> str:
+    # Ordered by instant, then converted - not the other way round. Once two events share a zone
+    # they compare by wall clock and ignore fold (PEP 495), which puts 01:30 EST before 01:30 EDT
+    # on the night the hour repeats.
+    by_instant = sorted(events, key=lambda item: (item.start.astimezone(UTC), item.calendar_id, item.instance_id))
+    ordered_events = [in_zone(event, timezone) for event in by_instant]
     lines = [
         "```text",
         f"2busy1miss agenda · {day.isoformat()}",
