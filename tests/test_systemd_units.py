@@ -28,7 +28,6 @@ REQUIRED_SANDBOX = {
     "RestrictSUIDSGID=true",
     "RestrictRealtime=true",
     "RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6",
-    "ProtectProc=invisible",
     "RestrictNamespaces=true",
     "SystemCallArchitectures=native",
     "SystemCallFilter=@system-service",
@@ -76,6 +75,31 @@ def test_user_units_do_not_depend_on_the_system_managers_network_target(unit: st
     service = (UNITS / unit).read_text(encoding="utf-8")
 
     assert "network-online.target" not in service
+
+
+@pytest.mark.parametrize(
+    "unit",
+    [
+        "2much2read-runtime.service",
+        "2busy1miss-runtime.service",
+        "2busy1miss-runtime-agenda.service",
+        "2bored1made-runtime.service",
+    ],
+)
+def test_user_units_declare_no_protectproc(unit: str) -> None:
+    """ProtectProc= is silently ignored by the per-user manager, so declaring it only misleads.
+
+    Measured rather than taken from the documentation, because systemd.exec(5) is not reliable on
+    this point: it carries the same "not supported for services running in per-user instances"
+    paragraph for ProtectControlGroups=, which a transient user unit shows working (/sys/fs/cgroup
+    goes rw -> ro). ProtectProc=invisible left /proc unchanged in the same test - the same count of
+    other users' PIDs with and without it - so it is the one that has to go.
+
+    systemd-analyze --user verify accepts it either way, which is why this assertion exists.
+    """
+    service = (UNITS / unit).read_text(encoding="utf-8")
+
+    assert "ProtectProc" not in service
 
 
 def test_only_the_model_loading_unit_opts_out_of_device_isolation() -> None:
