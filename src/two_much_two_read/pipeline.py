@@ -349,6 +349,9 @@ def _error_summary(error: BaseException) -> str:
 def _fair_share(budget: int, sources: int) -> int:
     """The slice of a run's Gmail budget each source is guaranteed before any source takes more.
 
+    `budget` is whichever cap binds - the configured GMAIL_MAX_MESSAGES_PER_RUN, or a smaller
+    --max-messages when one is given.
+
     The budget used to be spent in file order: `gmail_remaining` was decremented as the loop went,
     so a source with a backlog - or simply several editions a day - could exhaust it before the
     loop reached the rest, and every source after it was skipped by a bare `continue` that left no
@@ -702,7 +705,12 @@ def run_pipeline(
             gmail_remaining = settings.gmail_max_messages_per_run
             command_remaining = max_messages
             gmail_sources = [source for source in sources if isinstance(source, GmailSource)]
-            allowance = _fair_share(gmail_remaining, len(gmail_sources))
+            # From whichever budget actually binds. Sharing out the configured one while
+            # --max-messages holds a smaller cap hands the whole command budget to the sources at
+            # the front of the file and exits before reaching the rest, which is the starvation
+            # this is here to remove.
+            effective_budget = gmail_remaining if command_remaining is None else min(gmail_remaining, command_remaining)
+            allowance = _fair_share(effective_budget, len(gmail_sources))
             # Every source is visited once under that guaranteed allowance, and only then are the
             # Gmail sources revisited for whatever budget is left, so position in the file no
             # longer decides who gets read. A source that returned less than its allowance has

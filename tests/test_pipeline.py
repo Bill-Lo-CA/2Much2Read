@@ -1302,7 +1302,11 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
 
     result = run_pipeline(settings, max_messages=3, no_deliver=True)
 
-    assert len(iter_calls) == 2
+    # Three scans rather than two. `first` holds two messages and its share of the capped budget is
+    # one, so the leftover pass has to ask it again to reach the second - that is what the second
+    # pass is for. Messages the first pass already handled are skipped without a get_message, so
+    # the extra cost is a single list call, and the totals are unchanged.
+    assert ["first@example.com" in query for query in iter_calls] == [True, False, True]
     assert result.processed == 3
 
 
@@ -2375,3 +2379,42 @@ def test_the_leftover_pass_does_not_re_extract_what_the_first_pass_already_did(
     assert sorted(extracted) == sorted(f"body of {gmail_id}" for gmail_id in message_ids)
     assert result.discovered == 6
     assert result.processed == 6
+
+
+def test_a_smaller_command_budget_is_still_shared_between_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """--max-messages has to shrink the allowance too, or capped runs keep the old starvation.
+
+    The allowance was derived from GMAIL_MAX_MESSAGES_PER_RUN alone: with three sources and the
+    default 50 that is 16 each, so a `--max-messages 3` run offered all three of its messages to
+    the first source and left at command_remaining == 0 before reaching the other two. Source order
+    is stable, so it was the same two sources every time - exactly what this scheduling is for.
+    """
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(_gmail_sources_yaml(3), encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        gmail_max_messages_per_run=50,
+    )
+    offered: list[tuple[str, int]] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
+        source = args[4]
+        budget = int(args[5])
+        offered.append((source.id, budget))  # type: ignore[attr-defined]
+        return budget, budget, budget, 0, [], []
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(pipeline, "_process_source", process_gmail)
+
+    result = run_pipeline(settings, max_messages=3, no_deliver=True)
+
+    assert offered == [("source-0", 1), ("source-1", 1), ("source-2", 1)]
+    assert result.processed == 3
