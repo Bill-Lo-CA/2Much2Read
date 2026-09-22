@@ -373,6 +373,7 @@ def _process_source(
     *,
     force: bool,
     dry_run: bool,
+    seen: set[str],
 ) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
     processed_label = "NewsletterBot/Processed"
     failed_label = "NewsletterBot/Failed"
@@ -390,6 +391,14 @@ def _process_source(
     for gmail_id in gmail.iter_messages(query):
         if discovered >= remaining:
             break
+        # The leftover pass restarts this query, so it meets the messages the first pass already
+        # handled. Nothing else stops them: they are left `discovered` by store_items(finalize=
+        # False), their Processed label is not synchronised until the digest exists, and
+        # discover_document returns the existing id for a `discovered` row rather than None - so
+        # they would reach ollama.extract a second time and be counted against the budget again.
+        if gmail_id in seen:
+            continue
+        seen.add(gmail_id)
         existing = database.gmail_document(gmail_id)
         if not force and existing is not None and existing["state"] in ("processed", "failed"):
             if not dry_run and not _sync_processing_label(database, gmail, gmail_id, int(existing["id"]), str(existing["state"])):
@@ -703,6 +712,7 @@ def run_pipeline(
             ]
             schedule.extend((source, None) for source in gmail_sources)
             drained: set[str] = set()
+            seen_by_source: dict[str, set[str]] = {source.id: set() for source in gmail_sources}
             status(f"Starting {len(sources)} source(s)")
             try:
                 for source, source_allowance in schedule:
@@ -718,7 +728,16 @@ def run_pipeline(
                             continue
                         assert gmail is not None
                         used, source_discovered, source_processed, source_failed, source_ids, source_documents = _process_source(
-                            database, gmail, ollama, settings, source, source_remaining, status, force=force, dry_run=dry_run
+                            database,
+                            gmail,
+                            ollama,
+                            settings,
+                            source,
+                            source_remaining,
+                            status,
+                            force=force,
+                            dry_run=dry_run,
+                            seen=seen_by_source[source.id],
                         )
                         gmail_remaining -= used
                         if used < source_remaining:

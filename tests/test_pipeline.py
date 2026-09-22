@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import sqlite3
 from base64 import urlsafe_b64encode
 from dataclasses import replace
@@ -2280,3 +2281,97 @@ def test_prune_defaults_to_the_configured_retention_window(newsletter_settings: 
     assert result.retention_days == 30
     assert result.deleted["runs"] == 1
     assert newsletter_database.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+
+
+class PerSourceGmailClient(StubGmailClient):
+    """Returns only the messages whose id matches the querying source, as real Gmail queries do.
+
+    A single StubGmailClient hands every source the same ids, which is not merely unrealistic: two
+    documents then claim one gmail_message_id and gmail_document_state's UNIQUE index aborts the
+    run. That is worth knowing about separately - it is what the catalog's rule against two sources
+    sharing a query is protecting - but it is not what this test is about.
+    """
+
+    def iter_messages(self, query: str):
+        match = re.search(r"from:s(\d+)\.example", query)
+        assert match is not None, query
+        prefix = f"source-{match.group(1)}-"
+        yield from (message_id for message_id in self.message_ids if message_id.startswith(prefix))
+
+
+def test_the_leftover_pass_does_not_re_extract_what_the_first_pass_already_did(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The second pass restarts the Gmail query, so it meets the first pass's own messages again.
+
+    They are still `discovered` - store_items(finalize=False) leaves them there and the Processed
+    label is not synchronised until the digest exists - so neither guard stops them: the state
+    check only skips `processed` and `failed`, and discover_document returns the existing id for a
+    `discovered` row rather than None. Without an exclusion the run pays for get_message and a
+    second ollama.extract per message, ~47s each on this hardware, and counts them again against
+    the budget that should be reaching new mail.
+
+    The scheduler tests above stub _process_source out entirely, which is why they cannot see it.
+    """
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(_gmail_sources_yaml(2), encoding="utf-8")
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        gmail_max_messages_per_run=10,
+    )
+
+    def encoded(value: str) -> str:
+        return urlsafe_b64encode(value.encode()).decode().rstrip("=")
+
+    # source-0 has six waiting against an allowance of five, so it is the one the leftover pass
+    # comes back to. source-1 has none.
+    message_ids = [f"source-0-{index}" for index in range(6)]
+    gmail = PerSourceGmailClient(
+        message_ids,
+        {
+            gmail_id: {
+                "threadId": f"thread-{gmail_id}",
+                "internalDate": "1784786400000",
+                "payload": {
+                    "headers": [{"name": "Subject", "value": gmail_id}, {"name": "From", "value": "news@example.com"}],
+                    "parts": [{"mimeType": "text/plain", "body": {"data": encoded(f"body of {gmail_id}")}}],
+                },
+            }
+            for gmail_id in message_ids
+        },
+    )
+
+    extracted: list[str] = []
+
+    class CountingOllamaClient:
+        def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
+            extracted.append(content)
+            return EmailExtraction(
+                source_id=source_id,
+                newsletter_title="Newsletter",
+                newsletter_date=None,
+                overview_zh_tw="摘要",
+                items=[
+                    NewsletterItemAnalysis(
+                        title="Item",
+                        source_title="Item",
+                        category="OTHER",
+                        summary_zh_tw="摘要",
+                        why_it_matters_zh_tw="原因",
+                        importance=7,
+                        confidence=0.9,
+                    )
+                ],
+            )
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: CountingOllamaClient())
+
+    result = run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, tzinfo=UTC))
+
+    assert sorted(extracted) == sorted(f"body of {gmail_id}" for gmail_id in message_ids)
+    assert result.discovered == 6
+    assert result.processed == 6
