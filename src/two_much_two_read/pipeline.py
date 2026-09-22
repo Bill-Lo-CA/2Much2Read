@@ -951,22 +951,21 @@ def reset_corrupt_delivery(settings: Settings, delivery_id: int) -> DeliveryChec
 def prune_database(settings: Settings, days: int | None = None, *, dry_run: bool = False) -> MaintenancePruneResult:
     """Drop run history and derived rows past the retention window.
 
-    Runs under the same process lock as a pipeline run, so it cannot delete rows a run is in the
-    middle of writing.
+    Deletion uses the pipeline's process lock; previews read a snapshot without touching live files.
     """
     retention = settings.retention_days if days is None else days
     cutoff = datetime.now(UTC) - timedelta(days=retention)
-    with ProcessLock(settings.lock_path):
-        database = Database(settings.database_path)
-        try:
-            if dry_run:
-                deleted = database.prunable(cutoff)
-                reclaimed = 0
-            else:
+    if dry_run:
+        deleted = Database.prunable(settings.database_path, cutoff)
+        reclaimed = 0
+    else:
+        with ProcessLock(settings.lock_path):
+            database = Database(settings.database_path)
+            try:
                 deleted = database.prune(cutoff)
                 reclaimed = database.vacuum()
-        finally:
-            database.close()
+            finally:
+                database.close()
     return MaintenancePruneResult(
         retention_days=retention,
         cutoff=cutoff.isoformat(),

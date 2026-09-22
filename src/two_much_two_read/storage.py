@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 
 from two_read_runtime.discord import DiscordDestination
 from two_read_runtime.permissions import prepare_private_file, repair_sqlite_files
+from two_read_runtime.sqlite_snapshot import reading_connection
 
 from .digest import canonical_url, normalized_title
 from .schemas import DigestItem, EmailExtraction, ItemAnalysis, ResolvedContent, SourceDocument
@@ -868,7 +869,8 @@ class Database:
         ("runs", "started_at"),
     )
 
-    def _prune_predicate(self, table: str, column: str) -> str:
+    @staticmethod
+    def _prune_predicate(table: str, column: str) -> str:
         """A digest that was never delivered is kept whatever its age.
 
         It holds rendered content nobody has received. Deleting it on age would destroy that
@@ -879,16 +881,23 @@ class Database:
             return f"{column} < ? AND state = 'delivered'"
         return f"{column} < ?"
 
-    def prunable(self, cutoff: datetime) -> dict[str, int]:
+    @classmethod
+    def prunable(cls, path: Path, cutoff: datetime) -> dict[str, int]:
+        """Count a snapshot's aged rows without creating or migrating the live database."""
         stamp = cutoff.astimezone(UTC).isoformat()
-        return {
-            table: int(
-                self.connection.execute(
-                    f"SELECT COUNT(*) FROM {table} WHERE {self._prune_predicate(table, column)}", (stamp,)
-                ).fetchone()[0]
-            )
-            for table, column in self.PRUNABLE
-        }
+        counts = dict.fromkeys((table for table, _ in cls.PRUNABLE), 0)
+        with reading_connection(path, ()) as connection:
+            if connection is not None:
+                # Older schemas may not have every derived table yet.
+                tables = {row[0] for row in connection.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+                for table, column in cls.PRUNABLE:
+                    if table in tables:
+                        counts[table] = int(
+                            connection.execute(
+                                f"SELECT COUNT(*) FROM {table} WHERE {cls._prune_predicate(table, column)}", (stamp,)
+                            ).fetchone()[0]
+                        )
+        return counts
 
     def prune(self, cutoff: datetime) -> dict[str, int]:
         """Delete run history and derived rows older than `cutoff`, keeping the deduplication ledger.

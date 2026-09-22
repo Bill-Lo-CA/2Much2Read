@@ -11,6 +11,7 @@ from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
+from conftest import directory_digest
 
 from two_much_two_read import mail_operations, pipeline
 from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl
@@ -2256,7 +2257,10 @@ def test_prune_dry_run_reports_what_it_would_delete_and_deletes_nothing(
     )
     newsletter_database.connection.commit()
 
-    preview = pipeline.prune_database(newsletter_settings, days=1, dry_run=True)
+    with pipeline.ProcessLock(newsletter_settings.lock_path):
+        before = directory_digest(newsletter_settings.database_path.parent)
+        preview = pipeline.prune_database(newsletter_settings, days=1, dry_run=True)
+        assert directory_digest(newsletter_settings.database_path.parent) == before
 
     assert preview.dry_run is True
     assert preview.retention_days == 1
@@ -2269,6 +2273,62 @@ def test_prune_dry_run_reports_what_it_would_delete_and_deletes_nothing(
     assert applied.dry_run is False
     assert applied.deleted["runs"] == 1
     assert newsletter_database.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("database_state", ["missing", "empty", "initialized"])
+def test_prune_dry_run_on_missing_or_empty_database_is_read_only(newsletter_settings: Settings, database_state: str) -> None:
+    if database_state == "empty":
+        newsletter_settings.database_path.touch()
+    elif database_state == "initialized":
+        database = Database(newsletter_settings.database_path)
+        database.close()
+
+    before = directory_digest(newsletter_settings.database_path.parent)
+    result = pipeline.prune_database(newsletter_settings, days=1, dry_run=True)
+
+    assert result.deleted == {
+        "items": 0,
+        "reranker_scores": 0,
+        "url_resolution_cache": 0,
+        "digests": 0,
+        "runs": 0,
+    }
+    assert result.reclaimed_bytes == 0
+    assert directory_digest(newsletter_settings.database_path.parent) == before
+    assert newsletter_settings.database_path.exists() is (database_state != "missing")
+    assert not newsletter_settings.lock_path.exists()
+
+
+def test_prune_dry_run_reads_schema_v8_without_migrating(newsletter_settings: Settings) -> None:
+    database = Database(newsletter_settings.database_path)
+    database.connection.execute("DROP TABLE reranker_scores")
+    database.connection.execute("DELETE FROM schema_version")
+    database.connection.execute("INSERT INTO schema_version(version,applied_at) VALUES(8,datetime('now'))")
+    database.connection.execute(
+        "INSERT INTO runs(run_type,started_at,status) VALUES('newsletter_digest',?,'ok')",
+        (datetime(2026, 1, 1, tzinfo=UTC).isoformat(),),
+    )
+    database.connection.commit()
+    database.close()
+
+    before = directory_digest(newsletter_settings.database_path.parent)
+    result = pipeline.prune_database(newsletter_settings, days=1, dry_run=True)
+
+    assert result.deleted == {
+        "items": 0,
+        "reranker_scores": 0,
+        "url_resolution_cache": 0,
+        "digests": 0,
+        "runs": 1,
+    }
+    assert directory_digest(newsletter_settings.database_path.parent) == before
+
+    connection = sqlite3.connect(newsletter_settings.database_path)
+    try:
+        assert connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == 8
+        assert connection.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='reranker_scores'").fetchone() is None
+    finally:
+        connection.close()
 
 
 def test_prune_defaults_to_the_configured_retention_window(newsletter_settings: Settings, newsletter_database: Database) -> None:

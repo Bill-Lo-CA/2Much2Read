@@ -557,7 +557,7 @@ def test_prunable_counts_the_same_rows_prune_would_delete(tmp_path: Path) -> Non
         _digest(database, "old-delivered", "delivered", old)
         cutoff = datetime(2026, 6, 1, tzinfo=UTC)
 
-        preview = database.prunable(cutoff)
+        preview = Database.prunable(tmp_path / "prune.sqlite3", cutoff)
         assert preview == database.prune(cutoff)
     finally:
         database.close()
