@@ -15,7 +15,12 @@ from two_read_runtime.text import is_inert
 
 from .article_extractor import ArticleExtractionError, extract_article
 from .article_fetcher import ArticleFetcher, ArticleFetchError, ResolvedUrl, UrlResolutionError
-from .command_models import DeliveryCheckpointResetResult, NewsletterRetryResult, NewsletterRunResult
+from .command_models import (
+    DeliveryCheckpointResetResult,
+    MaintenancePruneResult,
+    NewsletterRetryResult,
+    NewsletterRunResult,
+)
 from .config import GmailSource, HackerNewsSource, Settings, SourceConfig, load_sources
 from .digest import (
     DigestEntry,
@@ -914,6 +919,34 @@ def reset_corrupt_delivery(settings: Settings, delivery_id: int) -> DeliveryChec
         finally:
             database.close()
     return DeliveryCheckpointResetResult(delivery_id=delivery_id)
+
+
+def prune_database(settings: Settings, days: int | None = None, *, dry_run: bool = False) -> MaintenancePruneResult:
+    """Drop run history and derived rows past the retention window.
+
+    Runs under the same process lock as a pipeline run, so it cannot delete rows a run is in the
+    middle of writing.
+    """
+    retention = settings.retention_days if days is None else days
+    cutoff = datetime.now(UTC) - timedelta(days=retention)
+    with ProcessLock(settings.lock_path):
+        database = Database(settings.database_path)
+        try:
+            if dry_run:
+                deleted = database.prunable(cutoff)
+                reclaimed = 0
+            else:
+                deleted = database.prune(cutoff)
+                reclaimed = database.vacuum()
+        finally:
+            database.close()
+    return MaintenancePruneResult(
+        retention_days=retention,
+        cutoff=cutoff.isoformat(),
+        dry_run=dry_run,
+        deleted=deleted,
+        reclaimed_bytes=reclaimed,
+    )
 
 
 def deliver_digest(settings: Settings, database: Database, digest_id: int) -> tuple[int, int, int]:

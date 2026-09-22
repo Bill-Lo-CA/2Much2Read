@@ -155,6 +155,9 @@ class Settings(BaseSettings):
     digest_review_candidate_limit: int = Field(default=20, ge=1)
     digest_rerank_candidate_limit: int = Field(default=100, ge=1)
     digest_security_candidate_slots: int = Field(default=7, ge=0)
+    # Age at which run history and derived rows are pruned. The document and Gmail-state ledgers
+    # are exempt whatever this is set to - see Database.prune.
+    retention_days: int = Field(default=30, ge=1)
 
     @field_validator("digest_timezone")
     @classmethod

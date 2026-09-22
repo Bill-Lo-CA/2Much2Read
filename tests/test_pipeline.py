@@ -3,7 +3,7 @@ from __future__ import annotations
 import sqlite3
 from base64 import urlsafe_b64encode
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -2240,3 +2240,43 @@ def test_error_summary_flattens_control_characters_and_bounds_its_length() -> No
 
     assert len(long_summary) == pipeline.MAX_ERROR_SUMMARY
     assert long_summary.endswith("…")
+
+
+def test_prune_dry_run_reports_what_it_would_delete_and_deletes_nothing(
+    newsletter_settings: Settings, newsletter_database: Database
+) -> None:
+    old = datetime(2026, 1, 1, tzinfo=UTC).isoformat()
+    newsletter_database.connection.execute(
+        "INSERT INTO runs(run_type,started_at,status) VALUES('newsletter_digest',?,'ok')", (old,)
+    )
+    newsletter_database.connection.commit()
+
+    preview = pipeline.prune_database(newsletter_settings, days=1, dry_run=True)
+
+    assert preview.dry_run is True
+    assert preview.retention_days == 1
+    assert preview.deleted["runs"] == 1
+    assert preview.reclaimed_bytes == 0
+    assert newsletter_database.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1
+
+    applied = pipeline.prune_database(newsletter_settings, days=1)
+
+    assert applied.dry_run is False
+    assert applied.deleted["runs"] == 1
+    assert newsletter_database.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 0
+
+
+def test_prune_defaults_to_the_configured_retention_window(newsletter_settings: Settings, newsletter_database: Database) -> None:
+    within = (datetime.now(UTC) - timedelta(days=5)).isoformat()
+    beyond = (datetime.now(UTC) - timedelta(days=40)).isoformat()
+    for stamp in (within, beyond):
+        newsletter_database.connection.execute(
+            "INSERT INTO runs(run_type,started_at,status) VALUES('newsletter_digest',?,'ok')", (stamp,)
+        )
+    newsletter_database.connection.commit()
+
+    result = pipeline.prune_database(newsletter_settings)
+
+    assert result.retention_days == 30
+    assert result.deleted["runs"] == 1
+    assert newsletter_database.connection.execute("SELECT COUNT(*) FROM runs").fetchone()[0] == 1

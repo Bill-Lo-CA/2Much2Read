@@ -423,3 +423,141 @@ def test_backup_and_reset(tmp_path: Path) -> None:
     assert backup.counts()["documents"] == 1
     backup.close()
     database.close()
+
+
+def _aged_row(database: Database, table: str, column: str, stamp: str, **columns: object) -> None:
+    columns[column] = stamp
+    names = ",".join(columns)
+    placeholders = ",".join("?" for _ in columns)
+    database.connection.execute(f"INSERT INTO {table}({names}) VALUES({placeholders})", tuple(columns.values()))
+    database.connection.commit()
+
+
+def _seed_for_prune(database: Database, old: str, recent: str) -> int:
+    document_id = discover(database, "keep-me")
+    assert document_id is not None
+    for stamp in (old, recent):
+        _aged_row(
+            database,
+            "items",
+            "created_at",
+            stamp,
+            document_id=document_id,
+            normalized_title="t",
+            title="T",
+            category="AI",
+            summary_zh_tw="s",
+            why_it_matters_zh_tw="w",
+            importance=1,
+            confidence=0.5,
+            tags_json="[]",
+        )
+        _aged_row(database, "runs", "started_at", stamp, run_type="newsletter_digest", status="ok")
+        _aged_row(
+            database,
+            "reranker_scores",
+            "scored_at",
+            stamp,
+            item_id=1,
+            document_id=document_id,
+            normalized_title="t",
+            score=0.5,
+            model="m",
+            prompt_version="v1",
+        )
+        _aged_row(
+            database,
+            "url_resolution_cache",
+            "checked_at",
+            stamp,
+            raw_url_hash=f"hash-{stamp}",
+            raw_url_host="example.com",
+            status="resolved",
+            expires_at=recent,
+        )
+    return document_id
+
+
+def _digest(database: Database, key: str, state: str, stamp: str) -> None:
+    _aged_row(
+        database,
+        "digests",
+        "created_at",
+        stamp,
+        digest_key=key,
+        period_start=stamp,
+        period_end=stamp,
+        timezone="UTC",
+        content_sha256="sha",
+        rendered_content="body",
+        state=state,
+        updated_at=stamp,
+    )
+
+
+def test_prune_removes_aged_derived_rows_but_never_the_deduplication_ledger(tmp_path: Path) -> None:
+    """Pruning documents or gmail_document_state would re-deliver newsletters already sent.
+
+    They are also the smallest tables in the database, so exempting them costs nothing: when this
+    was written the ledger held 115 KB against 1.4 MB of items alone.
+    """
+    database = Database(tmp_path / "prune.sqlite3")
+    try:
+        old = datetime(2026, 1, 1, tzinfo=UTC).isoformat()
+        recent = datetime.now(UTC).isoformat()
+        document_id = _seed_for_prune(database, old, recent)
+        _digest(database, "old-delivered", "delivered", old)
+
+        deleted = database.prune(datetime(2026, 6, 1, tzinfo=UTC))
+
+        assert deleted == {
+            "items": 1,
+            "reranker_scores": 1,
+            "url_resolution_cache": 1,
+            "digests": 1,
+            "runs": 1,
+        }
+        assert database.counts()["documents"] == 1
+        assert (
+            database.connection.execute(
+                "SELECT COUNT(*) FROM gmail_document_state WHERE document_id=?", (document_id,)
+            ).fetchone()[0]
+            == 1
+        )
+        for table in ("items", "runs", "reranker_scores", "url_resolution_cache"):
+            assert database.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 1
+    finally:
+        database.close()
+
+
+def test_prune_keeps_an_undelivered_digest_whatever_its_age(tmp_path: Path) -> None:
+    """A pending digest holds content nobody received; deleting it on age would destroy it."""
+    database = Database(tmp_path / "prune.sqlite3")
+    try:
+        old = datetime(2026, 1, 1, tzinfo=UTC).isoformat()
+        _digest(database, "old-pending", "pending", old)
+        _digest(database, "old-failed", "failed", old)
+        _digest(database, "old-delivered", "delivered", old)
+
+        deleted = database.prune(datetime(2026, 6, 1, tzinfo=UTC))
+
+        assert deleted["digests"] == 1
+        remaining = {str(row["digest_key"]) for row in database.connection.execute("SELECT digest_key FROM digests")}
+        assert remaining == {"old-pending", "old-failed"}
+    finally:
+        database.close()
+
+
+def test_prunable_counts_the_same_rows_prune_would_delete(tmp_path: Path) -> None:
+    database = Database(tmp_path / "prune.sqlite3")
+    try:
+        old = datetime(2026, 1, 1, tzinfo=UTC).isoformat()
+        recent = datetime.now(UTC).isoformat()
+        _seed_for_prune(database, old, recent)
+        _digest(database, "old-delivered", "delivered", old)
+        cutoff = datetime(2026, 6, 1, tzinfo=UTC)
+
+        preview = database.prunable(cutoff)
+        assert preview == database.prune(cutoff)
+    finally:
+        database.close()

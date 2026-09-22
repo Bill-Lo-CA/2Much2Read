@@ -857,6 +857,67 @@ class Database:
         )
         self.connection.commit()
 
+    # What a prune may remove, and the column that dates each row. `digests` is narrowed further in
+    # _prune_predicate; the other four are safe to delete on age alone. `digest_deliveries` is
+    # absent because it cascades from `digests`.
+    PRUNABLE: tuple[tuple[str, str], ...] = (
+        ("items", "created_at"),
+        ("reranker_scores", "scored_at"),
+        ("url_resolution_cache", "checked_at"),
+        ("digests", "created_at"),
+        ("runs", "started_at"),
+    )
+
+    def _prune_predicate(self, table: str, column: str) -> str:
+        """A digest that was never delivered is kept whatever its age.
+
+        It holds rendered content nobody has received. Deleting it on age would destroy that
+        content and hide the reason it is still sitting there, which is a bug worth seeing rather
+        than collecting.
+        """
+        if table == "digests":
+            return f"{column} < ? AND state = 'delivered'"
+        return f"{column} < ?"
+
+    def prunable(self, cutoff: datetime) -> dict[str, int]:
+        stamp = cutoff.astimezone(UTC).isoformat()
+        return {
+            table: int(
+                self.connection.execute(
+                    f"SELECT COUNT(*) FROM {table} WHERE {self._prune_predicate(table, column)}", (stamp,)
+                ).fetchone()[0]
+            )
+            for table, column in self.PRUNABLE
+        }
+
+    def prune(self, cutoff: datetime) -> dict[str, int]:
+        """Delete run history and derived rows older than `cutoff`, keeping the deduplication ledger.
+
+        `documents`, `gmail_document_state` and `hackernews_document_state` are never pruned: they
+        are what stops an already-delivered newsletter being discovered and sent a second time, and
+        on disk they are a rounding error - 115 KB of ledger against 1.4 MB of `items` alone when
+        this was written. Everything removed here is either a record of what happened or a cache
+        that regenerates on demand.
+        """
+        stamp = cutoff.astimezone(UTC).isoformat()
+        deleted: dict[str, int] = {}
+        with self.connection:
+            for table, column in self.PRUNABLE:
+                cursor = self.connection.execute(f"DELETE FROM {table} WHERE {self._prune_predicate(table, column)}", (stamp,))
+                deleted[table] = cursor.rowcount
+        return deleted
+
+    def vacuum(self) -> int:
+        """Reclaim the freed pages, returning the bytes given back. Cannot run inside a transaction."""
+        before = self._file_bytes()
+        self.connection.execute("VACUUM")
+        return max(0, before - self._file_bytes())
+
+    def _file_bytes(self) -> int:
+        page_count = int(self.connection.execute("PRAGMA page_count").fetchone()[0])
+        page_size = int(self.connection.execute("PRAGMA page_size").fetchone()[0])
+        return page_count * page_size
+
     def counts(self) -> dict[str, int]:
         return {
             table: int(self.connection.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
