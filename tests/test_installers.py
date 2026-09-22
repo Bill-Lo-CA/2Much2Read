@@ -203,7 +203,7 @@ def test_installers_only_start_timers_when_confirmed(
             )
             assert "Enable agenda when ready: systemctl --user enable --now 2busy1miss-runtime-agenda.timer" in result.stdout
         agenda_timer = tmp_path / "home" / ".config" / "systemd" / "user" / "2busy1miss-runtime-agenda.timer"
-        assert "OnCalendar=*-*-* 21:00:00" in agenda_timer.read_text(encoding="utf-8")
+        assert "OnCalendar=*-*-* 21:00:00 America/Montreal" in agenda_timer.read_text(encoding="utf-8")
         (tmp_path / "home" / ".config" / "2much2read-runtime" / ".2busy1miss.env").write_text(
             "AGENDA_SCHEDULE_TIME=20:30\n", encoding="utf-8"
         )
@@ -216,7 +216,7 @@ def test_installers_only_start_timers_when_confirmed(
             capture_output=True,
             input=answer,
         )
-        assert "OnCalendar=*-*-* 20:30:00" in agenda_timer.read_text(encoding="utf-8")
+        assert "OnCalendar=*-*-* 20:30:00 America/Montreal" in agenda_timer.read_text(encoding="utf-8")
         (tmp_path / "home" / ".config" / "2much2read-runtime" / ".2busy1miss.env").write_text(
             "DISCORD_WEBHOOK_URL=\n", encoding="utf-8"
         )
@@ -229,7 +229,7 @@ def test_installers_only_start_timers_when_confirmed(
             capture_output=True,
             input=answer,
         )
-        assert "OnCalendar=*-*-* 21:00:00" in agenda_timer.read_text(encoding="utf-8")
+        assert "OnCalendar=*-*-* 21:00:00 America/Montreal" in agenda_timer.read_text(encoding="utf-8")
     else:
         newsletter_timer = tmp_path / "home" / ".config" / "systemd" / "user" / "2much2read-runtime.timer"
         assert "OnCalendar=*-*-* 08:00:00 America/Montreal" in newsletter_timer.read_text(encoding="utf-8")
@@ -741,3 +741,78 @@ def test_installers_do_not_migrate_when_runtime_state_is_unsafe(
     assert (data_root / sqlite_name).exists()
     assert not (config_root / app / token_name).exists()
     assert not (data_root / app / sqlite_name).exists()
+
+
+def test_agenda_timer_takes_the_timezone_reminders_yaml_actually_uses(tmp_path: Path) -> None:
+    """reminders.yaml wins over REMINDER_TIMEZONE in the command, so the timer has to agree.
+
+    Taking the environment file alone would put the timer in one zone and the command's
+    before_schedule guard in another - the same disagreement, moved rather than removed.
+    """
+    root = Path(__file__).parents[1]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        '#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+    home = tmp_path / "home"
+    config_root = home / ".config/2much2read-runtime"
+    config_root.mkdir(parents=True)
+    (config_root / ".2busy1miss.env").write_text(
+        "AGENDA_SCHEDULE_TIME=21:00\nREMINDER_TIMEZONE=Europe/Berlin\n", encoding="utf-8"
+    )
+    (config_root / "reminders.yaml").write_text(
+        "timezone: Asia/Taipei\n\ncalendars:\n  - id: primary\n    name: Main\n", encoding="utf-8"
+    )
+    client_secret = tmp_path / "client-secret.json"
+    client_secret.write_text("client secret", encoding="utf-8")
+
+    subprocess.run(
+        ["sh", "scripts/install-2busy1miss-user-service.sh", "--calendar-client-secret", str(client_secret)],
+        cwd=root,
+        env=os.environ | {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        check=True,
+        text=True,
+        capture_output=True,
+        input="n\n",
+    )
+
+    timer = (home / ".config/systemd/user/2busy1miss-runtime-agenda.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* 21:00:00 Asia/Taipei" in timer
+
+
+def test_agenda_timer_falls_back_to_the_environment_timezone(tmp_path: Path) -> None:
+    root = Path(__file__).parents[1]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        '#!/bin/sh\n[ "$2" = "is-active" ] && exit 3\n[ "$2" = "show" ] && printf "inactive\\n"\nexit 0\n',
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+    home = tmp_path / "home"
+    config_root = home / ".config/2much2read-runtime"
+    config_root.mkdir(parents=True)
+    (config_root / ".2busy1miss.env").write_text(
+        "AGENDA_SCHEDULE_TIME=07:15\nREMINDER_TIMEZONE=Europe/Berlin\n", encoding="utf-8"
+    )
+    (config_root / "reminders.yaml").write_text("calendars:\n  - id: primary\n    name: Main\n", encoding="utf-8")
+    client_secret = tmp_path / "client-secret.json"
+    client_secret.write_text("client secret", encoding="utf-8")
+
+    subprocess.run(
+        ["sh", "scripts/install-2busy1miss-user-service.sh", "--calendar-client-secret", str(client_secret)],
+        cwd=root,
+        env=os.environ | {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        check=True,
+        text=True,
+        capture_output=True,
+        input="n\n",
+    )
+
+    timer = (home / ".config/systemd/user/2busy1miss-runtime-agenda.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* 07:15:00 Europe/Berlin" in timer

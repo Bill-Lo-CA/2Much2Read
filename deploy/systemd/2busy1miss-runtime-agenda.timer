@@ -2,7 +2,7 @@
 Description=2busy1miss Next-Day Calendar Agenda Timer
 
 [Timer]
-OnCalendar=*-*-* __AGENDA_SCHEDULE_TIME__:00
+OnCalendar=*-*-* __AGENDA_SCHEDULE_TIME__:00 __AGENDA_SCHEDULE_TIMEZONE__
 Persistent=true
 
 [Install]

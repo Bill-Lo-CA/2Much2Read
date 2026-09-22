@@ -200,6 +200,27 @@ case "$agenda_schedule_time" in
     ;;
 esac
 
+# The timer used to carry no timezone, so it fired at that hour in whatever zone the manager runs
+# in, while the command's own guard reads the same hour in the configured one. Where the two
+# differed the run landed early, returned before_schedule, and no later run replaced it that day.
+# Resolved the way the command resolves it: reminders.yaml wins over the environment file, which
+# wins over the default compiled into Settings.
+agenda_schedule_timezone=$(sed -n 's/^timezone:[[:space:]]*//p' "$reminders_file" | tail -n 1 | tr -d '"'"'"'')
+if [ -z "$agenda_schedule_timezone" ]; then
+  agenda_schedule_timezone=$(sed -n 's/^REMINDER_TIMEZONE=//p' "$env_file" | tail -n 1)
+fi
+agenda_schedule_timezone=${agenda_schedule_timezone:-America/Montreal}
+case "$agenda_schedule_timezone" in
+  /*|*..*|*[!A-Za-z0-9_+./-]*)
+    printf '%s\n' "the agenda timezone must name a system timezone, got '$agenda_schedule_timezone'" >&2
+    exit 1
+    ;;
+esac
+[ -f "/usr/share/zoneinfo/$agenda_schedule_timezone" ] || {
+  printf '%s\n' "the agenda timezone must name a system timezone, got '$agenda_schedule_timezone'" >&2
+  exit 1
+}
+
 for unit in \
   "$systemd_dir/2busy1miss-runtime.service" \
   "$systemd_dir/2busy1miss-runtime.timer" \
@@ -210,7 +231,9 @@ done
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss-runtime.service > "$systemd_dir/2busy1miss-runtime.service"
 cp deploy/systemd/2busy1miss-runtime.timer "$systemd_dir/2busy1miss-runtime.timer"
 sed "s|__EXECUTABLE__|$exe|" deploy/systemd/2busy1miss-runtime-agenda.service > "$systemd_dir/2busy1miss-runtime-agenda.service"
-sed "s|__AGENDA_SCHEDULE_TIME__|$agenda_schedule_time|" deploy/systemd/2busy1miss-runtime-agenda.timer > "$systemd_dir/2busy1miss-runtime-agenda.timer"
+sed -e "s|__AGENDA_SCHEDULE_TIME__|$agenda_schedule_time|" \
+  -e "s|__AGENDA_SCHEDULE_TIMEZONE__|$agenda_schedule_timezone|" \
+  deploy/systemd/2busy1miss-runtime-agenda.timer > "$systemd_dir/2busy1miss-runtime-agenda.timer"
 
 systemctl --user daemon-reload
 
@@ -239,6 +262,7 @@ printf '%s\n' \
   "Check setup: cd $repo_dir && uv run 2busy1miss doctor" \
   "Dry run: cd $repo_dir && uv run 2busy1miss run --dry-run" \
   "Agenda dry run: cd $repo_dir && uv run 2busy1miss agenda-next-day --dry-run" \
+  "Agenda timer: $agenda_schedule_time $agenda_schedule_timezone. Rerun this installer after changing either." \
   "$timer_status"
 [ -z "$agenda_status" ] || printf '%s\n' "$agenda_status"
 printf '%s\n' "Logs: journalctl --user -u 2busy1miss-runtime.service"

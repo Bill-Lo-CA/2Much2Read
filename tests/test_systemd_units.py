@@ -123,9 +123,20 @@ def test_2busy1miss_agenda_timer_is_an_installer_template() -> None:
     timer = (UNITS / "2busy1miss-runtime-agenda.timer").read_text(encoding="utf-8")
     service = (UNITS / "2busy1miss-runtime-agenda.service").read_text(encoding="utf-8")
 
-    assert "OnCalendar=*-*-* __AGENDA_SCHEDULE_TIME__:00" in timer
+    # The timezone is part of the line, not optional. Without it systemd reads the hour in whatever
+    # zone the manager runs in, while `agenda-next-day --scheduled` reads the same hour in the
+    # configured one; where they differ the run lands early, returns before_schedule, and nothing
+    # replaces it that day.
+    assert "OnCalendar=*-*-* __AGENDA_SCHEDULE_TIME__:00 __AGENDA_SCHEDULE_TIMEZONE__" in timer
     assert "Persistent=true" in timer
     assert "ExecStart=__EXECUTABLE__ agenda-next-day --scheduled" in service
+
+
+def test_both_scheduled_timers_name_a_timezone() -> None:
+    for unit in ("2busy1miss-runtime-agenda.timer", "2much2read-runtime.timer"):
+        timer = (UNITS / unit).read_text(encoding="utf-8")
+        calendar = next(line for line in timer.splitlines() if line.startswith("OnCalendar="))
+        assert calendar.endswith("TIMEZONE__"), unit
 
 
 def test_2much2read_timer_is_an_installer_template() -> None:
