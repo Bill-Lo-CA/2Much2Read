@@ -1,10 +1,12 @@
 from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
-from two_busy_one_miss.google_calendar import CalendarEvent, _event_links
+from two_busy_one_miss.google_calendar import CalendarEvent, _event_links, _parse_datetime
 from two_busy_one_miss.renderer import render_agenda, render_reminder
 from two_busy_one_miss.rules import ReminderCandidate
 from two_read_runtime.discord import chunk_text
+
+MONTREAL = ZoneInfo("America/Montreal")
 
 
 def test_render_reminder_disables_mentions() -> None:
@@ -23,7 +25,7 @@ def test_render_reminder_disables_mentions() -> None:
     )
     candidate = ReminderCandidate(event, "default-5m", "5m", start - timedelta(minutes=5))
 
-    rendered = render_reminder(candidate)
+    rendered = render_reminder(candidate, MONTREAL)
 
     assert rendered.startswith("```text\n2busy1miss reminder · 5m before\nTIME        | EVENT")
     assert rendered.endswith("\n```")
@@ -53,7 +55,7 @@ def test_render_agenda_lists_events_and_disables_mentions() -> None:
         all_day=False,
     )
 
-    rendered = render_agenda(date(2026, 7, 9), [event])
+    rendered = render_agenda(date(2026, 7, 9), [event], MONTREAL)
 
     assert rendered.startswith("```text\n2busy1miss agenda · 2026-07-09\nTIME        | EVENT")
     assert "07:00-10:00 | @\u200beveryone French class (Main)" in rendered
@@ -84,10 +86,10 @@ def test_urls_move_below_the_table_without_metadata_links() -> None:
         "Location link - meet.example: <https://meet.example/join>"
     )
 
-    agenda = render_agenda(date(2026, 7, 9), [event])
+    agenda = render_agenda(date(2026, 7, 9), [event], MONTREAL)
     assert "https://" not in agenda.split("```", 2)[1]
     assert agenda.endswith(f"```\n{links}")
-    assert render_reminder(ReminderCandidate(event, "default-5m", "5m", start)).endswith(f"```\n{links}")
+    assert render_reminder(ReminderCandidate(event, "default-5m", "5m", start), MONTREAL).endswith(f"```\n{links}")
 
 
 def test_calendar_event_links_include_event_meeting_and_description_urls() -> None:
@@ -121,6 +123,7 @@ def test_render_agenda_marks_events_crossing_the_day_boundary() -> None:
             event("midnight", datetime(2026, 7, 9, 21, tzinfo=timezone), datetime(2026, 7, 10, 0, tzinfo=timezone)),
             event("earlier", datetime(2026, 7, 7, 21, tzinfo=timezone), datetime(2026, 7, 9, 4, tzinfo=timezone)),
         ],
+        timezone,
     )
 
     assert "Yesterday-04:00 | yesterday" in rendered
@@ -130,7 +133,7 @@ def test_render_agenda_marks_events_crossing_the_day_boundary() -> None:
 
 
 def test_render_agenda_handles_empty_day() -> None:
-    rendered = render_agenda(date(2026, 7, 9), [])
+    rendered = render_agenda(date(2026, 7, 9), [], MONTREAL)
 
     assert rendered.startswith("```text\n2busy1miss agenda · 2026-07-09\nTIME        | EVENT\n------------+")
     assert "            | No events" in rendered
@@ -150,7 +153,7 @@ def test_render_agenda_keeps_event_text_inside_code_block() -> None:
         all_day=False,
     )
 
-    rendered = render_agenda(date(2026, 7, 9), [event])
+    rendered = render_agenda(date(2026, 7, 9), [event], MONTREAL)
 
     assert "API_v2 (room [3]) ˋˋˋ" in rendered
     assert "Room 2 *draft*" in rendered
@@ -174,7 +177,7 @@ def test_render_agenda_shows_valid_location_hosts_and_rejects_credentials() -> N
         all_day=False,
     )
 
-    rendered = render_agenda(date(2026, 7, 9), [event])
+    rendered = render_agenda(date(2026, 7, 9), [event], MONTREAL)
 
     assert "Location link - meet.example: <https://meet.example/join>" in rendered
     assert "Location link - backup.example: <https://backup.example/room>" in rendered
@@ -199,7 +202,7 @@ def test_render_agenda_caps_links_and_preserves_first_seen_deduped_order() -> No
         False,
     )
 
-    rendered = render_agenda(date(2026, 7, 9), [event])
+    rendered = render_agenda(date(2026, 7, 9), [event], MONTREAL)
     link_lines = [line for line in rendered.splitlines() if " link - " in line]
 
     assert link_lines == [
@@ -223,7 +226,7 @@ def test_render_agenda_caps_links_and_preserves_first_seen_deduped_order() -> No
         for index in range(20)
     ]
 
-    capped = render_agenda(date(2026, 7, 9), events)
+    capped = render_agenda(date(2026, 7, 9), events, MONTREAL)
 
     assert len([line for line in capped.splitlines() if " link - " in line]) == 20
     assert "Title link - event19.example" not in capped
@@ -242,7 +245,7 @@ def test_render_agenda_sanitizes_controls_mentions_and_code_fences() -> None:
         False,
     )
 
-    rendered = render_agenda(date(2026, 7, 9), [event])
+    rendered = render_agenda(date(2026, 7, 9), [event], MONTREAL)
 
     assert rendered.count("```") == 2
     assert "@everyone" not in rendered
@@ -264,7 +267,7 @@ def test_render_agenda_chunks_at_discord_limit() -> None:
         False,
     )
 
-    chunks = chunk_text(render_agenda(date(2026, 7, 9), [event]))
+    chunks = chunk_text(render_agenda(date(2026, 7, 9), [event], MONTREAL))
 
     assert len(chunks) > 1
     assert all(len(chunk) <= 2_000 for chunk in chunks)
@@ -293,7 +296,7 @@ def test_the_meet_link_the_adapter_collected_reaches_the_reminder() -> None:
     )
     candidate = ReminderCandidate(event, "default-5m", "5m", start - timedelta(minutes=5))
 
-    rendered = render_reminder(candidate)
+    rendered = render_reminder(candidate, MONTREAL)
 
     assert "Event link - meet.google.com: <https://meet.google.com/abc-defg-hij>" in rendered
 
@@ -315,6 +318,26 @@ def test_an_event_link_that_is_not_a_safe_url_is_still_dropped() -> None:
     )
     candidate = ReminderCandidate(event, "default-5m", "5m", start - timedelta(minutes=5))
 
-    rendered = render_reminder(candidate)
+    rendered = render_reminder(candidate, MONTREAL)
 
     assert "Event link" not in rendered
+
+
+def test_the_agenda_orders_the_repeated_hour_by_instant() -> None:
+    """Two aware datetimes in the same zone compare by wall clock and ignore fold (PEP 495).
+
+    On the night Montreal falls back, 01:30 happens twice, an hour apart. Sorting events that have
+    already been converted therefore calls the two equal and the tie falls through to calendar_id,
+    which put the later one first. So the agenda is ordered while the events are still instants.
+    """
+    earlier = CalendarEvent("zzz", "Late", "a", "a", "EDT", "", *_span("2026-11-01T01:30:00-04:00"), False)
+    later = CalendarEvent("aaa", "Early", "b", "b", "EST", "", *_span("2026-11-01T01:30:00-05:00"), False)
+
+    rendered = render_agenda(date(2026, 11, 1), [later, earlier], MONTREAL)
+
+    assert rendered.index("| EDT") < rendered.index("| EST")
+
+
+def _span(raw: str) -> tuple[datetime, datetime]:
+    start = _parse_datetime(raw, MONTREAL)
+    return start, start + timedelta(minutes=30)

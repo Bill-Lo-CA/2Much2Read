@@ -8,11 +8,81 @@ from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import Self, cast
 
-from two_read_runtime.discord import DiscordDestination
+from two_read_runtime.discord import CorruptMessageIdsError, DiscordDestination, parse_message_ids
 from two_read_runtime.permissions import prepare_private_file, repair_sqlite_files
 
 from .google_calendar import CalendarEvent
 from .rules import ReminderCandidate
+
+
+def instant(value: datetime) -> str:
+    """A timestamp normalised to UTC, for the columns that are compared as text.
+
+    SQLite orders these lexically, and two ISO strings carrying different offsets are not in
+    absolute-time order: `01:45:00-04:00` sorts after `01:30:00-05:00` although it is 45 minutes
+    earlier. So `reminder_at<=?` and `ORDER BY reminder_at` give the wrong answer the moment one
+    database holds more than one offset - which happens on every DST boundary, and on any event
+    Google returns in another zone. Normalising here makes text order and absolute order the same
+    thing again. Converting back for display is the renderer's job, off the comparison path.
+    """
+    return value.astimezone(UTC).isoformat()
+
+
+# Which of two records of one reminder to keep, first choice first. `delivered` outranks everything
+# because discarding it in favour of another row would send the reminder a second time. A reminder
+# still owed comes next and a called-off one last, because only that way round can a wrong choice
+# be put right: a sync cancels an owed reminder whose event has gone, and dispatch expires one whose
+# event has started, but nothing reopens a cancelled row - _create_attempt updates only pending and
+# failed ones. And the pair is a real one: the text comparison this change replaces cancelled the
+# old row and wrote a pending one beside it whenever the same instant came back in another offset.
+_STATE_RANK = {"delivered": 0, "failed": 1, "pending": 2, "cancelled": 3, "expired": 4}
+
+
+def _state_rank(state: str) -> int:
+    return _STATE_RANK.get(state, len(_STATE_RANK))
+
+
+# The same idea one level down, per destination. `delivered` must win for the same reason; between
+# the other two, `failed` carries an attempt count and an error code that `pending` does not. That
+# is worth less than a sent chunk, so it only separates two records that got equally far.
+_DELIVERY_RANK = {"delivered": 0, "failed": 1, "pending": 2}
+
+
+def _delivery_rank(state: str) -> int:
+    return _DELIVERY_RANK.get(state, len(_DELIVERY_RANK))
+
+
+# The attempt states that summarise the destinations below them, and may therefore be recomputed
+# from those. `cancelled` and `expired` are decisions about the reminder itself - nothing under it
+# can undo them - so they are never derived.
+_DERIVED_ATTEMPT_STATES = frozenset({"pending", "delivered", "failed"})
+
+
+def _sent_chunk_count(value: object) -> int:
+    """How many chunks a destination already has, which is where a retry resumes.
+
+    `deliver_resumable` sends `chunks[len(message_ids):]`, so this number is the resume cursor and
+    not a detail: two copies of one destination can tie on state and still be one chunk apart.
+    Progress that will not parse counts as none, which is what the delivery path does with it too
+    (CORRUPT_MESSAGE_IDS); guessing higher would skip a chunk that was never sent.
+    """
+    try:
+        return len(parse_message_ids(value))
+    except CorruptMessageIdsError:
+        return 0
+
+
+def _delivery_progress(row: sqlite3.Row) -> tuple[int, int, int]:
+    """How far one destination got, furthest first, for choosing between two records of it.
+
+    `delivered` comes first because nothing is sent for it. Below that the sent chunks decide, and
+    state only breaks a tie: due_reminder_deliveries retries `pending` and `failed` alike, and a
+    `pending` record can hold chunks - record_reminder_delivery_progress commits each one before
+    the final state is written, so a crash in between leaves exactly that.
+    """
+    state = str(row["state"])
+    return (state != "delivered", -_sent_chunk_count(row["discord_message_ids_json"]), _delivery_rank(state))
+
 
 REMINDER_ATTEMPTS_SCHEMA = """
 CREATE TABLE IF NOT EXISTS reminder_attempts(
@@ -103,10 +173,215 @@ class Database:
             if "retired_at" not in delivery_columns:
                 self.connection.execute("ALTER TABLE reminder_deliveries ADD COLUMN retired_at TEXT")
                 self.connection.commit()
+            self._normalise_stored_instants()
             repair_sqlite_files(path)
         except Exception:
             self.connection.close()
             raise
+
+    def _merge_reminder_deliveries(self, winner: int, loser: int) -> None:
+        """Carry the loser's per-destination progress across before its rows cascade away.
+
+        The attempt's own state is one word for what may be several destinations at different
+        points: an attempt reads `failed` while one of its destinations is already `delivered`.
+        Two copies can therefore tie on attempt state and still hold different evidence, and
+        `rd.state IN ('pending','failed')` in due_reminder_deliveries is the only thing stopping a
+        resend to a destination that already has the message. Deleting the loser outright took
+        that evidence with it through ON DELETE CASCADE.
+
+        Two records of the same destination are separated by state first and by how many chunks
+        they have already sent second, because state alone does not separate two `failed` copies
+        that stopped at different chunks. attempt_count is the larger of the two either way: it is
+        only ever reported, and understating how often a destination has been tried is the less
+        useful of the two errors.
+        """
+        for row in self.connection.execute("SELECT * FROM reminder_deliveries WHERE reminder_attempt_id=?", (loser,)).fetchall():
+            existing = self.connection.execute(
+                "SELECT * FROM reminder_deliveries WHERE reminder_attempt_id=? AND destination_key=?",
+                (winner, row["destination_key"]),
+            ).fetchone()
+            if existing is None:
+                self.connection.execute(
+                    "UPDATE reminder_deliveries SET reminder_attempt_id=? WHERE id=?", (winner, int(row["id"]))
+                )
+                continue
+            attempts = max(int(row["attempt_count"]), int(existing["attempt_count"]))
+            if _delivery_progress(row) < _delivery_progress(existing):
+                self.connection.execute(
+                    """UPDATE reminder_deliveries SET state=?,attempt_count=?,discord_message_ids_json=?,
+                    delivered_at=?,last_error_code=?,retired_at=?,updated_at=? WHERE id=?""",
+                    (
+                        row["state"],
+                        attempts,
+                        row["discord_message_ids_json"],
+                        row["delivered_at"],
+                        row["last_error_code"],
+                        row["retired_at"],
+                        datetime.now(UTC).isoformat(),
+                        int(existing["id"]),
+                    ),
+                )
+            elif attempts != int(existing["attempt_count"]):
+                self.connection.execute(
+                    "UPDATE reminder_deliveries SET attempt_count=?,updated_at=? WHERE id=?",
+                    (attempts, datetime.now(UTC).isoformat(), int(existing["id"])),
+                )
+
+    def _merge_attempt_checkpoints(self, winner: int, loser: int) -> None:
+        """Carry the attempt-level resume cursors across as well as the per-destination ones.
+
+        Attempts written before reminder_deliveries existed keep their cursor on the attempt row,
+        and migrate_legacy_reminder_deliveries moves it onto a delivery row only on the first
+        dispatch that finds the attempt with no delivery rows at all. So a merge can lose one in
+        two ways: the loser's goes with it, and once the winner has delivery rows - its own, or
+        ones just moved over from the loser - its own attempt-level cursor is never migrated.
+
+        Where the winner has rows, each cursor is folded onto the row for the same destination if
+        that row is behind; a key with no row is not adopted, which is also what the migration
+        does with a key that matches no configured destination. Where it has none, the winner keeps
+        the longer of the two cursors for the migration to find. Only a reminder that is still owed
+        is touched - nothing is sent for the others, whatever their cursor says.
+        """
+        rows = {
+            int(row["id"]): row
+            for row in self.connection.execute(
+                "SELECT id,state,discord_message_ids_json,discord_destination_key FROM reminder_attempts WHERE id IN (?,?)",
+                (winner, loser),
+            )
+        }
+        if str(rows[winner]["state"]) not in ("pending", "failed"):
+            return
+        cursors = [
+            (rows[attempt]["discord_message_ids_json"], str(rows[attempt]["discord_destination_key"]))
+            for attempt in (winner, loser)
+            if rows[attempt]["discord_message_ids_json"] is not None and rows[attempt]["discord_destination_key"] is not None
+        ]
+        if not cursors:
+            return
+        if self.connection.execute("SELECT 1 FROM reminder_deliveries WHERE reminder_attempt_id=?", (winner,)).fetchone():
+            for message_ids, key in cursors:
+                delivery = self.connection.execute(
+                    """SELECT id,discord_message_ids_json FROM reminder_deliveries
+                    WHERE reminder_attempt_id=? AND destination_key=? AND state<>'delivered'""",
+                    (winner, key),
+                ).fetchone()
+                if delivery is not None and _sent_chunk_count(message_ids) > _sent_chunk_count(
+                    delivery["discord_message_ids_json"]
+                ):
+                    self.connection.execute(
+                        "UPDATE reminder_deliveries SET discord_message_ids_json=?,updated_at=? WHERE id=?",
+                        (message_ids, datetime.now(UTC).isoformat(), int(delivery["id"])),
+                    )
+            return
+        # max() keeps the first of equals, and the winner's cursor is listed first.
+        message_ids, key = max(cursors, key=lambda cursor: _sent_chunk_count(cursor[0]))
+        self.connection.execute(
+            "UPDATE reminder_attempts SET discord_message_ids_json=?,discord_destination_key=? WHERE id=?",
+            (message_ids, key, winner),
+        )
+
+    def _advance_merged_attempt(self, attempt_id: int, state: str) -> None:
+        """Move a merged attempt's own word forward to what its destinations now say.
+
+        Merging can change it: two copies that both read `failed` because each was missing a
+        different destination leave one row where every destination is delivered. Left at `failed`
+        that reminder stays in due_attempts for good, and the dispatcher expires it the moment the
+        event starts.
+
+        Forwards only, and only from a state that summarises the destinations below it. An attempt
+        delivered through the per-attempt path still has `pending` delivery rows underneath it -
+        finish_delivery writes the one and not the other - so deriving freely would demote it and
+        send the reminder again. `cancelled` and `expired` are decisions about the reminder itself
+        that nothing below it may undo.
+        """
+        if state not in _DERIVED_ATTEMPT_STATES:
+            return
+        derived = self._derived_attempt_state(self.connection, attempt_id)
+        if derived is None or _state_rank(derived) >= _state_rank(state):
+            return
+        self.connection.execute(
+            "UPDATE reminder_attempts SET state=?,updated_at=? WHERE id=?",
+            (derived, datetime.now(UTC).isoformat(), attempt_id),
+        )
+
+    def _normalise_stored_instants(self) -> None:
+        """Rewrite timestamps written before these columns held UTC.
+
+        Detect-and-fix, like the two column additions above: a row is converted only when its text
+        differs from its own UTC form, so every later open is a no-op over a few hundred rows.
+
+        A naive value is left alone. None should exist - everything written here comes from an
+        aware datetime - and converting one would mean guessing a zone from the machine's locale,
+        which is how the offsets got mixed in the first place.
+
+        The whole pass holds the write lock from its first read. The constructor runs outside
+        ProcessLock - run() opens the database before taking it, and the per-minute and agenda
+        timers fire in the same second - so two processes can make the first open after an
+        upgrade together. Without the lock the second read its snapshot before the first had
+        converted anything, then looked each row's canonical key up afterwards and found the row
+        itself there: it merged every row into itself and deleted it, delivery history and all,
+        and the next sync recreated and resent whatever was still in the window. With it, the
+        second waits for the first to commit and then finds nothing left to do.
+        """
+        if self.connection.in_transaction:
+            self.connection.commit()
+        self.connection.execute("BEGIN IMMEDIATE")
+        events = self.connection.execute("SELECT id,start_at,end_at FROM events").fetchall()
+        for row in events:
+            start, end = str(row["start_at"]), str(row["end_at"])
+            parsed_start, parsed_end = datetime.fromisoformat(start), datetime.fromisoformat(end)
+            if parsed_start.tzinfo is None or parsed_end.tzinfo is None:
+                continue
+            if (instant(parsed_start), instant(parsed_end)) != (start, end):
+                self.connection.execute(
+                    "UPDATE events SET start_at=?,end_at=? WHERE id=?",
+                    (instant(parsed_start), instant(parsed_end), int(row["id"])),
+                )
+        # reminder_at is part of UNIQUE(calendar_id,event_id,instance_id,rule_id,reminder_at), so two
+        # offsets naming one instant become one key here - the same reminder recorded twice, as a
+        # re-sync across a DST boundary produces. The target key can already be held by a row that
+        # was written in UTC and so never enters this loop, which is why the occupant is looked up
+        # rather than inferred from the order rows are visited in: ordering decides what gets
+        # converted first, not what got there first.
+        attempts = self.connection.execute(
+            "SELECT id,state,reminder_at,calendar_id,event_id,instance_id,rule_id FROM reminder_attempts"
+        ).fetchall()
+        removed: set[int] = set()
+        for row in sorted(attempts, key=lambda item: (_state_rank(str(item["state"])), int(item["id"]))):
+            row_id = int(row["id"])
+            if row_id in removed:
+                continue
+            reminder_at = str(row["reminder_at"])
+            parsed = datetime.fromisoformat(reminder_at)
+            if parsed.tzinfo is None or instant(parsed) == reminder_at:
+                continue
+            canonical = instant(parsed)
+            occupant = self.connection.execute(
+                """SELECT id,state FROM reminder_attempts WHERE calendar_id=? AND event_id=? AND instance_id=?
+                AND rule_id=? AND reminder_at=?""",
+                (row["calendar_id"], row["event_id"], row["instance_id"], row["rule_id"], canonical),
+            ).fetchone()
+            if occupant is not None and int(occupant["id"]) == row_id:
+                # Already converted by someone else since the snapshot. The lock above rules this
+                # out; it is checked anyway, because the other branch would delete the row.
+                continue
+            if occupant is not None:
+                # One reminder, two rows. The copy _STATE_RANK puts second is dropped, so a
+                # delivered one is never discarded in favour of a pending one that would send it
+                # again, nor an owed one for a cancelled one that nothing reopens - and its
+                # reminder_deliveries rows, which ON DELETE CASCADE would take with it, stay with it.
+                keep_occupant = _state_rank(str(occupant["state"])) <= _state_rank(str(row["state"]))
+                winner = int(occupant["id"]) if keep_occupant else row_id
+                loser = row_id if keep_occupant else int(occupant["id"])
+                self._merge_reminder_deliveries(winner, loser)
+                self._merge_attempt_checkpoints(winner, loser)
+                self.connection.execute("DELETE FROM reminder_attempts WHERE id=?", (loser,))
+                removed.add(loser)
+                self._advance_merged_attempt(winner, str(occupant["state"] if keep_occupant else row["state"]))
+                if keep_occupant:
+                    continue
+            self.connection.execute("UPDATE reminder_attempts SET reminder_at=? WHERE id=?", (canonical, row_id))
+        self.connection.commit()
 
     @classmethod
     def reading(cls, connection: sqlite3.Connection) -> Self:
@@ -146,8 +421,8 @@ class Database:
                 event.instance_id,
                 event.title,
                 event.location,
-                event.start.isoformat(),
-                event.end.isoformat(),
+                instant(event.start),
+                instant(event.end),
                 int(event.all_day),
                 now,
             ),
@@ -186,7 +461,7 @@ class Database:
                 candidate.event.event_id,
                 candidate.event.instance_id,
                 candidate.rule_id,
-                candidate.reminder_time.isoformat(),
+                instant(candidate.reminder_time),
                 content,
                 now,
                 now,
@@ -207,7 +482,7 @@ class Database:
                     candidate.event.event_id,
                     candidate.event.instance_id,
                     candidate.rule_id,
-                    candidate.reminder_time.isoformat(),
+                    instant(candidate.reminder_time),
                     content,
                 ),
             )
@@ -220,7 +495,7 @@ class Database:
                         candidate.event.event_id,
                         candidate.event.instance_id,
                         candidate.rule_id,
-                        candidate.reminder_time.isoformat(),
+                        instant(candidate.reminder_time),
                     ),
                 ).fetchone()
                 assert row is not None
@@ -234,7 +509,7 @@ class Database:
                     candidate.event.event_id,
                     candidate.event.instance_id,
                     candidate.rule_id,
-                    candidate.reminder_time.isoformat(),
+                    instant(candidate.reminder_time),
                 ),
             ).fetchone()
             assert row is not None
@@ -262,13 +537,25 @@ class Database:
         ).fetchall()
 
     def due_attempts(self, now: datetime) -> list[sqlite3.Row]:
-        return self.connection.execute(
+        """Selected by state in SQL, then compared and ordered as instants in Python.
+
+        `Database.reading` deliberately does not migrate, because a reporting command must not
+        write; so the read-only path - `run --dry-run` - can still meet rows carrying a local
+        offset, and comparing those as text against a UTC parameter is the defect this change
+        exists to remove. An old `09:55:00-04:00` row sorts before `13:50:00+00:00` and a dry run
+        would report it due five minutes early.
+
+        Parsing each candidate costs nothing at these sizes - a few hundred rows - and gives the
+        migrated and unmigrated paths one answer instead of two.
+        """
+        rows = self.connection.execute(
             """SELECT reminder_attempts.*, events.start_at AS event_start_at, events.end_at AS event_end_at
             FROM reminder_attempts JOIN events ON events.id=reminder_attempts.event_row_id
-            WHERE reminder_attempts.state IN ('pending','failed') AND reminder_attempts.reminder_at<=?
-            ORDER BY reminder_attempts.reminder_at, reminder_attempts.id""",
-            (now.isoformat(),),
+            WHERE reminder_attempts.state IN ('pending','failed')"""
         ).fetchall()
+        moment = now.astimezone(UTC)
+        due = [(datetime.fromisoformat(str(row["reminder_at"])).astimezone(UTC), int(row["id"]), row) for row in rows]
+        return [row for reminder_at, _, row in sorted(due, key=lambda item: item[:2]) if reminder_at <= moment]
 
     def ensure_reminder_deliveries(self, reminder_attempt_id: int, destinations: list[DiscordDestination]) -> None:
         with self.transaction() as connection:
@@ -333,20 +620,27 @@ class Database:
     def due_reminder_deliveries(self, now: datetime, destinations: list[DiscordDestination]) -> list[sqlite3.Row]:
         if not destinations:
             return []
-        for attempt in self.due_attempts(now):
-            self.reconcile_reminder_deliveries(int(attempt["id"]), destinations)
+        # Which attempts are due is decided once, by due_attempts, rather than repeated here as a
+        # second text comparison that the read-only path would get wrong in its own way.
+        due_ids = [int(attempt["id"]) for attempt in self.due_attempts(now)]
+        if not due_ids:
+            return []
+        for attempt_id in due_ids:
+            self.reconcile_reminder_deliveries(attempt_id, destinations)
         keys = [destination.key for destination in destinations]
         placeholders = ",".join("?" for _ in keys)
+        attempt_placeholders = ",".join("?" for _ in due_ids)
         return self.connection.execute(
             f"""SELECT rd.*,ra.content,e.start_at AS event_start_at FROM reminder_deliveries rd
             JOIN reminder_attempts ra ON ra.id=rd.reminder_attempt_id JOIN events e ON e.id=ra.event_row_id
             WHERE rd.destination_key IN ({placeholders}) AND rd.state IN ('pending','failed')
-            AND rd.retired_at IS NULL AND ra.state IN ('pending','failed') AND ra.reminder_at<=?
+            AND rd.retired_at IS NULL AND ra.id IN ({attempt_placeholders})
             ORDER BY ra.reminder_at,rd.id""",
-            (*keys, now.isoformat()),
+            (*keys, *due_ids),
         ).fetchall()
 
-    def _refresh_reminder_state(self, connection: sqlite3.Connection, reminder_attempt_id: int) -> None:
+    def _derived_attempt_state(self, connection: sqlite3.Connection, reminder_attempt_id: int) -> str | None:
+        """What an attempt's destinations add up to, or None when it has none to speak for it."""
         states = [
             str(row["state"])
             for row in connection.execute(
@@ -355,8 +649,13 @@ class Database:
             )
         ]
         if not states:
+            return None
+        return "delivered" if all(value == "delivered" for value in states) else "failed" if "failed" in states else "pending"
+
+    def _refresh_reminder_state(self, connection: sqlite3.Connection, reminder_attempt_id: int) -> None:
+        state = self._derived_attempt_state(connection, reminder_attempt_id)
+        if state is None:
             return
-        state = "delivered" if all(value == "delivered" for value in states) else "failed" if "failed" in states else "pending"
         connection.execute(
             "UPDATE reminder_attempts SET state=?,updated_at=? WHERE id=?",
             (state, datetime.now(UTC).isoformat(), reminder_attempt_id),
@@ -417,21 +716,21 @@ class Database:
                 candidate.event.event_id,
                 candidate.event.instance_id,
                 candidate.rule_id,
-                candidate.reminder_time.isoformat(),
+                instant(candidate.reminder_time),
             )
             for candidate in candidates
         }
         synced_events = tuple({(event.calendar_id, event.event_id, event.instance_id) for event in events})
         query = """SELECT id,calendar_id,event_id,instance_id,rule_id,reminder_at FROM reminder_attempts
             WHERE state IN ('pending','failed') AND reminder_at>=? AND reminder_at<=?"""
-        parameters: list[str] = [window_start.isoformat(), window_end.isoformat()]
+        parameters: list[str] = [instant(window_start), instant(window_end)]
         if synced_events:
             event_matches = " OR ".join("(calendar_id=? AND event_id=? AND instance_id=?)" for _ in synced_events)
             query = f"""SELECT id,calendar_id,event_id,instance_id,rule_id,reminder_at FROM reminder_attempts
                 WHERE state IN ('pending','failed') AND (
                     (reminder_at>=? AND reminder_at<=?) OR (reminder_at<? AND ({event_matches}))
                 )"""
-            parameters.extend([window_start.isoformat(), *(value for event in synced_events for value in event)])
+            parameters.extend([instant(window_start), *(value for event in synced_events for value in event)])
         rows = self.connection.execute(query, parameters).fetchall()
         cancelled = [
             int(row["id"])
