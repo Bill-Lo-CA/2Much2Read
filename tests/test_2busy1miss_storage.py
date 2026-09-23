@@ -2,6 +2,8 @@ import json
 import os
 import sqlite3
 import stat
+import threading
+import time
 from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -637,3 +639,49 @@ def test_normalising_leaves_the_cursor_of_a_reminder_already_sent(tmp_path: Path
 
     assert _cursor_the_pipeline_reads(reopened) == ["done"]
     reopened.close()
+
+
+def test_two_processes_opening_an_unconverted_database_together_lose_nothing(tmp_path: Path) -> None:
+    """The first open after an upgrade can happen in two processes at once.
+
+    run() opens the database before taking ProcessLock, and the per-minute and agenda timers fire
+    in the same second. The second opener used to read its snapshot before the first had converted
+    anything, then find each row at its own canonical key and merge it into itself - deleting
+    every reminder the first had converted, with its delivery history.
+
+    Here one connection holds the write lock while it converts, the way the other process's
+    migration would, and a Database() is opened meanwhile.
+    """
+    path = tmp_path / "test.sqlite3"
+    setup = Database(path)
+    for hour in (9, 10, 11):
+        attempt = setup.create_attempt(_candidate_at(datetime(2026, 7, 8, hour, 55, tzinfo=MONTREAL), event_id=f"e{hour}"), "m")
+        setup.connection.execute(
+            "UPDATE reminder_attempts SET state='delivered', reminder_at=? WHERE id=?",
+            (f"2026-07-08T{hour:02}:55:00-04:00", attempt),
+        )
+    setup.connection.commit()
+    setup.close()
+
+    other = sqlite3.connect(path)
+    other.execute("BEGIN IMMEDIATE")
+    second = threading.Thread(target=lambda: Database(path).close())
+    second.start()
+    # Long enough for the second opener to have read whatever it is going to read before this
+    # commits; far shorter than its 5 s busy timeout.
+    time.sleep(0.5)
+    for hour, utc in ((9, 13), (10, 14), (11, 15)):
+        other.execute(
+            "UPDATE reminder_attempts SET reminder_at=? WHERE reminder_at=?",
+            (f"2026-07-08T{utc}:55:00+00:00", f"2026-07-08T{hour:02}:55:00-04:00"),
+        )
+    other.commit()
+    other.close()
+    second.join()
+
+    rows = sqlite3.connect(path).execute("SELECT state,reminder_at FROM reminder_attempts ORDER BY reminder_at").fetchall()
+    assert rows == [
+        ("delivered", "2026-07-08T13:55:00+00:00"),
+        ("delivered", "2026-07-08T14:55:00+00:00"),
+        ("delivered", "2026-07-08T15:55:00+00:00"),
+    ]

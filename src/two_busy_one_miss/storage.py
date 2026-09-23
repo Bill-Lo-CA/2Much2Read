@@ -301,7 +301,19 @@ class Database:
         A naive value is left alone. None should exist - everything written here comes from an
         aware datetime - and converting one would mean guessing a zone from the machine's locale,
         which is how the offsets got mixed in the first place.
+
+        The whole pass holds the write lock from its first read. The constructor runs outside
+        ProcessLock - run() opens the database before taking it, and the per-minute and agenda
+        timers fire in the same second - so two processes can make the first open after an
+        upgrade together. Without the lock the second read its snapshot before the first had
+        converted anything, then looked each row's canonical key up afterwards and found the row
+        itself there: it merged every row into itself and deleted it, delivery history and all,
+        and the next sync recreated and resent whatever was still in the window. With it, the
+        second waits for the first to commit and then finds nothing left to do.
         """
+        if self.connection.in_transaction:
+            self.connection.commit()
+        self.connection.execute("BEGIN IMMEDIATE")
         events = self.connection.execute("SELECT id,start_at,end_at FROM events").fetchall()
         for row in events:
             start, end = str(row["start_at"]), str(row["end_at"])
@@ -337,6 +349,10 @@ class Database:
                 AND rule_id=? AND reminder_at=?""",
                 (row["calendar_id"], row["event_id"], row["instance_id"], row["rule_id"], canonical),
             ).fetchone()
+            if occupant is not None and int(occupant["id"]) == row_id:
+                # Already converted by someone else since the snapshot. The lock above rules this
+                # out; it is checked anyway, because the other branch would delete the row.
+                continue
             if occupant is not None:
                 # One reminder, two rows. Only the copy that has got least far is dropped, so a
                 # delivered one is never discarded in favour of a pending one that would send it
