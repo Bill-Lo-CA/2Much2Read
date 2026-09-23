@@ -561,20 +561,47 @@ def test_normalising_leaves_the_surviving_attempt_saying_what_its_destinations_s
 def test_normalising_does_not_reopen_a_reminder_that_was_called_off(tmp_path: Path, terminal: str) -> None:
     """`cancelled` and `expired` are decisions about the reminder, not summaries of its destinations.
 
-    The surviving attempt outranks a pending copy, so its pending deliveries move across - and
-    recomputing its state from those would put a called-off reminder back in the send queue.
+    Two called-off copies merge like any others, and the survivor still has pending deliveries
+    under it - recomputing its state from those would put the reminder back in the send queue.
     """
     path = tmp_path / "test.sqlite3"
     database = Database(path)
     legacy, canonical, _ = _failed_twins(database)
     database.connection.execute("UPDATE reminder_attempts SET state=? WHERE id=?", (terminal, canonical))
-    database.connection.execute("UPDATE reminder_attempts SET state='pending' WHERE id=?", (legacy,))
+    database.connection.execute("UPDATE reminder_attempts SET state='expired' WHERE id=?", (legacy,))
     database.connection.commit()
     database.close()
 
     reopened = Database(path)
 
     assert str(reopened.connection.execute("SELECT state FROM reminder_attempts").fetchone()[0]) == terminal
+    reopened.close()
+
+
+@pytest.mark.parametrize("called_off_on", ["survivor", "duplicate"])
+@pytest.mark.parametrize("terminal", ["cancelled", "expired"])
+def test_normalising_keeps_the_copy_that_is_still_owed(tmp_path: Path, terminal: str, called_off_on: str) -> None:
+    """An owed copy outranks a called-off one, because only that choice can be undone.
+
+    The text comparison this change replaces left exactly this pair behind: the same instant came
+    back in another offset, the old row was cancelled for not matching, and a pending one was
+    written beside it. Keeping the cancelled one lost the reminder for good - _create_attempt
+    reopens nothing that is not pending or failed - while keeping the owed one costs nothing a
+    later sync or dispatch does not correct.
+    """
+    path = tmp_path / "test.sqlite3"
+    database = Database(path)
+    legacy, canonical, _ = _failed_twins(database)
+    stopped, owed = (canonical, legacy) if called_off_on == "survivor" else (legacy, canonical)
+    database.connection.execute("UPDATE reminder_attempts SET state=? WHERE id=?", (terminal, stopped))
+    database.connection.execute("UPDATE reminder_attempts SET state='pending' WHERE id=?", (owed,))
+    database.connection.commit()
+    database.close()
+
+    reopened = Database(path)
+
+    assert [str(row[0]) for row in reopened.connection.execute("SELECT state FROM reminder_attempts")] == ["pending"]
+    assert len(reopened.due_attempts(datetime(2026, 7, 8, 13, 56, tzinfo=UTC))) == 1
     reopened.close()
 
 

@@ -28,10 +28,14 @@ def instant(value: datetime) -> str:
     return value.astimezone(UTC).isoformat()
 
 
-# How far a reminder has got, most advanced first. `delivered` outranks everything because
-# discarding it in favour of another row would send the reminder a second time; `pending` is last
-# because it is the only state that still owes the user a message.
-_STATE_RANK = {"delivered": 0, "cancelled": 1, "expired": 2, "failed": 3, "pending": 4}
+# Which of two records of one reminder to keep, first choice first. `delivered` outranks everything
+# because discarding it in favour of another row would send the reminder a second time. A reminder
+# still owed comes next and a called-off one last, because only that way round can a wrong choice
+# be put right: a sync cancels an owed reminder whose event has gone, and dispatch expires one whose
+# event has started, but nothing reopens a cancelled row - _create_attempt updates only pending and
+# failed ones. And the pair is a real one: the text comparison this change replaces cancelled the
+# old row and wrote a pending one beside it whenever the same instant came back in another offset.
+_STATE_RANK = {"delivered": 0, "failed": 1, "pending": 2, "cancelled": 3, "expired": 4}
 
 
 def _state_rank(state: str) -> int:
@@ -362,10 +366,10 @@ class Database:
                 # out; it is checked anyway, because the other branch would delete the row.
                 continue
             if occupant is not None:
-                # One reminder, two rows. Only the copy that has got least far is dropped, so a
+                # One reminder, two rows. The copy _STATE_RANK puts second is dropped, so a
                 # delivered one is never discarded in favour of a pending one that would send it
-                # again - and its reminder_deliveries rows, which ON DELETE CASCADE would take with
-                # it, stay with it.
+                # again, nor an owed one for a cancelled one that nothing reopens - and its
+                # reminder_deliveries rows, which ON DELETE CASCADE would take with it, stay with it.
                 keep_occupant = _state_rank(str(occupant["state"])) <= _state_rank(str(row["state"]))
                 winner = int(occupant["id"]) if keep_occupant else row_id
                 loser = row_id if keep_occupant else int(occupant["id"])
