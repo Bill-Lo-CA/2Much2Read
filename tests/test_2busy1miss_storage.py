@@ -498,6 +498,38 @@ def test_normalising_keeps_the_chunks_a_destination_has_already_had(tmp_path: Pa
     reopened.close()
 
 
+@pytest.mark.parametrize("pending_on", ["survivor", "duplicate"])
+def test_normalising_prefers_sent_chunks_to_a_failed_state(tmp_path: Path, pending_on: str) -> None:
+    """A `pending` record can be the one that got further.
+
+    record_reminder_delivery_progress commits each chunk while the delivery still reads `pending`,
+    so a crash before the final update leaves chunks on a pending row. Ranking `failed` above it
+    regardless kept an empty cursor, and the retry sent both chunks again.
+    """
+    path = tmp_path / "test.sqlite3"
+    database = Database(path)
+    legacy, canonical, destinations = _failed_twins(database)
+    webhook_key = destinations[0].key
+    ahead, behind = (canonical, legacy) if pending_on == "survivor" else (legacy, canonical)
+    for attempt, state, ids in ((ahead, "pending", '["c1", "c2"]'), (behind, "failed", None)):
+        database.connection.execute(
+            """UPDATE reminder_deliveries SET state=?,attempt_count=1,discord_message_ids_json=?
+            WHERE reminder_attempt_id=? AND destination_key=?""",
+            (state, ids, attempt, webhook_key),
+        )
+    database.connection.commit()
+    database.close()
+
+    reopened = Database(path)
+
+    survivor = reopened.connection.execute(
+        "SELECT discord_message_ids_json FROM reminder_deliveries WHERE reminder_attempt_id=? AND destination_key=?",
+        (canonical, webhook_key),
+    ).fetchone()
+    assert json.loads(str(survivor["discord_message_ids_json"])) == ["c1", "c2"]
+    reopened.close()
+
+
 def test_normalising_leaves_the_surviving_attempt_saying_what_its_destinations_say(tmp_path: Path) -> None:
     """Merging the destinations can change what the attempt's own one word should be.
 

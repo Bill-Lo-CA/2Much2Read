@@ -39,7 +39,8 @@ def _state_rank(state: str) -> int:
 
 
 # The same idea one level down, per destination. `delivered` must win for the same reason; between
-# the other two, `failed` carries an attempt count and an error code that `pending` does not.
+# the other two, `failed` carries an attempt count and an error code that `pending` does not. That
+# is worth less than a sent chunk, so it only separates two records that got equally far.
 _DELIVERY_RANK = {"delivered": 0, "failed": 1, "pending": 2}
 
 
@@ -67,9 +68,16 @@ def _sent_chunk_count(value: object) -> int:
         return 0
 
 
-def _delivery_progress(row: sqlite3.Row) -> tuple[int, int]:
-    """How far one destination got, furthest first, for choosing between two records of it."""
-    return (_delivery_rank(str(row["state"])), -_sent_chunk_count(row["discord_message_ids_json"]))
+def _delivery_progress(row: sqlite3.Row) -> tuple[int, int, int]:
+    """How far one destination got, furthest first, for choosing between two records of it.
+
+    `delivered` comes first because nothing is sent for it. Below that the sent chunks decide, and
+    state only breaks a tie: due_reminder_deliveries retries `pending` and `failed` alike, and a
+    `pending` record can hold chunks - record_reminder_delivery_progress commits each one before
+    the final state is written, so a crash in between leaves exactly that.
+    """
+    state = str(row["state"])
+    return (state != "delivered", -_sent_chunk_count(row["discord_message_ids_json"]), _delivery_rank(state))
 
 
 REMINDER_ATTEMPTS_SCHEMA = """
