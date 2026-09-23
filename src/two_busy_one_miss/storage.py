@@ -215,6 +215,59 @@ class Database:
                     (attempts, datetime.now(UTC).isoformat(), int(existing["id"])),
                 )
 
+    def _merge_attempt_checkpoints(self, winner: int, loser: int) -> None:
+        """Carry the attempt-level resume cursors across as well as the per-destination ones.
+
+        Attempts written before reminder_deliveries existed keep their cursor on the attempt row,
+        and migrate_legacy_reminder_deliveries moves it onto a delivery row only on the first
+        dispatch that finds the attempt with no delivery rows at all. So a merge can lose one in
+        two ways: the loser's goes with it, and once the winner has delivery rows - its own, or
+        ones just moved over from the loser - its own attempt-level cursor is never migrated.
+
+        Where the winner has rows, each cursor is folded onto the row for the same destination if
+        that row is behind; a key with no row is not adopted, which is also what the migration
+        does with a key that matches no configured destination. Where it has none, the winner keeps
+        the longer of the two cursors for the migration to find. Only a reminder that is still owed
+        is touched - nothing is sent for the others, whatever their cursor says.
+        """
+        rows = {
+            int(row["id"]): row
+            for row in self.connection.execute(
+                "SELECT id,state,discord_message_ids_json,discord_destination_key FROM reminder_attempts WHERE id IN (?,?)",
+                (winner, loser),
+            )
+        }
+        if str(rows[winner]["state"]) not in ("pending", "failed"):
+            return
+        cursors = [
+            (rows[attempt]["discord_message_ids_json"], str(rows[attempt]["discord_destination_key"]))
+            for attempt in (winner, loser)
+            if rows[attempt]["discord_message_ids_json"] is not None and rows[attempt]["discord_destination_key"] is not None
+        ]
+        if not cursors:
+            return
+        if self.connection.execute("SELECT 1 FROM reminder_deliveries WHERE reminder_attempt_id=?", (winner,)).fetchone():
+            for message_ids, key in cursors:
+                delivery = self.connection.execute(
+                    """SELECT id,discord_message_ids_json FROM reminder_deliveries
+                    WHERE reminder_attempt_id=? AND destination_key=? AND state<>'delivered'""",
+                    (winner, key),
+                ).fetchone()
+                if delivery is not None and _sent_chunk_count(message_ids) > _sent_chunk_count(
+                    delivery["discord_message_ids_json"]
+                ):
+                    self.connection.execute(
+                        "UPDATE reminder_deliveries SET discord_message_ids_json=?,updated_at=? WHERE id=?",
+                        (message_ids, datetime.now(UTC).isoformat(), int(delivery["id"])),
+                    )
+            return
+        # max() keeps the first of equals, and the winner's cursor is listed first.
+        message_ids, key = max(cursors, key=lambda cursor: _sent_chunk_count(cursor[0]))
+        self.connection.execute(
+            "UPDATE reminder_attempts SET discord_message_ids_json=?,discord_destination_key=? WHERE id=?",
+            (message_ids, key, winner),
+        )
+
     def _advance_merged_attempt(self, attempt_id: int, state: str) -> None:
         """Move a merged attempt's own word forward to what its destinations now say.
 
@@ -293,6 +346,7 @@ class Database:
                 winner = int(occupant["id"]) if keep_occupant else row_id
                 loser = row_id if keep_occupant else int(occupant["id"])
                 self._merge_reminder_deliveries(winner, loser)
+                self._merge_attempt_checkpoints(winner, loser)
                 self.connection.execute("DELETE FROM reminder_attempts WHERE id=?", (loser,))
                 removed.add(loser)
                 self._advance_merged_attempt(winner, str(occupant["state"] if keep_occupant else row["state"]))

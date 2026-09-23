@@ -551,3 +551,89 @@ def _delivery_states(database: Database, attempt_id: int) -> dict[str, str]:
             "SELECT destination_key,state FROM reminder_deliveries WHERE reminder_attempt_id=?", (attempt_id,)
         )
     }
+
+
+def _legacy_twins(
+    database: Database, offset_cursor: str | None, utc_cursor: str | None, *, rows_on: str | None = None
+) -> tuple[int, int, str]:
+    """One reminder twice, both `failed`, with its resume cursors where the old code kept them.
+
+    Before reminder_deliveries existed the cursor lived on the attempt row, and
+    migrate_legacy_reminder_deliveries moves it onto a delivery row only on the first dispatch that
+    finds the attempt with no rows at all. `rows_on` gives one copy delivery rows, as an attempt
+    written after that change has. Returns (offset copy, UTC copy, destination key).
+    """
+    destinations = configured_destinations("webhook", WEBHOOK, "", "")
+    key = destinations[0].key
+    offset = database.create_attempt(_candidate_at(datetime(2026, 7, 8, 9, 55, tzinfo=MONTREAL)), "copy")
+    assert offset is not None
+    database.connection.execute(
+        """UPDATE reminder_attempts SET state='failed',reminder_at='2026-07-08T09:55:00-04:00',
+        discord_message_ids_json=?,discord_destination_key=? WHERE id=?""",
+        (offset_cursor, key, offset),
+    )
+    database.connection.execute(
+        """INSERT INTO reminder_attempts
+        (event_row_id,calendar_id,event_id,instance_id,rule_id,reminder_at,content,state,
+         discord_message_ids_json,discord_destination_key,created_at,updated_at)
+        SELECT event_row_id,calendar_id,event_id,instance_id,rule_id,'2026-07-08T13:55:00+00:00','copy','failed',
+               ?,?,created_at,updated_at FROM reminder_attempts WHERE id=?""",
+        (utc_cursor, key, offset),
+    )
+    utc = int(database.connection.execute("SELECT id FROM reminder_attempts WHERE id<>?", (offset,)).fetchone()[0])
+    if rows_on is not None:
+        database.ensure_reminder_deliveries(offset if rows_on == "offset" else utc, destinations)
+    database.connection.commit()
+    return offset, utc, key
+
+
+def _cursor_the_pipeline_reads(database: Database) -> list[str]:
+    """Where dispatch will resume: the delivery row if there is one, else the attempt row."""
+    [attempt] = database.connection.execute("SELECT id,discord_message_ids_json FROM reminder_attempts").fetchall()
+    row = database.connection.execute(
+        "SELECT discord_message_ids_json FROM reminder_deliveries WHERE reminder_attempt_id=?", (attempt["id"],)
+    ).fetchone()
+    stored = row["discord_message_ids_json"] if row is not None else attempt["discord_message_ids_json"]
+    return [] if stored is None else list(json.loads(str(stored)))
+
+
+@pytest.mark.parametrize(
+    ("offset_cursor", "utc_cursor", "rows_on"),
+    [
+        # Both legacy: the copy that is deleted had sent more.
+        ('["c1", "c2"]', '["c1"]', None),
+        # The deleted copy is legacy and the survivor already has rows, so the pipeline would never
+        # look at an attempt-level cursor again.
+        ('["c1", "c2"]', None, "utc"),
+        # The mirror: the survivor is legacy and receives the loser's rows, which strands its own
+        # attempt-level cursor for the same reason.
+        (None, '["c1", "c2"]', "offset"),
+    ],
+)
+def test_normalising_keeps_a_legacy_resume_cursor_where_dispatch_will_read_it(
+    tmp_path: Path, offset_cursor: str | None, utc_cursor: str | None, rows_on: str | None
+) -> None:
+    path = tmp_path / "test.sqlite3"
+    database = Database(path)
+    _legacy_twins(database, offset_cursor, utc_cursor, rows_on=rows_on)
+    database.close()
+
+    reopened = Database(path)
+
+    assert _cursor_the_pipeline_reads(reopened) == ["c1", "c2"]
+    reopened.close()
+
+
+def test_normalising_leaves_the_cursor_of_a_reminder_already_sent(tmp_path: Path) -> None:
+    """Nothing is dispatched for a delivered attempt, so its cursor is not rewritten either."""
+    path = tmp_path / "test.sqlite3"
+    database = Database(path)
+    offset, utc, _ = _legacy_twins(database, '["c1", "c2"]', '["done"]')
+    database.connection.execute("UPDATE reminder_attempts SET state='delivered' WHERE id=?", (utc,))
+    database.connection.commit()
+    database.close()
+
+    reopened = Database(path)
+
+    assert _cursor_the_pipeline_reads(reopened) == ["done"]
+    reopened.close()

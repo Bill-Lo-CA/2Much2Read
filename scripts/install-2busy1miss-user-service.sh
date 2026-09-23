@@ -234,7 +234,21 @@ def warn(what_failed: str, error: BaseException, consequence: str) -> None:
 
 settings = None
 try:
+    import os
+
     from two_busy_one_miss.config import Settings
+
+    # The service reads its settings from the managed file (EnvironmentFile=), not from whatever
+    # shell ran this installer - but Settings() ranks a process variable above the file. Left
+    # alone, an AGENDA_SCHEDULE_TIME exported here would put the timer at one hour while the
+    # service's before_schedule guard reads another, and every scheduled run would skip. So every
+    # variable naming a setting is dropped first; pydantic-settings matches names regardless of
+    # case, and so does this. Only names are reported - the values may be secrets.
+    ambient = sorted(key for key in os.environ if key.lower() in Settings.model_fields)
+    for key in ambient:
+        del os.environ[key]
+    if ambient:
+        print(f"ignoring {', '.join(ambient)} from this shell; the service reads the environment file", file=sys.stderr)
 
     settings = Settings()
 except Exception as error:  # noqa: BLE001 - the defaults are installed instead; doctor explains why

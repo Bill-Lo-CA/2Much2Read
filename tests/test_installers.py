@@ -748,7 +748,9 @@ def _agenda_timer_for(tmp_path: Path, environment_file: str, *reminders_files: t
     return _install_2busy1miss(tmp_path, environment_file, *reminders_files)[0]
 
 
-def _install_2busy1miss(tmp_path: Path, environment_file: str, *reminders_files: tuple[str, str]) -> tuple[str, str]:
+def _install_2busy1miss(
+    tmp_path: Path, environment_file: str, *reminders_files: tuple[str, str], ambient: dict[str, str] | None = None
+) -> tuple[str, str]:
     """Install 2busy1miss against one environment file; return the agenda timer and what it warned.
 
     The zone the timer carries has to be the one `agenda-next-day --scheduled` reads, and every
@@ -776,7 +778,7 @@ def _install_2busy1miss(tmp_path: Path, environment_file: str, *reminders_files:
     result = subprocess.run(
         ["sh", "scripts/install-2busy1miss-user-service.sh", "--calendar-client-secret", str(client_secret)],
         cwd=root,
-        env=os.environ | {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        env=os.environ | (ambient or {}) | {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
         check=True,
         text=True,
         capture_output=True,
@@ -910,3 +912,32 @@ def test_the_schedule_is_read_from_named_lines_not_by_position(tmp_path: Path) -
     assert "sed -n 's/^time=//p'" in script
     assert "sed -n 's/^timezone=//p'" in script
     assert 'print(f"time={schedule_time}")' in script
+
+
+def test_the_shell_running_the_installer_does_not_choose_the_schedule(tmp_path: Path) -> None:
+    """The service reads the managed file through EnvironmentFile=, not this shell's variables.
+
+    Settings() ranks a process variable above the file, so an exported AGENDA_SCHEDULE_TIME used to
+    put the timer at 06:00 in Tokyo while the service's before_schedule guard read 21:00 in Montreal
+    - and every scheduled run skipped. pydantic-settings matches names regardless of case, which is
+    why one of these is lower-case.
+    """
+    elsewhere = tmp_path / "elsewhere.yaml"
+    elsewhere.write_text(f"timezone: Europe/Berlin\n{PRIMARY}", encoding="utf-8")
+
+    timer, stderr = _install_2busy1miss(
+        tmp_path,
+        "AGENDA_SCHEDULE_TIME=21:00\n",
+        ("reminders.yaml", PRIMARY),
+        ambient={
+            "AGENDA_SCHEDULE_TIME": "06:00",
+            "reminder_timezone": "Asia/Tokyo",
+            "REMINDERS_CONFIG_PATH": str(elsewhere),
+            "DISCORD_BOT_TOKEN": "not-for-the-log",
+        },
+    )
+
+    assert "OnCalendar=*-*-* 21:00:00 America/Montreal" in timer
+    assert "ignoring AGENDA_SCHEDULE_TIME, DISCORD_BOT_TOKEN, REMINDERS_CONFIG_PATH, reminder_timezone" in stderr
+    # Names only: the values of settings like this one are secrets.
+    assert "not-for-the-log" not in stderr
