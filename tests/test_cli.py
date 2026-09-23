@@ -1,9 +1,11 @@
 import base64
 import json
 import re
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from pydantic import HttpUrl
 from typer.testing import CliRunner
 
 from two_much_two_read import cli, mail_operations
@@ -156,11 +158,11 @@ def test_hackernews_commands_emit_typed_results(monkeypatch: pytest.MonkeyPatch)
         feed_rank=1,
         title="Story",
         author="author",
-        published_at="2026-07-23T00:00:00Z",
+        published_at=datetime(2026, 7, 23, tzinfo=UTC),
         score=10,
         comments=2,
-        requested_url="https://example.com/story",
-        discussion_url="https://news.ycombinator.com/item?id=1",
+        requested_url=HttpUrl("https://example.com/story"),
+        discussion_url=HttpUrl("https://news.ycombinator.com/item?id=1"),
         content_kind="external",
     )
     monkeypatch.setattr(cli, "list_hackernews", lambda _, source, limit: HackerNewsListResult(stories=[story], skipped=0))

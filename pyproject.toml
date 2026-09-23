@@ -53,9 +53,16 @@ strict = true
 packages = ["two_bored_one_made", "two_busy_one_miss", "two_much_two_read", "two_read_runtime"]
 mypy_path = "src"
 
+# The model stack is checked by running it, not by mypy: these ship enormous stubs whose only
+# effect here would be to slow every run down. follow_imports_for_stubs is what makes the skip
+# above apply to the .pyi files as well as the .py ones - without it numpy's stubs are still
+# parsed, and numpy's use of a PEP 695 `type` statement is a syntax error under python_version
+# 3.11. Raising that to 3.12 would silence it too, at the cost of no longer checking against the
+# oldest interpreter this project supports.
 [[tool.mypy.overrides]]
 module = ["numpy", "numpy.*", "sentence_transformers", "sentence_transformers.*", "torch", "torch.*", "transformers", "transformers.*"]
 follow_imports = "skip"
+follow_imports_for_stubs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

@@ -20,8 +20,8 @@ def test_noninteractive_invalid_token_requires_explicit_reauthorization(tmp_path
     credentials.has_scopes.return_value = False
     flow = MagicMock()
     create_flow = MagicMock(return_value=flow)
-    monkeypatch.setattr(oauth.Credentials, "from_authorized_user_file", MagicMock(return_value=credentials))
-    monkeypatch.setattr(oauth.InstalledAppFlow, "from_client_secrets_file", create_flow)
+    monkeypatch.setattr("two_read_runtime.oauth.Credentials.from_authorized_user_file", MagicMock(return_value=credentials))
+    monkeypatch.setattr("two_read_runtime.oauth.InstalledAppFlow.from_client_secrets_file", create_flow)
 
     with pytest.raises(ValueError, match="AUTH_REAUTH_REQUIRED.*2much2read auth gmail"):
         gmail.credentials(credentials_path, token_path)
@@ -38,8 +38,8 @@ def test_refresh_failure_requires_reauthorization_without_overwriting_token(
     token_path.write_text("original", encoding="utf-8")
     credentials = MagicMock(expired=True, refresh_token="refresh", valid=False)
     credentials.has_scopes.return_value = True
-    credentials.refresh.side_effect = RefreshError("invalid_grant")
-    monkeypatch.setattr(oauth.Credentials, "from_authorized_user_file", MagicMock(return_value=credentials))
+    credentials.refresh.side_effect = RefreshError("invalid_grant")  # type: ignore[no-untyped-call]
+    monkeypatch.setattr("two_read_runtime.oauth.Credentials.from_authorized_user_file", MagicMock(return_value=credentials))
 
     with pytest.raises(ValueError, match="AUTH_REAUTH_REQUIRED.*2busy1miss auth calendar"):
         google_calendar.credentials(credentials_path, token_path)
@@ -56,8 +56,8 @@ def test_refresh_transport_failure_is_retryable_without_overwriting_token(
     token_path.write_text("original", encoding="utf-8")
     credentials = MagicMock(expired=True, refresh_token="refresh", valid=False)
     credentials.has_scopes.return_value = True
-    credentials.refresh.side_effect = TransportError("offline")
-    monkeypatch.setattr(oauth.Credentials, "from_authorized_user_file", MagicMock(return_value=credentials))
+    credentials.refresh.side_effect = TransportError("offline")  # type: ignore[no-untyped-call]
+    monkeypatch.setattr("two_read_runtime.oauth.Credentials.from_authorized_user_file", MagicMock(return_value=credentials))
 
     with pytest.raises(ValueError, match="AUTH_REFRESH_UNAVAILABLE"):
         gmail.credentials(credentials_path, token_path)
@@ -78,7 +78,7 @@ def test_valid_refresh_replaces_token_atomically_with_private_mode(tmp_path: Pat
         credentials.valid = True
 
     credentials.refresh.side_effect = refresh
-    monkeypatch.setattr(oauth.Credentials, "from_authorized_user_file", MagicMock(return_value=credentials))
+    monkeypatch.setattr("two_read_runtime.oauth.Credentials.from_authorized_user_file", MagicMock(return_value=credentials))
 
     assert gmail.credentials(credentials_path, token_path) is credentials
     assert token_path.read_text(encoding="utf-8") == "refreshed"
@@ -93,7 +93,7 @@ def test_existing_permissive_token_is_repaired_before_use(tmp_path: Path, monkey
     os.chmod(token_path, 0o644)
     credentials = MagicMock(valid=True, expired=False)
     credentials.has_scopes.return_value = True
-    monkeypatch.setattr(oauth.Credentials, "from_authorized_user_file", MagicMock(return_value=credentials))
+    monkeypatch.setattr("two_read_runtime.oauth.Credentials.from_authorized_user_file", MagicMock(return_value=credentials))
 
     assert gmail.credentials(credentials_path, token_path) is credentials
     assert stat.S_IMODE(token_path.stat().st_mode) == 0o600

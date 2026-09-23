@@ -1,9 +1,9 @@
+import os
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
-from two_much_two_read import config
 from two_much_two_read.config import (
     ExcludedSubscription,
     GmailSource,
@@ -94,6 +94,7 @@ def test_accepts_gmail_filter_criteria_dict(tmp_path: Path) -> None:
     )
 
     source = load_sources(config).sources[0]
+    assert isinstance(source, GmailSource)
     assert source.gmail_filter is not None
     assert source.gmail_filter.criteria == {"from": "news@example.com", "subject": "Daily"}
 
@@ -213,14 +214,14 @@ def test_subscription_file_update_restores_both_files_when_second_replace_fails(
     )
     sources_path.write_text(original_sources, encoding="utf-8")
     excluded_path.write_text(original_excluded, encoding="utf-8")
-    original_replace = config.os.replace
+    original_replace = os.replace
 
     def fail_excluded_replace(source: str | Path, destination: str | Path) -> None:
         if Path(destination) == excluded_path:
             raise OSError("simulated replace failure")
         original_replace(source, destination)
 
-    monkeypatch.setattr(config.os, "replace", fail_excluded_replace)
+    monkeypatch.setattr("two_much_two_read.config.os.replace", fail_excluded_replace)
 
     with pytest.raises(OSError, match="simulated replace failure"):
         update_subscription_files(

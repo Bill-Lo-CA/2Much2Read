@@ -1,6 +1,7 @@
 import hashlib
 from collections.abc import Iterator
 from pathlib import Path
+from typing import TypeVar
 
 import pytest
 
@@ -8,6 +9,19 @@ from two_busy_one_miss.config import Settings as CalendarSettings
 from two_busy_one_miss.storage import Database as CalendarDatabase
 from two_much_two_read.config import Settings as NewsletterSettings
 from two_much_two_read.storage import Database as NewsletterDatabase
+
+T = TypeVar("T")
+
+
+def recorded(log: list[str], entry: str, result: T) -> T:
+    """Note that a stub ran, then give back its canned result.
+
+    Stands in for `lambda *args: log.append(entry) or result`, which works only because append
+    returns None - and using a None return is exactly what mypy's func-returns-value check exists
+    to catch, since elsewhere it is a bug.
+    """
+    log.append(entry)
+    return result
 
 
 def directory_digest(path: Path) -> dict[str, tuple[int, str]]:

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from typing import Protocol
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -34,7 +35,7 @@ from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_ca
 from .mime import MAX_ANALYSIS_CHARS, EmailExtractionError, extract_gmail_payload
 from .ollama import OllamaClient, OllamaContextError, OllamaSchemaError, close_ollama_client, create_ollama_client
 from .reranker import RelevanceReranker
-from .schemas import DigestItem, ExtractedEmailContent, ResolvedContent
+from .schemas import ArticleAnalysis, DigestItem, DigestReview, ExtractedEmailContent, ItemDeepening, ResolvedContent
 from .storage import Database
 from .url_enrichment import UrlEnricher, resolve_match
 
@@ -84,14 +85,73 @@ def _items(database: Database, document_ids: list[int], limit: int, source_names
     return result
 
 
-def _ranked_entries(reranker: RelevanceReranker, entries: list[DigestEntry]) -> list[DigestEntry]:
+# What each step needs from its collaborators, rather than the whole OllamaClient, reranker or
+# Database. Each names only the members its function uses, which lets a test double stand in
+# without a cast - and makes mypy check that the double still matches the real thing, which a cast
+# would have hidden.
+#
+# Where a function uses most of an interface - retry_delivery drives a dozen Database methods -
+# a Protocol would only be a copy of the class, so those keep the concrete type.
+class ReviewsDigest(Protocol):
+    def review_digest(
+        self,
+        candidates: list[dict[str, object]],
+        maximum: int,
+        reserved_category: str = "",
+        reserved: int = 0,
+    ) -> DigestReview: ...
+
+
+class JudgesSameStory(Protocol):
+    def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool: ...
+
+
+class DeepensItems(Protocol):
+    def deepen_item(self, title: str, category: str, sources: str, basis: str, content: str) -> ItemDeepening: ...
+
+
+class UnloadsModels(Protocol):
+    def unload(self, model: str) -> bool: ...
+
+
+class AnalyzesArticles(Protocol):
+    def analyze_article(
+        self,
+        source_id: str,
+        hn_item_id: int,
+        title: str,
+        score: int,
+        comments: int,
+        published_at: str,
+        content_basis: str,
+        content: str,
+        truncated: bool = False,
+    ) -> ArticleAnalysis: ...
+
+
+class RanksEntries(Protocol):
+    def rank(self, entries: Sequence[DigestEntry]) -> list[DigestEntry]: ...
+
+
+class NamesRerankerScores(Protocol):
+    """The two labels stored beside each score - all that is read from the reranker there."""
+
+    model_name: str
+    prompt_version: str
+
+
+class SavesRerankerScores(Protocol):
+    def save_reranker_scores(self, scores: Sequence[tuple[int, float]], model: str, prompt_version: str) -> int: ...
+
+
+def _ranked_entries(reranker: RanksEntries, entries: list[DigestEntry]) -> list[DigestEntry]:
     if not entries:
         return []
     return reranker.rank(dedupe_entries(entries))
 
 
 def _save_reranker_scores(
-    database: Database, ranked: list[DigestEntry], reranker: RelevanceReranker, status: StatusReporter
+    database: SavesRerankerScores, ranked: list[DigestEntry], reranker: NamesRerankerScores, status: StatusReporter
 ) -> None:
     scores = [
         (entry.candidate_id, entry.reranker_score)
@@ -123,7 +183,7 @@ def _review_candidates(ranked: list[DigestEntry], limit: int, security_slots: in
     return [ranked[index] for index in sorted(security[:security_kept] + general[:general_kept])]
 
 
-def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[DigestEntry]) -> list[DigestEntry]:
+def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[DigestEntry]) -> list[DigestEntry]:
     if not ranked:
         return []
     ranked = _review_candidates(ranked, settings.digest_review_candidate_limit, settings.digest_security_candidate_slots)
@@ -156,7 +216,7 @@ def _reviewed_entries(settings: Settings, ollama: OllamaClient, ranked: list[Dig
     return selected + unselected
 
 
-def _story_judge(ollama: OllamaClient, budget: int, status: StatusReporter) -> Callable[[DigestEntry, DigestEntry], bool]:
+def _story_judge(ollama: JudgesSameStory, budget: int, status: StatusReporter) -> Callable[[DigestEntry, DigestEntry], bool]:
     """Ask the review model whether two shortlisted entries are the same story.
 
     Bounded and memoised, because the shortlist is loose by design. The budget caps how many
@@ -244,7 +304,7 @@ def _headline_source(entry: DigestEntry, fetcher: ArticleFetcher, status: Status
 
 
 def _deepened_entries(
-    settings: Settings, ollama: OllamaClient, entries: list[DigestEntry], status: StatusReporter
+    settings: Settings, ollama: DeepensItems, entries: list[DigestEntry], status: StatusReporter
 ) -> list[DigestEntry]:
     if not settings.digest_deepen_headlines:
         return entries
@@ -283,7 +343,7 @@ def _deepened_entries(
     return deepened
 
 
-def _unload_model(ollama: OllamaClient, model: str, status: StatusReporter = _ignore_status) -> None:
+def _unload_model(ollama: UnloadsModels, model: str, status: StatusReporter = _ignore_status) -> None:
     if not ollama.unload(model):
         status(f"Warning: {model} did not unload and may still hold memory")
 
@@ -520,7 +580,7 @@ def _process_source(
 def _process_hackernews_source(
     database: Database,
     hackernews: HackerNewsClient,
-    ollama: OllamaClient,
+    ollama: AnalyzesArticles,
     source: HackerNewsSource,
     remaining: int,
     status: StatusReporter,

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from contextlib import suppress
 from datetime import date, datetime, time, timedelta
-from typing import Literal
+from typing import Literal, overload
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
@@ -314,6 +314,12 @@ def test_rules(settings: Settings, days: int) -> RulesTestResult:
     return RulesTestResult(reminders=[reminder_view(candidate, timezone) for candidate in candidates])
 
 
+@overload
+def agenda(settings: Settings, day: date, dry_run: Literal[True], force: bool = False) -> AgendaPreviewResult: ...
+@overload
+def agenda(settings: Settings, day: date, dry_run: Literal[False], force: bool = False) -> AgendaDeliveryResult: ...
+@overload
+def agenda(settings: Settings, day: date, dry_run: bool, force: bool = False) -> AgendaPreviewResult | AgendaDeliveryResult: ...
 def agenda(settings: Settings, day: date, dry_run: bool, force: bool = False) -> AgendaPreviewResult | AgendaDeliveryResult:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)
@@ -348,6 +354,17 @@ def agenda(settings: Settings, day: date, dry_run: bool, force: bool = False) ->
     )
 
 
+# Deliberately no Literal[True] overload. A scheduled run before the configured hour returns a
+# before_schedule AgendaDeliveryResult ahead of the dry_run check, so dry_run=True does not
+# guarantee a preview - and an overload claiming it would be a lie mypy then enforces.
+@overload
+def next_day_agenda(
+    settings: Settings, dry_run: Literal[False], force: bool, *, scheduled: bool = False, now: datetime | None = None
+) -> AgendaDeliveryResult: ...
+@overload
+def next_day_agenda(
+    settings: Settings, dry_run: bool, force: bool, *, scheduled: bool = False, now: datetime | None = None
+) -> AgendaPreviewResult | AgendaDeliveryResult: ...
 def next_day_agenda(
     settings: Settings, dry_run: bool, force: bool, *, scheduled: bool = False, now: datetime | None = None
 ) -> AgendaPreviewResult | AgendaDeliveryResult:
@@ -466,6 +483,12 @@ def _dry_run_due(settings: Settings, now: datetime) -> ReminderDryRunResult:
         return ReminderDryRunResult(due=[str(row["content"]) for row in rows])
 
 
+@overload
+def run(settings: Settings, dry_run: Literal[True], *, now: datetime | None = None) -> ReminderDryRunResult: ...
+@overload
+def run(settings: Settings, dry_run: Literal[False], *, now: datetime | None = None) -> ReminderRunResult: ...
+@overload
+def run(settings: Settings, dry_run: bool, *, now: datetime | None = None) -> ReminderRunResult | ReminderDryRunResult: ...
 def run(settings: Settings, dry_run: bool, *, now: datetime | None = None) -> ReminderRunResult | ReminderDryRunResult:
     config = load_reminders(settings.reminders_config_path)
     timezone = ZoneInfo(config.timezone or settings.reminder_timezone)

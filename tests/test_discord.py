@@ -1,4 +1,5 @@
 import json
+from collections.abc import Callable
 
 import httpx
 import pytest
@@ -7,6 +8,7 @@ import respx
 from two_read_runtime import discord
 from two_read_runtime.discord import (
     DiscordDeliveryError,
+    DiscordDestination,
     chunk_text,
     configured_destinations,
     deliver,
@@ -212,11 +214,11 @@ def test_deliver_resumable_restores_checkpoint_and_records_success() -> None:
     delivered: list[list[str]] = []
 
     def sender(
-        webhook_url: str,
+        webhook_url: DiscordDestination | str,
         content: str,
         username: str,
         message_ids: list[str] | None,
-        on_progress: object,
+        on_progress: Callable[[list[str]], None] | None,
     ) -> list[str]:
         assert (webhook_url, content, username, message_ids) == (
             "https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
@@ -287,7 +289,7 @@ def test_discord_client_ignores_environment_proxy_configuration(monkeypatch: pyt
             posts += 1
             return httpx.Response(200, json={"id": "123"})
 
-    monkeypatch.setattr(discord.httpx, "Client", Client)
+    monkeypatch.setattr("two_read_runtime.discord.httpx.Client", Client)
 
     message_ids = deliver(configured_destinations("bot", "", "token", "123")[0], "x" * 3_000, "ignored")
 

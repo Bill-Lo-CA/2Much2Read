@@ -3,7 +3,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from two_busy_one_miss.config import EventMatch, RemindersConfig, ReminderSpec, RuleConfig
+from two_busy_one_miss.config import CalendarConfig, EventMatch, RemindersConfig, ReminderSpec, RuleConfig
 from two_busy_one_miss.google_calendar import CalendarEvent, _parse_datetime
 from two_busy_one_miss.rules import matches, parse_offset, schedule_reminders
 
@@ -55,7 +55,7 @@ def test_matches_supported_fields() -> None:
 
 def test_schedules_defaults_and_matching_rules() -> None:
     config = RemindersConfig(
-        calendars=[{"id": "primary"}],
+        calendars=[CalendarConfig(id="primary")],
         default_rules=[ReminderSpec(id="default-30m", before="30m"), ReminderSpec(id="default-5m", before="5m")],
         rules=[
             RuleConfig(
@@ -91,7 +91,7 @@ def test_a_reminder_offset_that_crosses_a_dst_change_is_still_that_long(raw_star
     """
     timezone = ZoneInfo("America/Montreal")
     start = _parse_datetime(raw_start, timezone)
-    config = RemindersConfig(calendars=[{"id": "primary"}], default_rules=[ReminderSpec(before=before)])
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], default_rules=[ReminderSpec(before=before)])
 
     [candidate] = schedule_reminders(config, [event_at(start)])
 
@@ -106,7 +106,7 @@ def test_an_all_day_reminder_offset_crosses_the_change_too() -> None:
     """
     timezone = ZoneInfo("America/Montreal")
     start = _parse_datetime("2026-11-02", timezone)
-    config = RemindersConfig(calendars=[{"id": "primary"}], default_rules=[ReminderSpec(before="1d")])
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], default_rules=[ReminderSpec(before="1d")])
 
     [candidate] = schedule_reminders(config, [event_at(start, all_day=True)])
 

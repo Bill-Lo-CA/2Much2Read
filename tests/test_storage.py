@@ -112,7 +112,9 @@ def test_document_and_digest_idempotency(tmp_path: Path) -> None:
     assert discover(database, "gmail-2") is None
     digest_id = database.save_digest("daily:1", "start", "end", "UTC", "digest")
     assert digest_id is not None
-    assert database.pending_digest(digest_id)["rendered_content"] == "digest"
+    digest = database.pending_digest(digest_id)
+    assert digest is not None
+    assert digest["rendered_content"] == "digest"
     assert database.save_digest("daily:1", "start", "end", "UTC", "digest") is None
     database.close()
 
@@ -230,9 +232,9 @@ def test_save_digest_finalizes_staged_documents_atomically(tmp_path: Path) -> No
         finalize=False,
     )
 
-    assert database.gmail_document("gmail-1")["state"] == "discovered"
+    assert _gmail_state(database, "gmail-1") == "discovered"
     assert database.save_digest("daily:1", "start", "end", "UTC", "digest", [document_id]) is not None
-    assert database.gmail_document("gmail-1")["state"] == "processed"
+    assert _gmail_state(database, "gmail-1") == "processed"
     database.close()
 
 
@@ -590,3 +592,9 @@ def test_prunable_counts_the_same_rows_prune_would_delete(tmp_path: Path) -> Non
         assert preview == database.prune(cutoff)
     finally:
         database.close()
+
+
+def _gmail_state(database: Database, gmail_id: str) -> str:
+    row = database.gmail_document(gmail_id)
+    assert row is not None, f"no gmail_document_state row for {gmail_id}"
+    return str(row["state"])

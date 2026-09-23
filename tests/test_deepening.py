@@ -5,6 +5,7 @@ from dataclasses import replace
 
 import httpx
 import pytest
+from pydantic import HttpUrl
 
 from two_much_two_read import pipeline
 from two_much_two_read.article_fetcher import ArticleFetchError, FetchedArticle
@@ -34,7 +35,7 @@ def entry(title: str, url: str | None = None, review_score: int | None = 90) -> 
             category="AI_MODEL",
             summary_zh_tw="很短的摘要。",
             why_it_matters_zh_tw="很短的原因。",
-            source_url=url,
+            source_url=HttpUrl(url) if url else None,
             importance=8,
             confidence=0.8,
         ),

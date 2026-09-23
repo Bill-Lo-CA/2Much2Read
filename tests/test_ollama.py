@@ -1,4 +1,5 @@
 import json
+from typing import cast
 
 import httpx
 import pytest
@@ -63,7 +64,7 @@ def test_client_uses_explicit_proxy_policy(monkeypatch: pytest.MonkeyPatch) -> N
         def close(self) -> None:
             pass
 
-    monkeypatch.setattr(ollama.httpx, "Client", Client)
+    monkeypatch.setattr("two_much_two_read.ollama.httpx.Client", Client)
 
     local_client = OllamaClient()
     remote_client = OllamaClient("https://ollama.example", allow_remote=True, trust_env=True)
@@ -272,7 +273,9 @@ def test_normalizes_trusted_fields_and_limits_items() -> None:
     model_result = valid_result()
     model_result["source_id"] = "wrong-source"
     model_result["truncated_input"] = False
-    model_result["items"] = [*model_result["items"], *model_result["items"]]
+    items = model_result["items"]
+    assert isinstance(items, list)
+    model_result["items"] = [*items, *items]
     respx.post("http://127.0.0.1:11434/api/chat").mock(
         return_value=httpx.Response(200, json={"message": {"content": json.dumps(model_result)}})
     )
@@ -382,9 +385,11 @@ def test_trimming_keeps_the_reserved_category_the_quota_put_last() -> None:
 
     assert len(fitted) < len(candidates)
     assert [value["candidate_id"] for value in fitted if value["category"] == "SECURITY"] == [100, 101, 102]
-    assert [value["candidate_id"] for value in fitted if value["category"] != "SECURITY"] == sorted(
-        value["candidate_id"] for value in fitted if value["category"] != "SECURITY"
-    )
+    rest = [value["candidate_id"] for value in fitted if value["category"] != "SECURITY"]
+    # Checked rather than filtered: a comprehension that kept only the ints would pass by
+    # dropping whatever was not one.
+    assert all(isinstance(candidate_id, int) for candidate_id in rest)
+    assert rest == sorted(cast(list[int], rest))
 
 
 def test_trimming_falls_back_to_the_reserved_category_once_the_rest_are_gone() -> None:

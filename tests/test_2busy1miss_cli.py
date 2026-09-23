@@ -112,7 +112,7 @@ def test_doctor_redacts_missing_config_path_and_reports_custom_runtime(tmp_path:
         (
             ["agenda-retry", "2026-07-09"],
             "retry_agenda",
-            AgendaRetryResult(status="failed", day="2026-07-09", delivered=0, failed=1, failed_by_error_code={}),
+            AgendaRetryResult(status="failed", day=date(2026, 7, 9), delivered=0, failed=1, failed_by_error_code={}),
             "failed",
         ),
         (

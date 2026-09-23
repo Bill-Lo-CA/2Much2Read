@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
+from typing import Literal, overload
 from zoneinfo import ZoneInfo
 
 from pydantic import BaseModel
@@ -222,6 +223,12 @@ def _destination_key(settings: Settings, nudge: NudgeConfig) -> str:
         return "unresolved"
 
 
+@overload
+def run(settings: Settings, dry_run: Literal[True], *, now: datetime | None = None) -> NudgeDryRunResult: ...
+@overload
+def run(settings: Settings, dry_run: Literal[False], *, now: datetime | None = None) -> NudgeRunResult: ...
+@overload
+def run(settings: Settings, dry_run: bool, *, now: datetime | None = None) -> NudgeRunResult | NudgeDryRunResult: ...
 def run(settings: Settings, dry_run: bool, *, now: datetime | None = None) -> NudgeRunResult | NudgeDryRunResult:
     config = load_nudges(settings.nudges_config_path)
     timezone = _timezone(config, settings)

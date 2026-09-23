@@ -6,6 +6,7 @@ sidecars are missing SQLite creates them, and where they are present a query upd
 marks inside -shm without changing its name, size, or mtime.
 """
 
+import shutil
 import sqlite3
 import subprocess
 import sys
@@ -14,7 +15,7 @@ from pathlib import Path
 import pytest
 from conftest import directory_digest as listing
 
-from two_read_runtime.sqlite_snapshot import reading_connection
+from two_read_runtime.sqlite_snapshot import SnapshotError, reading_connection
 
 
 def written(path: Path) -> None:
@@ -81,15 +82,13 @@ def test_rows_come_back_as_mappings(tmp_path: Path) -> None:
         assert connection.execute("SELECT x FROM t").fetchone()["x"] == 1
 
 
-def test_a_write_during_the_copy_is_retaken(tmp_path: Path, monkeypatch) -> None:
+def test_a_write_during_the_copy_is_retaken(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The copy is only worth taking if it is not a half-written file, so a source that moved while
     # it was being read is copied again rather than reported on.
-    import two_read_runtime.sqlite_snapshot as module
-
     path = tmp_path / "db.sqlite3"
     written(path)
     copies: list[int] = []
-    real_copy = module.shutil.copy2
+    real_copy = shutil.copy2
 
     def copy_then_touch(source, destination, *args, **kwargs):  # type: ignore[no-untyped-def]
         result = real_copy(source, destination, *args, **kwargs)
@@ -101,7 +100,7 @@ def test_a_write_during_the_copy_is_retaken(tmp_path: Path, monkeypatch) -> None
             connection.close()
         return result
 
-    monkeypatch.setattr(module.shutil, "copy2", copy_then_touch)
+    monkeypatch.setattr("two_read_runtime.sqlite_snapshot.shutil.copy2", copy_then_touch)
 
     with reading_connection(path, ("t",)) as connection:
         assert connection is not None
@@ -194,17 +193,15 @@ def checkpointed_away(path: Path) -> None:
     assert not Path(f"{path}-wal").exists()
 
 
-def test_a_log_checkpointed_away_between_attempts_is_not_mixed_in(tmp_path: Path, monkeypatch) -> None:
+def test_a_log_checkpointed_away_between_attempts_is_not_mixed_in(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The first attempt copies a database whose rows are still in the log. The source then gains a
     # row and is checkpointed, so the second attempt finds no log to copy. Reusing one destination
     # would leave the first attempt's log beside the second attempt's newer database, and replaying
     # it rolls the newer rows back with nothing to signal it.
-    import two_read_runtime.sqlite_snapshot as module
-
     path = tmp_path / "db.sqlite3"
     crashed(path)
     Path(f"{path}-shm").unlink()
-    real_copy = module.shutil.copy2
+    real_copy = shutil.copy2
     moved: list[int] = []
 
     def advance_the_source_after_the_first_log_copy(source, destination, *args, **kwargs):  # type: ignore[no-untyped-def]
@@ -218,7 +215,7 @@ def test_a_log_checkpointed_away_between_attempts_is_not_mixed_in(tmp_path: Path
             checkpointed_away(path)
         return result
 
-    monkeypatch.setattr(module.shutil, "copy2", advance_the_source_after_the_first_log_copy)
+    monkeypatch.setattr("two_read_runtime.sqlite_snapshot.shutil.copy2", advance_the_source_after_the_first_log_copy)
 
     with reading_connection(path, ("t",)) as connection:
         assert connection is not None
@@ -226,16 +223,14 @@ def test_a_log_checkpointed_away_between_attempts_is_not_mixed_in(tmp_path: Path
     assert moved == [1], "the source should have moved underneath the first attempt"
 
 
-def test_a_log_that_vanishes_mid_copy_is_retried_not_raised(tmp_path: Path, monkeypatch) -> None:
+def test_a_log_that_vanishes_mid_copy_is_retried_not_raised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # shutil.copy2 raises FileNotFoundError if the log went away between the stat and the read. That
     # is the source moving, not an error the reporting command should die of; the retry finds the
     # rows in the main file, where the checkpoint put them.
-    import two_read_runtime.sqlite_snapshot as module
-
     path = tmp_path / "db.sqlite3"
     crashed(path)
     Path(f"{path}-shm").unlink()
-    real_copy = module.shutil.copy2
+    real_copy = shutil.copy2
     removed: list[int] = []
 
     def checkpoint_before_copying_the_log(source, destination, *args, **kwargs):  # type: ignore[no-untyped-def]
@@ -244,7 +239,7 @@ def test_a_log_that_vanishes_mid_copy_is_retried_not_raised(tmp_path: Path, monk
             checkpointed_away(path)
         return real_copy(source, destination, *args, **kwargs)
 
-    monkeypatch.setattr(module.shutil, "copy2", checkpoint_before_copying_the_log)
+    monkeypatch.setattr("two_read_runtime.sqlite_snapshot.shutil.copy2", checkpoint_before_copying_the_log)
 
     with reading_connection(path, ("t",)) as connection:
         assert connection is not None
@@ -252,12 +247,10 @@ def test_a_log_that_vanishes_mid_copy_is_retried_not_raised(tmp_path: Path, monk
     assert removed == [1], "the log should have gone away underneath the first attempt"
 
 
-def test_a_source_that_never_settles_is_an_error_not_a_wrong_answer(tmp_path: Path, monkeypatch) -> None:
-    import two_read_runtime.sqlite_snapshot as module
-
+def test_a_source_that_never_settles_is_an_error_not_a_wrong_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     path = tmp_path / "db.sqlite3"
     written(path)
-    real_copy = module.shutil.copy2
+    real_copy = shutil.copy2
 
     def write_after_every_copy(source, destination, *args, **kwargs):  # type: ignore[no-untyped-def]
         result = real_copy(source, destination, *args, **kwargs)
@@ -267,9 +260,9 @@ def test_a_source_that_never_settles_is_an_error_not_a_wrong_answer(tmp_path: Pa
         connection.close()
         return result
 
-    monkeypatch.setattr(module.shutil, "copy2", write_after_every_copy)
+    monkeypatch.setattr("two_read_runtime.sqlite_snapshot.shutil.copy2", write_after_every_copy)
 
-    with pytest.raises(module.SnapshotError, match="kept changing"), reading_connection(path, ("t",)):
+    with pytest.raises(SnapshotError, match="kept changing"), reading_connection(path, ("t",)):
         pass
 
 
@@ -297,8 +290,8 @@ def test_a_half_created_schema_reads_as_empty(tmp_path: Path) -> None:
     connection.commit()
     connection.close()
 
-    with reading_connection(path, ("t", "later")) as connection:
-        assert connection is None
+    with reading_connection(path, ("t", "later")) as snapshot:
+        assert snapshot is None
 
 
 def test_the_guard_does_not_simply_refuse_everything(tmp_path: Path) -> None:
