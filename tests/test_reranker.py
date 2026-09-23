@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import sys
 import types
+from collections.abc import Sequence
 from dataclasses import replace
 
 import pytest
@@ -17,10 +18,10 @@ from two_much_two_read.reranker import (
     RERANKER_PROMPT_VERSION,
     RelevanceReranker,
 )
-from two_much_two_read.schemas import DigestItem, DigestReview
+from two_much_two_read.schemas import DigestCategory, DigestItem, DigestReview
 
 
-def entry(candidate_id: int, title: str, source_name: str, category: str = "AI_MODEL") -> DigestEntry:
+def entry(candidate_id: int, title: str, source_name: str, category: DigestCategory = "AI_MODEL") -> DigestEntry:
     return DigestEntry(
         DigestItem(
             title=title,
@@ -44,8 +45,8 @@ def fake_reranker(scores: list[float]) -> RelevanceReranker:
             return scores
 
     reranker = object.__new__(RelevanceReranker)
-    reranker._model = FakeModel()  # type: ignore[attr-defined]
-    reranker._activation_fn = object()  # type: ignore[attr-defined]
+    reranker._model = FakeModel()
+    reranker._activation_fn = object()
     return reranker
 
 
@@ -82,7 +83,7 @@ def test_reranker_overrides_the_models_generic_search_prompt(monkeypatch: pytest
     assert captured["prompts"] == {RERANKER_PROMPT_NAME: RERANK_INSTRUCTION}
 
     RelevanceReranker("Qwen/test", "cuda")
-    assert captured["device"] == "cuda"
+    assert captured.get("device") == "cuda"
 
 
 def test_reranker_defaults_to_cpu_so_it_never_competes_with_the_reviewer() -> None:
@@ -97,7 +98,7 @@ def test_reranker_prompt_version_covers_both_the_instruction_and_the_query() -> 
 
 def test_ranked_entries_keeps_every_candidate_so_the_audit_covers_them_all() -> None:
     class FakeReranker:
-        def rank(self, entries):
+        def rank(self, entries: Sequence[DigestEntry]) -> list[DigestEntry]:
             return list(entries)
 
     entries = [entry(index, f"Story {index}", "TLDR AI") for index in range(1, 6)]
@@ -177,7 +178,7 @@ def test_unload_failure_is_reported_to_the_status_reporter() -> None:
 
 def test_unwritten_reranker_scores_are_reported() -> None:
     class FakeDatabase:
-        def save_reranker_scores(self, scores, model, prompt_version):
+        def save_reranker_scores(self, scores: Sequence[tuple[int, float]], model: str, prompt_version: str) -> int:
             return 1
 
     class FakeReranker:

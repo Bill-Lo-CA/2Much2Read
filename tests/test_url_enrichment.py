@@ -1,3 +1,5 @@
+from pydantic import HttpUrl
+
 from two_much_two_read.article_fetcher import ResolvedUrl
 from two_much_two_read.schemas import LinkCandidate, NewsletterItemAnalysis
 from two_much_two_read.url_enrichment import UrlEnricher
@@ -16,7 +18,7 @@ def analysis(title: str = "Useful article", source_title: str | None = None) -> 
 
 
 def candidate(candidate_id: str, text: str, url: str, position: int = 0) -> LinkCandidate:
-    return LinkCandidate(candidate_id=candidate_id, anchor_text=text, raw_url=url, position=position, kind="article")
+    return LinkCandidate(candidate_id=candidate_id, anchor_text=text, raw_url=HttpUrl(url), position=position, kind="article")
 
 
 def test_matches_exact_anchor_and_uses_application_owned_resolution() -> None:
@@ -57,7 +59,7 @@ def test_exact_anchor_wins_at_the_ambiguity_threshold() -> None:
         candidate_id="link-0002",
         anchor_text="Read more",
         nearby_text="Useful article",
-        raw_url="https://example.com/heading",
+        raw_url=HttpUrl("https://example.com/heading"),
         position=1,
         kind="article",
     )

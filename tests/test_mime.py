@@ -170,9 +170,9 @@ def test_empty_email_error_has_code() -> None:
 
 
 def test_extract_mime_rejects_oversized_raw_input_before_parsing(monkeypatch: pytest.MonkeyPatch) -> None:
-    import two_much_two_read.mime as mime
-
-    monkeypatch.setattr(mime.BytesParser, "parsebytes", lambda *args, **kwargs: pytest.fail("parser should not run"))
+    monkeypatch.setattr(
+        "two_much_two_read.mime.BytesParser.parsebytes", lambda *args, **kwargs: pytest.fail("parser should not run")
+    )
 
     with pytest.raises(EmailExtractionError) as error:
         extract_mime(b"x" * (5 * 1024 * 1024 + 1))
@@ -221,7 +221,7 @@ def test_extract_gmail_payload_enforces_depth_limit(depth: int, error_code: str 
 
 @pytest.mark.parametrize(("child_count", "error_code"), [(199, None), (200, "EMAIL_STRUCTURE_TOO_COMPLEX")])
 def test_extract_gmail_payload_enforces_part_limit(child_count: int, error_code: str | None) -> None:
-    payload = {
+    payload: dict[str, object] = {
         "mimeType": "multipart/mixed",
         "parts": [{"mimeType": "text/plain", "body": {"data": "eA"}} for _ in range(child_count)],
     }
@@ -239,7 +239,7 @@ def test_extract_gmail_payload_rejects_total_decoded_bytes() -> None:
     def encoded(size: int) -> str:
         return base64.urlsafe_b64encode(b"x" * size).decode()
 
-    payload = {
+    payload: dict[str, object] = {
         "mimeType": "multipart/mixed",
         "parts": [
             {"mimeType": "text/plain", "body": {"data": encoded(2 * 1024 * 1024)}},
@@ -256,7 +256,7 @@ def test_extract_gmail_payload_rejects_total_decoded_bytes() -> None:
 
 def test_extract_gmail_payload_counts_duplicate_links_toward_limit() -> None:
     html = "".join('<a href="https://example.com/article">article</a>' for _ in range(1_000))
-    payload = {"mimeType": "text/html", "body": {"data": base64.urlsafe_b64encode(html.encode()).decode()}}
+    payload: dict[str, object] = {"mimeType": "text/html", "body": {"data": base64.urlsafe_b64encode(html.encode()).decode()}}
 
     with pytest.raises(EmailExtractionError) as error:
         extract_gmail_payload(payload)
@@ -267,7 +267,7 @@ def test_extract_gmail_payload_counts_duplicate_links_toward_limit() -> None:
 @pytest.mark.parametrize(("length", "truncated"), [(45_000, False), (45_001, True)])
 def test_extract_gmail_payload_preserves_original_length_and_caps_analysis_text(length: int, truncated: bool) -> None:
     text = "x" * length
-    payload = {"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(text.encode()).decode()}}
+    payload: dict[str, object] = {"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(text.encode()).decode()}}
 
     content = extract_gmail_payload(payload)
 
@@ -277,7 +277,7 @@ def test_extract_gmail_payload_preserves_original_length_and_caps_analysis_text(
 
 
 def test_gmail_payload_skips_malformed_part_and_uses_valid_text() -> None:
-    payload = {
+    payload: dict[str, object] = {
         "parts": [
             {"mimeType": "text/plain", "body": {"data": "%%%"}},
             {"mimeType": "text/plain", "body": {"data": "dmFsaWQ"}},

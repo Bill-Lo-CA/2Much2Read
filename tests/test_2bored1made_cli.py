@@ -1,15 +1,17 @@
 import json
+from pathlib import Path
 
+import pytest
 from typer.testing import CliRunner
 
 from two_bored_one_made import cli, pipeline
 from two_bored_one_made.config import Settings
-from two_read_runtime.discord import DiscordDestination
+from two_read_runtime.discord import DiscordDeliveryError, DiscordDestination
 
 
-def _nudge_settings(tmp_path, body: str, **overrides):
+def _nudge_settings(tmp_path: Path, body: str, **overrides: object) -> Settings:
     (tmp_path / "nudges.yaml").write_text(body, encoding="utf-8")
-    values = {
+    values: dict[str, object] = {
         "discord_webhook_url": "https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
         "database_path": tmp_path / "2bored1made.sqlite3",
         "lock_path": tmp_path / "2bored1made.lock",
@@ -19,7 +21,7 @@ def _nudge_settings(tmp_path, body: str, **overrides):
     return Settings(**values)
 
 
-def test_doctor_validates_env_and_discord_without_sending(tmp_path, monkeypatch) -> None:
+def test_doctor_validates_env_and_discord_without_sending(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env_path = tmp_path / ".2bored1made.env"
     env_path.write_text("DISCORD_WEBHOOK_URL=ignored\n", encoding="utf-8")
     env_path.chmod(0o600)
@@ -49,7 +51,7 @@ def test_doctor_validates_env_and_discord_without_sending(tmp_path, monkeypatch)
     assert secret not in result.stdout
 
 
-def test_doctor_warns_for_unsafe_env_file(tmp_path, monkeypatch) -> None:
+def test_doctor_warns_for_unsafe_env_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env_path = tmp_path / ".2bored1made.env"
     env_path.write_text("DISCORD_WEBHOOK_URL=ignored\n", encoding="utf-8")
     env_path.chmod(0o644)
@@ -65,7 +67,7 @@ def test_doctor_warns_for_unsafe_env_file(tmp_path, monkeypatch) -> None:
     assert payload["checks"]["discord"] == "webhook"
 
 
-def test_send_mentions_only_configured_user_ids(monkeypatch) -> None:
+def test_send_mentions_only_configured_user_ids(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cli,
         "Settings",
@@ -108,7 +110,7 @@ def test_send_mentions_only_configured_user_ids(monkeypatch) -> None:
     )
 
 
-def test_send_rejects_unconfigured_mentions(monkeypatch) -> None:
+def test_send_rejects_unconfigured_mentions(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "Settings", lambda: Settings(discord_allowed_mention_ids="123"))
 
     result = CliRunner().invoke(cli.app, ["send", "--message", "Build failed", "--mention", "456"])
@@ -117,7 +119,7 @@ def test_send_rejects_unconfigured_mentions(monkeypatch) -> None:
     assert "not allowed" in result.output
 
 
-def test_send_both_reports_a_partial_delivery(monkeypatch) -> None:
+def test_send_both_reports_a_partial_delivery(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         cli,
         "Settings",
@@ -131,7 +133,7 @@ def test_send_both_reports_a_partial_delivery(monkeypatch) -> None:
 
     def fake_deliver(destination: DiscordDestination, *args: object, **kwargs: object) -> list[str]:
         if destination.transport == "bot":
-            raise cli.DiscordDeliveryError("DISCORD_BOT_FORBIDDEN")
+            raise DiscordDeliveryError("DISCORD_BOT_FORBIDDEN")
         return ["webhook-message"]
 
     monkeypatch.setattr(cli, "deliver", fake_deliver)
@@ -149,7 +151,7 @@ def test_send_both_reports_a_partial_delivery(monkeypatch) -> None:
     }
 
 
-def test_send_reports_failed_when_no_destination_was_reached(monkeypatch) -> None:
+def test_send_reports_failed_when_no_destination_was_reached(monkeypatch: pytest.MonkeyPatch) -> None:
     # The default deployment has one webhook, so "partial" was the only word this command could say
     # about a send that reached nobody - and it said it while exiting zero.
     monkeypatch.setattr(
@@ -157,7 +159,7 @@ def test_send_reports_failed_when_no_destination_was_reached(monkeypatch) -> Non
         "Settings",
         lambda: Settings(discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token"),
     )
-    monkeypatch.setattr(cli, "deliver", lambda *args, **kwargs: (_ for _ in ()).throw(cli.DiscordDeliveryError()))
+    monkeypatch.setattr(cli, "deliver", lambda *args, **kwargs: (_ for _ in ()).throw(DiscordDeliveryError()))
 
     result = CliRunner().invoke(cli.app, ["send", "--message", "Build failed"])
 
@@ -166,7 +168,7 @@ def test_send_reports_failed_when_no_destination_was_reached(monkeypatch) -> Non
     assert (payload["status"], payload["delivery_succeeded"], payload["delivery_failed"]) == ("failed", 0, 1)
 
 
-def test_send_reports_a_broken_configuration_instead_of_a_traceback(monkeypatch) -> None:
+def test_send_reports_a_broken_configuration_instead_of_a_traceback(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "Settings", lambda: Settings(discord_webhook_url="not-a-discord-webhook"))
 
     result = CliRunner().invoke(cli.app, ["send", "--message", "Build failed"])
@@ -179,11 +181,11 @@ def test_send_reports_a_broken_configuration_instead_of_a_traceback(monkeypatch)
 ONE_NUDGE = "nudges:\n  - id: stretch\n    message: hi\n    at: ['00:01']\n    total_sends: 2\n"
 
 
-def test_run_exits_nonzero_when_nothing_was_delivered(tmp_path, monkeypatch) -> None:
+def test_run_exits_nonzero_when_nothing_was_delivered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A scheduled unit that exits zero on a failed delivery reports success to systemd, so this
     # command sets the exit status from the delivery result rather than from having run at all.
     monkeypatch.setattr(cli, "Settings", lambda: _nudge_settings(tmp_path, ONE_NUDGE))
-    monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: (_ for _ in ()).throw(cli.DiscordDeliveryError()))
+    monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: (_ for _ in ()).throw(DiscordDeliveryError()))
 
     result = CliRunner().invoke(cli.app, ["run"])
 
@@ -191,7 +193,7 @@ def test_run_exits_nonzero_when_nothing_was_delivered(tmp_path, monkeypatch) -> 
     assert json.loads(result.stdout)["status"] == "failed"
 
 
-def test_run_exits_zero_when_a_nudge_is_delivered(tmp_path, monkeypatch) -> None:
+def test_run_exits_zero_when_a_nudge_is_delivered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "Settings", lambda: _nudge_settings(tmp_path, ONE_NUDGE))
     monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
 
@@ -202,7 +204,7 @@ def test_run_exits_zero_when_a_nudge_is_delivered(tmp_path, monkeypatch) -> None
     assert (payload["status"], payload["sent"]) == ("ok", 1)
 
 
-def test_run_reports_a_broken_configuration_instead_of_a_traceback(tmp_path, monkeypatch) -> None:
+def test_run_reports_a_broken_configuration_instead_of_a_traceback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "Settings", lambda: _nudge_settings(tmp_path, "nudges:\n  - id: a\n"))
 
     result = CliRunner().invoke(cli.app, ["run"])
@@ -211,7 +213,7 @@ def test_run_reports_a_broken_configuration_instead_of_a_traceback(tmp_path, mon
     assert "message" in result.output
 
 
-def test_status_reports_the_countdown(tmp_path, monkeypatch) -> None:
+def test_status_reports_the_countdown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "Settings", lambda: _nudge_settings(tmp_path, ONE_NUDGE))
     monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
     CliRunner().invoke(cli.app, ["run"])
@@ -223,7 +225,7 @@ def test_status_reports_the_countdown(tmp_path, monkeypatch) -> None:
     assert (nudge["id"], nudge["delivered"], nudge["remaining"], nudge["done"]) == ("stretch", 1, 1, False)
 
 
-def test_reset_clears_the_history(tmp_path, monkeypatch) -> None:
+def test_reset_clears_the_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "Settings", lambda: _nudge_settings(tmp_path, ONE_NUDGE))
     monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
     CliRunner().invoke(cli.app, ["run"])
@@ -234,7 +236,7 @@ def test_reset_clears_the_history(tmp_path, monkeypatch) -> None:
     assert json.loads(result.stdout)["cleared"] == 1
 
 
-def test_reset_rejects_an_unknown_nudge(tmp_path, monkeypatch) -> None:
+def test_reset_rejects_an_unknown_nudge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "Settings", lambda: _nudge_settings(tmp_path, ONE_NUDGE))
 
     result = CliRunner().invoke(cli.app, ["reset", "--nudge", "ghost"])
@@ -243,7 +245,7 @@ def test_reset_rejects_an_unknown_nudge(tmp_path, monkeypatch) -> None:
     assert "unknown nudge id" in result.output
 
 
-def test_doctor_reports_a_missing_nudges_file_without_failing(tmp_path, monkeypatch) -> None:
+def test_doctor_reports_a_missing_nudges_file_without_failing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "env_file", lambda _: tmp_path / "absent.env")
     monkeypatch.setattr(
         cli,
@@ -267,7 +269,7 @@ def test_doctor_reports_a_missing_nudges_file_without_failing(tmp_path, monkeypa
     assert payload["status"] == "warning"
 
 
-def test_doctor_does_not_read_a_bad_value_as_a_missing_file(tmp_path, monkeypatch) -> None:
+def test_doctor_does_not_read_a_bad_value_as_a_missing_file(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # "not found" is ordinary English, and a validation error quotes back whatever the operator
     # wrote. Deciding missingness by searching the rendered message reported this file - present,
     # readable, and named in the same output as ok - as missing, sending the operator to create a
@@ -289,7 +291,7 @@ def test_doctor_does_not_read_a_bad_value_as_a_missing_file(tmp_path, monkeypatc
 NUDGE_WITH_MENTION = "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 3\n    user_id: '456'\n"
 
 
-def test_doctor_reports_a_nudge_whose_mention_is_not_allowed(tmp_path, monkeypatch) -> None:
+def test_doctor_reports_a_nudge_whose_mention_is_not_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # A configuration that loads is not one that works: this nudge raises NUDGE_MENTION_NOT_ALLOWED
     # the moment its time comes, and doctor used to call the whole thing healthy.
     monkeypatch.setattr(cli, "env_file", lambda _: tmp_path / "absent.env")
@@ -309,7 +311,7 @@ def test_doctor_reports_a_nudge_whose_mention_is_not_allowed(tmp_path, monkeypat
     assert payload["status"] == "warning"
 
 
-def test_doctor_does_not_read_a_nudge_id_as_a_verdict(tmp_path, monkeypatch) -> None:
+def test_doctor_does_not_read_a_nudge_id_as_a_verdict(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # Nudge ids are the operator's, and "bot" is as valid an id as "stretch". Naming the failing
     # nudge in the check itself put that word into the vocabulary the healthy/warning verdict reads,
     # so this nudge - which can never be delivered - was reported as a healthy installation.
@@ -338,7 +340,7 @@ def test_doctor_does_not_read_a_nudge_id_as_a_verdict(tmp_path, monkeypatch) -> 
     assert payload["status"] == "warning", f"the only unhealthy input is the nudge: {payload['checks']}"
 
 
-def test_doctor_is_happy_once_the_mention_is_allowed(tmp_path, monkeypatch) -> None:
+def test_doctor_is_happy_once_the_mention_is_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env_path = tmp_path / ".2bored1made.env"
     env_path.write_text("DISCORD_WEBHOOK_URL=ignored\n", encoding="utf-8")
     env_path.chmod(0o600)
@@ -356,7 +358,7 @@ def test_doctor_is_happy_once_the_mention_is_allowed(tmp_path, monkeypatch) -> N
     assert "nudges_unusable" not in payload, "nothing to report is reported by saying nothing"
 
 
-def test_doctor_ignores_a_disabled_nudge(tmp_path, monkeypatch) -> None:
+def test_doctor_ignores_a_disabled_nudge(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env_path = tmp_path / ".2bored1made.env"
     env_path.write_text("DISCORD_WEBHOOK_URL=ignored\n", encoding="utf-8")
     env_path.chmod(0o600)
@@ -372,7 +374,7 @@ def test_doctor_ignores_a_disabled_nudge(tmp_path, monkeypatch) -> None:
     assert json.loads(result.stdout)["checks"]["nudges_deliverable"] == "ok"
 
 
-def test_doctor_cannot_judge_nudges_it_could_not_load(tmp_path, monkeypatch) -> None:
+def test_doctor_cannot_judge_nudges_it_could_not_load(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(cli, "env_file", lambda _: tmp_path / "absent.env")
     monkeypatch.setattr(cli, "Settings", lambda: _nudge_settings(tmp_path, "nudges:\n  - id: broken\n"))
 
@@ -383,7 +385,7 @@ def test_doctor_cannot_judge_nudges_it_could_not_load(tmp_path, monkeypatch) -> 
     assert payload["checks"]["nudges_deliverable"] == "unknown"
 
 
-def test_status_and_dry_run_read_an_uninitialized_database_as_empty(tmp_path, monkeypatch) -> None:
+def test_status_and_dry_run_read_an_uninitialized_database_as_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # The database file is created before its schema is, so a first run that died between the two
     # leaves a real, zero-byte database behind. Reading it raised sqlite3.OperationalError, which is
     # not a ValueError and so reached the operator as a traceback from both commands.
@@ -402,7 +404,7 @@ def test_status_and_dry_run_read_an_uninitialized_database_as_empty(tmp_path, mo
     assert nudge["remaining"] == 3
 
 
-def test_doctor_names_a_misspelled_environment_key(tmp_path, monkeypatch) -> None:
+def test_doctor_names_a_misspelled_environment_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # extra="ignore" is not what makes a typo silent: pydantic-settings looks up only the field
     # names it knows, so an unknown key is never offered to `extra` at all and extra="forbid" would
     # change nothing. The file itself is the only place the misspelling is visible.
@@ -422,7 +424,7 @@ def test_doctor_names_a_misspelled_environment_key(tmp_path, monkeypatch) -> Non
     assert payload["unknown_env_keys"] == ["DISCORD_USERNAM"]
 
 
-def test_doctor_accepts_an_environment_file_of_only_known_keys(tmp_path, monkeypatch) -> None:
+def test_doctor_accepts_an_environment_file_of_only_known_keys(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     env_path = tmp_path / ".2bored1made.env"
     env_path.write_text("DISCORD_WEBHOOK_URL=ignored\nDISCORD_ALLOWED_MENTION_IDS=123\n", encoding="utf-8")
     env_path.chmod(0o600)

@@ -7,10 +7,10 @@ from unittest.mock import MagicMock, call
 from zoneinfo import ZoneInfo
 
 import pytest
-from conftest import directory_digest
+from conftest import directory_digest, recorded
 
 from two_busy_one_miss import pipeline
-from two_busy_one_miss.config import EventMatch, RemindersConfig, ReminderSpec, RuleConfig, Settings
+from two_busy_one_miss.config import CalendarConfig, EventMatch, RemindersConfig, ReminderSpec, RuleConfig, Settings
 from two_busy_one_miss.google_calendar import CalendarClient, CalendarEvent
 from two_busy_one_miss.pipeline import event_query_lookahead
 from two_busy_one_miss.renderer import render_agenda
@@ -91,7 +91,7 @@ def unexpected(*args: object, **kwargs: object) -> None:
 
 def test_event_query_lookahead_covers_longest_reminder() -> None:
     config = RemindersConfig(
-        calendars=[{"id": "primary"}],
+        calendars=[CalendarConfig(id="primary")],
         default_rules=[ReminderSpec(before="5m")],
         rules=[RuleConfig(id="long-reminder", match=EventMatch(), reminders=[ReminderSpec(before="10d")])],
     )
@@ -125,7 +125,7 @@ def test_list_events_between_deduplicates_by_instance_id(monkeypatch: pytest.Mon
     duplicate = CalendarEvent("primary", "Main", "one", "one", "Cloud CTF", "KPMG", start, start + timedelta(hours=5), False)
     repeated = CalendarEvent("primary", "Main", "one", "one", "Cloud CTF", "KPMG", start, start + timedelta(hours=5), False)
     copied = CalendarEvent("primary", "Main", "two", "two", "Cloud CTF", "KPMG", start, start + timedelta(hours=5), False)
-    config = RemindersConfig(calendars=[{"id": "primary", "name": "Main"}], timezone=timezone.key)
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary", name="Main")], timezone=timezone.key)
 
     class FakeCalendarClient:
         def list_events(self, *args: object) -> list[CalendarEvent]:
@@ -153,7 +153,7 @@ def test_calendar_client_lists_all_calendar_pages() -> None:
 
 def test_retry_delivery_holds_process_lock(calendar_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     settings = calendar_settings
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone="America/Montreal")
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone="America/Montreal")
     database = FakeReminderDatabase(
         [
             {
@@ -203,7 +203,7 @@ def test_retry_delivery_preserves_legacy_bot_checkpoint_in_both_mode(tmp_path: P
         "5m",
         start - timedelta(minutes=5),
     )
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone="America/Montreal")
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone="America/Montreal")
     settings = Settings(
         reminders_config_path=tmp_path / "reminders.yaml",
         database_path=tmp_path / "reminders.sqlite3",
@@ -222,7 +222,14 @@ def test_retry_delivery_preserves_legacy_bot_checkpoint_in_both_mode(tmp_path: P
     database.close()
     calls: list[tuple[str, list[str] | None]] = []
 
-    def fake_deliver(destination, _content, _username, message_ids, *_args, **_kwargs):
+    def fake_deliver(
+        destination: DiscordDestination,
+        _content: str,
+        _username: str,
+        message_ids: list[str] | None,
+        *_args: object,
+        **_kwargs: object,
+    ) -> list[str]:
         calls.append((destination.transport, message_ids))
         return [*(message_ids or []), f"new-{destination.transport}-message"]
 
@@ -256,7 +263,7 @@ def test_retry_retires_a_removed_failed_destination(tmp_path: Path, monkeypatch:
         "5m",
         now,
     )
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone=timezone.key)
     both_settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
@@ -357,9 +364,9 @@ def test_reset_reminder_does_not_fall_back_to_a_colliding_legacy_attempt(tmp_pat
     database.close()
 
 
-def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkeypatch) -> None:
+def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     timezone = ZoneInfo("America/Montreal")
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone=timezone.key)
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
@@ -369,7 +376,9 @@ def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkey
     deliveries: list[str] = []
 
     def list_events(*args: object) -> list[object]:
-        windows.append((args[-2], args[-1]))
+        time_min, time_max = args[-2], args[-1]
+        assert isinstance(time_min, datetime) and isinstance(time_max, datetime)
+        windows.append((time_min, time_max))
         return []
 
     def deliver(*args: object, **kwargs: object) -> list[str]:
@@ -391,7 +400,9 @@ def test_next_day_agenda_uses_local_day_and_is_idempotent(tmp_path: Path, monkey
 def test_next_day_agenda_saves_reminders_before_invalid_discord_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     timezone = ZoneInfo("America/Montreal")
     now = datetime(2026, 7, 9, 21, tzinfo=timezone)
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key, default_rules=[ReminderSpec(before="5m")])
+    config = RemindersConfig(
+        calendars=[CalendarConfig(id="primary")], timezone=timezone.key, default_rules=[ReminderSpec(before="5m")]
+    )
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
@@ -411,9 +422,9 @@ def test_next_day_agenda_saves_reminders_before_invalid_discord_config(tmp_path:
     database.close()
 
 
-def test_manual_agenda_is_idempotent_and_forceable(tmp_path: Path, monkeypatch) -> None:
+def test_manual_agenda_is_idempotent_and_forceable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     timezone = ZoneInfo("America/Montreal")
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone=timezone.key)
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
@@ -423,7 +434,7 @@ def test_manual_agenda_is_idempotent_and_forceable(tmp_path: Path, monkeypatch) 
 
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "list_events_between", lambda *args: [])
-    monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: delivered.append(str(args[1])) or ["discord-id"])
+    monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: recorded(delivered, str(args[1]), ["discord-id"]))
 
     assert pipeline.agenda(settings, date(2026, 7, 9), dry_run=False).model_dump(exclude_none=True) == {
         "status": "ok",
@@ -445,9 +456,9 @@ def test_manual_agenda_is_idempotent_and_forceable(tmp_path: Path, monkeypatch) 
     assert len(delivered) == 2
 
 
-def test_agenda_retries_only_the_failed_destination(tmp_path: Path, monkeypatch) -> None:
+def test_agenda_retries_only_the_failed_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     timezone = ZoneInfo("America/Montreal")
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone=timezone.key)
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
@@ -458,7 +469,7 @@ def test_agenda_retries_only_the_failed_destination(tmp_path: Path, monkeypatch)
     )
     calls: list[str] = []
 
-    def fail_bot(destination, *args, **kwargs):
+    def fail_bot(destination: DiscordDestination, *args: object, **kwargs: object) -> list[str]:
         calls.append(destination.transport)
         if destination.transport == "bot":
             raise DiscordDeliveryError("DISCORD_BOT_FORBIDDEN")
@@ -473,7 +484,7 @@ def test_agenda_retries_only_the_failed_destination(tmp_path: Path, monkeypatch)
     assert calls == ["webhook", "bot"]
 
     monkeypatch.setattr(
-        pipeline, "deliver", lambda destination, *args, **kwargs: calls.append(destination.transport) or ["bot-message"]
+        pipeline, "deliver", lambda destination, *args, **kwargs: recorded(calls, destination.transport, ["bot-message"])
     )
     assert pipeline.retry_agenda(settings, date(2026, 7, 9)).model_dump() == {
         "status": "ok",
@@ -487,7 +498,7 @@ def test_agenda_retries_only_the_failed_destination(tmp_path: Path, monkeypatch)
 
 def test_scheduled_next_day_agenda_before_2100_is_noop(calendar_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
     timezone = ZoneInfo("America/Montreal")
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone=timezone.key)
     settings = calendar_settings
 
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
@@ -508,9 +519,9 @@ def test_scheduled_next_day_agenda_before_2100_is_noop(calendar_settings: Settin
     }
 
 
-def test_scheduled_next_day_agenda_uses_configured_time(tmp_path: Path, monkeypatch) -> None:
+def test_scheduled_next_day_agenda_uses_configured_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     timezone = ZoneInfo("America/Montreal")
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone=timezone.key)
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
@@ -540,8 +551,10 @@ def test_scheduled_next_day_agenda_uses_configured_time(tmp_path: Path, monkeypa
         (datetime(2026, 12, 31, 21, tzinfo=ZoneInfo("America/Montreal")), date(2027, 1, 1)),
     ],
 )
-def test_next_day_agenda_uses_the_next_local_date(tmp_path: Path, monkeypatch, now: datetime, expected_day: date) -> None:
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone="America/Montreal")
+def test_next_day_agenda_uses_the_next_local_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, now: datetime, expected_day: date
+) -> None:
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone="America/Montreal")
     settings = Settings(database_path=tmp_path / "reminders.sqlite3", lock_path=tmp_path / "reminders.lock")
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "list_events_between", lambda *args: [])
@@ -552,7 +565,7 @@ def test_next_day_agenda_uses_the_next_local_date(tmp_path: Path, monkeypatch, n
 
 
 def test_discover_returns_a_typed_result(calendar_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone="America/Montreal")
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone="America/Montreal")
     settings = calendar_settings
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "list_events", lambda *args: [])
@@ -564,7 +577,7 @@ def test_discover_returns_a_typed_result(calendar_settings: Settings, monkeypatc
 
 
 def test_next_day_agenda_dry_run_skips_database_and_discord(calendar_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone="America/Montreal")
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone="America/Montreal")
     settings = calendar_settings
 
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
@@ -575,13 +588,13 @@ def test_next_day_agenda_dry_run_skips_database_and_discord(calendar_settings: S
     assert pipeline.next_day_agenda(settings, dry_run=True, force=False).status == "ok"
 
 
-def test_next_day_agenda_includes_overlapping_events(tmp_path: Path, monkeypatch) -> None:
+def test_next_day_agenda_includes_overlapping_events(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     timezone = ZoneInfo("America/Montreal")
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone=timezone.key)
     settings = Settings(database_path=tmp_path / "reminders.sqlite3", lock_path=tmp_path / "reminders.lock")
 
-    def event(instance_id: str, start: datetime, end: datetime) -> pipeline.CalendarEvent:
-        return pipeline.CalendarEvent("primary", "Main", instance_id, instance_id, instance_id, "", start, end, False)
+    def event(instance_id: str, start: datetime, end: datetime) -> CalendarEvent:
+        return CalendarEvent("primary", "Main", instance_id, instance_id, instance_id, "", start, end, False)
 
     events = [
         event("overlap", datetime(2026, 3, 8, 21, tzinfo=timezone), datetime(2026, 3, 9, 4, tzinfo=timezone)),
@@ -594,14 +607,16 @@ def test_next_day_agenda_includes_overlapping_events(tmp_path: Path, monkeypatch
 
     result = pipeline.next_day_agenda(settings, dry_run=True, force=False, now=datetime(2026, 3, 8, 21, tzinfo=timezone))
 
+    # Not scheduled, so there is no before_schedule result to get instead of the preview.
+    assert isinstance(result, pipeline.AgendaPreviewResult)
     assert [item.title for item in result.events] == ["overlap", "within-day"]
 
 
 def test_resync_cancels_overdue_job_after_an_event_changes(calendar_database: Database) -> None:
     timezone = ZoneInfo("America/Montreal")
-    config = RemindersConfig(calendars=[{"id": "primary"}], default_rules=[ReminderSpec(id="default-5m", before="5m")])
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], default_rules=[ReminderSpec(id="default-5m", before="5m")])
     database = calendar_database
-    original = pipeline.CalendarEvent(
+    original = CalendarEvent(
         "primary",
         "Main",
         "event",
@@ -617,7 +632,7 @@ def test_resync_cancels_overdue_job_after_an_event_changes(calendar_database: Da
     )
     assert old_attempt is not None
     database.fail_delivery(old_attempt)
-    updated = pipeline.CalendarEvent(
+    updated = CalendarEvent(
         "primary",
         "Main",
         "event",
@@ -639,9 +654,9 @@ def test_resync_cancels_overdue_job_after_an_event_changes(calendar_database: Da
     assert database.due_attempts(now) == []
 
 
-def test_retry_agenda_delivers_only_the_current_destination(tmp_path: Path, monkeypatch) -> None:
+def test_retry_agenda_delivers_only_the_current_destination(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     timezone = "America/Montreal"
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone)
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone=timezone)
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
@@ -668,9 +683,9 @@ def test_retry_agenda_delivers_only_the_current_destination(tmp_path: Path, monk
     }
 
 
-def test_reset_agenda_checkpoint_allows_retry(tmp_path: Path, monkeypatch) -> None:
+def test_reset_agenda_checkpoint_allows_retry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     timezone = "America/Montreal"
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone)
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone=timezone)
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
@@ -696,10 +711,12 @@ def test_reset_agenda_checkpoint_allows_retry(tmp_path: Path, monkeypatch) -> No
     assert pipeline.retry_agenda(settings, day).delivered == 1
 
 
-def test_run_reads_scheduled_jobs_without_calendar_and_expires_started_events(tmp_path: Path, monkeypatch) -> None:
+def test_run_reads_scheduled_jobs_without_calendar_and_expires_started_events(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     timezone = ZoneInfo("America/Montreal")
     now = datetime(2026, 7, 9, 9, 56, tzinfo=timezone)
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone=timezone.key)
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
@@ -707,8 +724,8 @@ def test_run_reads_scheduled_jobs_without_calendar_and_expires_started_events(tm
     )
     database = Database(settings.database_path)
     current = datetime(2026, 7, 9, 10, 0, tzinfo=timezone)
-    future = pipeline.CalendarEvent("primary", "Main", "future", "future", "Future", "", current, current, False)
-    past = pipeline.CalendarEvent("primary", "Main", "past", "past", "Past", "", now - timedelta(minutes=1), now, False)
+    future = CalendarEvent("primary", "Main", "future", "future", "Future", "", current, current, False)
+    past = CalendarEvent("primary", "Main", "past", "past", "Past", "", now - timedelta(minutes=1), now, False)
     future_id = database.create_attempt(ReminderCandidate(future, "default-5m", "5m", now - timedelta(minutes=1)), "future")
     past_id = database.create_attempt(ReminderCandidate(past, "default-5m", "5m", now - timedelta(minutes=2)), "past")
     assert future_id is not None and past_id is not None
@@ -717,7 +734,7 @@ def test_run_reads_scheduled_jobs_without_calendar_and_expires_started_events(tm
     delivered: list[str] = []
     monkeypatch.setattr(pipeline, "load_reminders", lambda _: config)
     monkeypatch.setattr(pipeline, "list_events_between", lambda *args: (_ for _ in ()).throw(AssertionError("no Calendar read")))
-    monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: delivered.append(str(args[1])) or ["1"])
+    monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: recorded(delivered, str(args[1]), ["1"]))
 
     assert pipeline.run(settings, dry_run=False, now=now).model_dump() == {
         "status": "ok",
@@ -733,17 +750,17 @@ def test_run_reads_scheduled_jobs_without_calendar_and_expires_started_events(tm
     database.close()
 
 
-def test_run_expires_started_events_without_discord_config(tmp_path: Path, monkeypatch) -> None:
+def test_run_expires_started_events_without_discord_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     timezone = ZoneInfo("America/Montreal")
     now = datetime(2026, 7, 9, 9, 56, tzinfo=timezone)
-    config = RemindersConfig(calendars=[{"id": "primary"}], timezone=timezone.key)
+    config = RemindersConfig(calendars=[CalendarConfig(id="primary")], timezone=timezone.key)
     settings = Settings(
         database_path=tmp_path / "reminders.sqlite3",
         lock_path=tmp_path / "reminders.lock",
         discord_delivery_mode="bot",
     )
     database = Database(settings.database_path)
-    event = pipeline.CalendarEvent("primary", "Main", "past", "past", "Past", "", now - timedelta(minutes=1), now, False)
+    event = CalendarEvent("primary", "Main", "past", "past", "Past", "", now - timedelta(minutes=1), now, False)
     attempt_id = database.create_attempt(ReminderCandidate(event, "default-5m", "5m", now - timedelta(minutes=2)), "past")
     assert attempt_id is not None
     database.close()
@@ -762,7 +779,7 @@ def test_run_expires_started_events_without_discord_config(tmp_path: Path, monke
     database.close()
 
 
-def _reminder_history(tmp_path: Path) -> tuple[Settings, set[str]]:
+def _reminder_history(tmp_path: Path) -> tuple[Settings, dict[str, tuple[int, str]]]:
     settings = Settings(
         reminders_config_path=tmp_path / "reminders.yaml",
         database_path=tmp_path / "reminders.sqlite3",

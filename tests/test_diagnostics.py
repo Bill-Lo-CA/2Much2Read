@@ -32,7 +32,7 @@ def mock_ollama(monkeypatch: pytest.MonkeyPatch, models: list[str]) -> list[dict
         def get(self, *args: object, **kwargs: object) -> Response:
             return Response()
 
-    monkeypatch.setattr(diagnostics.httpx, "Client", Client)
+    monkeypatch.setattr("two_much_two_read.diagnostics.httpx.Client", Client)
     return options
 
 

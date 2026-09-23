@@ -3,6 +3,7 @@ from dataclasses import replace
 from datetime import UTC, datetime
 
 import pytest
+from pydantic import HttpUrl
 
 from two_much_two_read.digest import (
     DigestEntry,
@@ -24,7 +25,7 @@ def item(title: str, url: str | None, confidence: float = 0.8, importance: int =
         category="AI_MODEL",
         summary_zh_tw="摘要",
         why_it_matters_zh_tw="重要原因",
-        source_url=url,
+        source_url=HttpUrl(url) if url else None,
         importance=importance,
         confidence=confidence,
         tags=["AI Model"],
@@ -314,7 +315,7 @@ def merged_entry(title: str, summary: str, source: str, url: str | None = None, 
                 category="AI_MODEL",
                 summary_zh_tw=summary,
                 why_it_matters_zh_tw="重要原因",
-                source_url=url,
+                source_url=HttpUrl(url) if url else None,
                 importance=8,
                 confidence=0.8,
             ),

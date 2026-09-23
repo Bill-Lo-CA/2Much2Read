@@ -3,23 +3,31 @@ from __future__ import annotations
 import re
 import sqlite3
 from base64 import urlsafe_b64encode
+from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import Path
+from typing import cast
 from zoneinfo import ZoneInfo
 
 import httpx
 import pytest
-from conftest import directory_digest
+from conftest import directory_digest, recorded
+from pydantic import HttpUrl
 
 from two_much_two_read import mail_operations, pipeline
 from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl
 from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult
 from two_much_two_read.config import HackerNewsSource, Settings
 from two_much_two_read.digest import DigestEntry
-from two_much_two_read.hackernews import HackerNewsCandidate, HackerNewsDiscovery, ResolvedHackerNewsContent
-from two_much_two_read.mime import EmailExtractionError
+from two_much_two_read.hackernews import (
+    HackerNewsCandidate,
+    HackerNewsClient,
+    HackerNewsDiscovery,
+    ResolvedHackerNewsContent,
+)
+from two_much_two_read.mime import EmailExtractionError, extract_gmail_payload
 from two_much_two_read.ollama import OllamaSchemaError
 from two_much_two_read.pipeline import deliver_digest, run_pipeline
 from two_much_two_read.schemas import (
@@ -33,6 +41,7 @@ from two_much_two_read.schemas import (
 )
 from two_much_two_read.storage import Database
 from two_read_runtime.discord import DiscordDeliveryError, DiscordDestination
+from two_read_runtime.locking import ProcessLock
 
 
 def write_sources(path: Path, *, enabled: bool = True) -> None:
@@ -71,7 +80,7 @@ class StubGmailClient:
     def list_messages(self, query: str, limit: int | None = None) -> list[str]:
         return self.message_ids if limit is None else self.message_ids[:limit]
 
-    def iter_messages(self, query: str):
+    def iter_messages(self, query: str) -> Iterator[str]:
         yield from self.message_ids
 
     def get_message(self, message_id: str) -> dict[str, object]:
@@ -99,8 +108,8 @@ def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
         def __init__(self, _model: str, _device: str) -> None:
             pass
 
-        def rank(self, entries):
-            return entries
+        def rank(self, entries: Sequence[DigestEntry]) -> list[DigestEntry]:
+            return list(entries)
 
         def close(self) -> None:
             pass
@@ -291,7 +300,7 @@ def test_pipeline_uses_original_analysis_length_for_truncation(
         def ensure_labels(self) -> None:
             pass
 
-        def iter_messages(self, query: str):
+        def iter_messages(self, query: str) -> Iterator[str]:
             yield "gmail-1"
 
         def get_message(self, message_id: str) -> dict[str, object]:
@@ -351,8 +360,8 @@ def test_hacker_news_source_runs_without_gmail_and_skips_processed_items(tmp_pat
             title="HN article",
             author="author",
             published_at=datetime(2026, 7, 24, tzinfo=UTC),
-            source_url="https://example.com/requested",
-            discussion_url="https://news.ycombinator.com/item?id=123",
+            source_url=HttpUrl("https://example.com/requested"),
+            discussion_url=HttpUrl("https://news.ycombinator.com/item?id=123"),
             metadata={},
         ),
         "beststories",
@@ -397,7 +406,7 @@ def test_hacker_news_source_runs_without_gmail_and_skips_processed_items(tmp_pat
                 document=candidate.document,
                 text="usable article text",
                 basis="article",
-                final_url="https://example.com/final",
+                final_url=HttpUrl("https://example.com/final"),
                 truncated=False,
             ),
             "article title",
@@ -437,8 +446,8 @@ def test_hacker_news_force_retries_only_failed_documents(tmp_path: Path, monkeyp
             external_id="123",
             title="HN article",
             published_at=datetime(2026, 7, 24, tzinfo=UTC),
-            source_url="https://example.com/requested",
-            discussion_url="https://news.ycombinator.com/item?id=123",
+            source_url=HttpUrl("https://example.com/requested"),
+            discussion_url=HttpUrl("https://news.ycombinator.com/item?id=123"),
         ),
         "beststories",
         1,
@@ -529,12 +538,15 @@ def test_mixed_gmail_and_hackernews_sources_run_together(tmp_path: Path, monkeyp
             pass
 
     def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
-        budget = int(args[5])
+        budget = args[5]
+        assert isinstance(budget, int)
         seen.append(("gmail", budget))
         return budget if budget == settings.gmail_max_messages_per_run else 1, 1, 1, 0, [], []
 
     def process_hackernews(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], int]:
-        seen.append(("hackernews", int(args[4])))
+        budget = args[4]
+        assert isinstance(budget, int)
+        seen.append(("hackernews", budget))
         return 1, 1, 1, 0, [], 0
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
@@ -588,8 +600,8 @@ def test_hackernews_deadline_failure_does_not_abort_later_story(tmp_path: Path, 
             external_id="123",
             title="Unreadable article",
             published_at=datetime(2026, 7, 24, tzinfo=UTC),
-            source_url="https://example.com/requested",
-            discussion_url="https://news.ycombinator.com/item?id=123",
+            source_url=HttpUrl("https://example.com/requested"),
+            discussion_url=HttpUrl("https://news.ycombinator.com/item?id=123"),
         ),
         "beststories",
         1,
@@ -605,8 +617,8 @@ def test_hackernews_deadline_failure_does_not_abort_later_story(tmp_path: Path, 
             external_id="124",
             title="Readable article",
             published_at=datetime(2026, 7, 24, tzinfo=UTC),
-            source_url="https://example.com/readable",
-            discussion_url="https://news.ycombinator.com/item?id=124",
+            source_url=HttpUrl("https://example.com/readable"),
+            discussion_url=HttpUrl("https://news.ycombinator.com/item?id=124"),
         ),
         "beststories",
         2,
@@ -644,7 +656,9 @@ def test_hackernews_deadline_failure_does_not_abort_later_story(tmp_path: Path, 
 
     result = pipeline._process_hackernews_source(
         database,
-        FakeHackerNewsClient(),
+        # Each fake here drives one of discover/retry_candidate; a Protocol honest about what the
+        # function uses would need both, so the fakes would grow methods no test exercises.
+        cast(HackerNewsClient, FakeHackerNewsClient()),
         FakeOllamaClient(),
         source,
         2,
@@ -744,28 +758,28 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
-    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: events.append("extractor:load") or object())
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: recorded(events, "extractor:load", object()))
     monkeypatch.setattr(
         pipeline,
         "_process_source",
-        lambda *args, **kwargs: events.append("extractor:run") or (0, 0, 0, 0, [], []),
+        lambda *args, **kwargs: recorded(events, "extractor:run", (0, 0, 0, 0, [], [])),
     )
     monkeypatch.setattr(pipeline, "_unload_model", lambda _ollama, model, *_: events.append(f"unload:{model}"))
     monkeypatch.setattr(pipeline, "RelevanceReranker", FakeReranker)
     monkeypatch.setattr(
         pipeline,
         "_ranked_entries",
-        lambda *args: events.append("reranker:rank") or [],
+        lambda *args: recorded(events, "reranker:rank", []),
     )
     monkeypatch.setattr(
         pipeline,
         "_reviewed_entries",
-        lambda *args: events.append("reviewer:run") or [],
+        lambda *args: recorded(events, "reviewer:run", []),
     )
     monkeypatch.setattr(
         pipeline,
         "_deepened_entries",
-        lambda _settings, _ollama, entries, _status: events.append("reviewer:deepen") or entries,
+        lambda _settings, _ollama, entries, _status: recorded(events, "reviewer:deepen", entries),
     )
 
     run_pipeline(settings, no_deliver=True)
@@ -880,7 +894,8 @@ def test_retry_delivery_continues_after_a_failed_digest(newsletter_settings: Set
 
     monkeypatch.setattr(pipeline, "deliver", fake_deliver)
 
-    assert pipeline.retry_delivery(settings, database).model_dump() == {
+    # retry_delivery drives a dozen Database methods; a Protocol would only copy the class.
+    assert pipeline.retry_delivery(settings, cast(Database, database)).model_dump() == {
         "status": "partial",
         "delivered": 1,
         "failed": 1,
@@ -904,7 +919,7 @@ def test_retry_delivery_stops_when_recording_a_failure_hits_the_database(
     monkeypatch.setattr(pipeline, "deliver", lambda *args: (_ for _ in ()).throw(DiscordDeliveryError("delivery failed")))
 
     with pytest.raises(sqlite3.OperationalError, match="database unavailable"):
-        pipeline.retry_delivery(settings, database)
+        pipeline.retry_delivery(settings, cast(Database, database))
 
     assert database.finished == []
 
@@ -985,7 +1000,7 @@ def test_retry_sends_only_the_failed_destination(tmp_path: Path, monkeypatch: py
 
     calls: list[str] = []
     monkeypatch.setattr(
-        pipeline, "deliver", lambda destination, *args, **kwargs: calls.append(destination.transport) or ["bot-message"]
+        pipeline, "deliver", lambda destination, *args, **kwargs: recorded(calls, destination.transport, ["bot-message"])
     )
 
     assert pipeline.retry_delivery(settings, database).model_dump() == {
@@ -1023,7 +1038,7 @@ def test_retry_preserves_pre_validation_webhook_checkpoint_key(tmp_path: Path, m
     database.fail_digest_delivery(int(bot["id"]), "DISCORD_BOT_FORBIDDEN", previous_destinations)
     calls: list[str] = []
     monkeypatch.setattr(
-        pipeline, "deliver", lambda destination, *args, **kwargs: calls.append(destination.transport) or ["bot-message"]
+        pipeline, "deliver", lambda destination, *args, **kwargs: recorded(calls, destination.transport, ["bot-message"])
     )
 
     assert pipeline.retry_delivery(settings, database).delivered == 1
@@ -1083,7 +1098,7 @@ def test_retry_adds_a_new_destination(tmp_path: Path, monkeypatch: pytest.Monkey
     old_delivery_id = int(database.digest_deliveries(digest_id, old_destinations)[0]["id"])
     database.fail_digest_delivery(old_delivery_id, "DISCORD_DELIVERY_FAILED", old_destinations)
     calls: list[str] = []
-    monkeypatch.setattr(pipeline, "deliver", lambda destination, *args, **kwargs: calls.append(destination.key) or ["message"])
+    monkeypatch.setattr(pipeline, "deliver", lambda destination, *args, **kwargs: recorded(calls, destination.key, ["message"]))
 
     assert pipeline.retry_delivery(settings, database).model_dump() == {
         "status": "ok",
@@ -1112,7 +1127,14 @@ def test_retry_legacy_digest_preserves_bot_checkpoint_in_both_mode(tmp_path: Pat
     database.fail_delivery(digest_id)
     calls: list[tuple[str, list[str] | None]] = []
 
-    def fake_deliver(destination, _content, _username, message_ids, *_args, **_kwargs):
+    def fake_deliver(
+        destination: DiscordDestination,
+        _content: str,
+        _username: str,
+        message_ids: list[str] | None,
+        *_args: object,
+        **_kwargs: object,
+    ) -> list[str]:
         calls.append((destination.transport, message_ids))
         return [*(message_ids or []), f"new-{destination.transport}-message"]
 
@@ -1277,7 +1299,7 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
         def ensure_labels(self) -> None:
             pass
 
-        def iter_messages(self, query: str):
+        def iter_messages(self, query: str) -> Iterator[str]:
             iter_calls.append(query)
             yield from ["first-1", "first-2"] if "first@example.com" in query else ["second-1"]
 
@@ -1328,7 +1350,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
         def ensure_labels(self) -> None:
             pass
 
-        def iter_messages(self, query: str):
+        def iter_messages(self, query: str) -> Iterator[str]:
             yield from ["bad", "good"]
 
         def get_message(self, message_id: str) -> dict[str, object]:
@@ -1350,15 +1372,17 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
                 newsletter_date=None,
                 overview_zh_tw="摘要",
                 items=[
-                    {
-                        "title": "Good item",
-                        "source_title": "Good item",
-                        "category": "AI_MODEL",
-                        "summary_zh_tw": "內容",
-                        "why_it_matters_zh_tw": "原因",
-                        "importance": 8,
-                        "confidence": 0.9,
-                    }
+                    NewsletterItemAnalysis.model_validate(
+                        {
+                            "title": "Good item",
+                            "source_title": "Good item",
+                            "category": "AI_MODEL",
+                            "summary_zh_tw": "內容",
+                            "why_it_matters_zh_tw": "原因",
+                            "importance": 8,
+                            "confidence": 0.9,
+                        }
+                    )
                 ],
             )
 
@@ -1449,24 +1473,25 @@ def test_mime_failure_marks_one_message_failed_and_continues(
         newsletter_date=None,
         overview_zh_tw="摘要",
         items=[
-            {
-                "title": "Good item",
-                "source_title": "Good item",
-                "category": "AI_MODEL",
-                "summary_zh_tw": "內容",
-                "why_it_matters_zh_tw": "原因",
-                "importance": 8,
-                "confidence": 0.9,
-            }
+            NewsletterItemAnalysis.model_validate(
+                {
+                    "title": "Good item",
+                    "source_title": "Good item",
+                    "category": "AI_MODEL",
+                    "summary_zh_tw": "內容",
+                    "why_it_matters_zh_tw": "原因",
+                    "importance": 8,
+                    "confidence": 0.9,
+                }
+            )
         ],
     )
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: StubOllamaClient(extraction))
     if error_code is not None:
-        extract_gmail_payload = pipeline.extract_gmail_payload
 
-        def extract(payload: dict[str, object]):
+        def extract(payload: dict[str, object]) -> ExtractedEmailContent:
             if payload is gmail.messages["bad"]["payload"]:
                 raise EmailExtractionError(error_code)
             return extract_gmail_payload(payload)
@@ -1519,15 +1544,17 @@ def test_digest_render_failure_leaves_extractions_retryable(tmp_path: Path, monk
         newsletter_date=None,
         overview_zh_tw="摘要",
         items=[
-            {
-                "title": "Item",
-                "source_title": "Item",
-                "category": "AI_MODEL",
-                "summary_zh_tw": "內容",
-                "why_it_matters_zh_tw": "原因",
-                "importance": 8,
-                "confidence": 0.9,
-            }
+            NewsletterItemAnalysis.model_validate(
+                {
+                    "title": "Item",
+                    "source_title": "Item",
+                    "category": "AI_MODEL",
+                    "summary_zh_tw": "內容",
+                    "why_it_matters_zh_tw": "原因",
+                    "importance": 8,
+                    "confidence": 0.9,
+                }
+            )
         ],
     )
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
@@ -1592,15 +1619,17 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
         newsletter_date=None,
         overview_zh_tw="摘要",
         items=[
-            {
-                "title": "Recovered item",
-                "source_title": "Recovered item",
-                "category": "AI_MODEL",
-                "summary_zh_tw": "內容",
-                "why_it_matters_zh_tw": "原因",
-                "importance": 8,
-                "confidence": 0.9,
-            }
+            NewsletterItemAnalysis.model_validate(
+                {
+                    "title": "Recovered item",
+                    "source_title": "Recovered item",
+                    "category": "AI_MODEL",
+                    "summary_zh_tw": "內容",
+                    "why_it_matters_zh_tw": "原因",
+                    "importance": 8,
+                    "confidence": 0.9,
+                }
+            )
         ],
     )
 
@@ -1705,7 +1734,7 @@ def test_label_sync_failure_is_repaired_without_reextracting(tmp_path: Path, mon
         def ensure_labels(self) -> None:
             pass
 
-        def iter_messages(self, query: str):
+        def iter_messages(self, query: str) -> Iterator[str]:
             yield "gmail-1"
 
         def get_message(self, message_id: str) -> dict[str, object]:
@@ -1781,7 +1810,7 @@ def test_stale_label_reconciliation_does_not_use_the_message_limit(tmp_path: Pat
         def list_messages(self, query: str, limit: int | None = None) -> list[str]:
             return ["stale"]
 
-        def iter_messages(self, query: str):
+        def iter_messages(self, query: str) -> Iterator[str]:
             yield from ["stale", "new"]
 
         def get_message(self, message_id: str) -> dict[str, object]:
@@ -1825,7 +1854,7 @@ def test_forced_recovery_clears_the_failure_and_remote_failed_label(tmp_path: Pa
         def ensure_labels(self) -> None:
             pass
 
-        def iter_messages(self, query: str):
+        def iter_messages(self, query: str) -> Iterator[str]:
             yield "gmail-1"
 
         def get_message(self, message_id: str) -> dict[str, object]:
@@ -1865,7 +1894,7 @@ def test_dry_run_skips_gmail_label_writes_and_persistent_database(tmp_path: Path
         def ensure_labels(self) -> None:
             pytest.fail("dry-run must not create labels")
 
-        def iter_messages(self, query: str):
+        def iter_messages(self, query: str) -> Iterator[str]:
             yield "gmail-1"
 
         def get_message(self, message_id: str) -> dict[str, object]:
@@ -2104,15 +2133,17 @@ def test_a_message_without_a_mime_payload_is_recorded_as_failed_not_skipped(
         newsletter_date=None,
         overview_zh_tw="摘要",
         items=[
-            {
-                "title": "Good item",
-                "source_title": "Good item",
-                "category": "AI_MODEL",
-                "summary_zh_tw": "內容",
-                "why_it_matters_zh_tw": "原因",
-                "importance": 8,
-                "confidence": 0.9,
-            }
+            NewsletterItemAnalysis.model_validate(
+                {
+                    "title": "Good item",
+                    "source_title": "Good item",
+                    "category": "AI_MODEL",
+                    "summary_zh_tw": "內容",
+                    "why_it_matters_zh_tw": "原因",
+                    "importance": 8,
+                    "confidence": 0.9,
+                }
+            )
         ],
     )
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
@@ -2166,7 +2197,8 @@ def test_every_gmail_source_is_read_before_any_source_takes_a_second_helping(
 
     def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
         source = args[4]
-        budget = int(args[5])
+        budget = args[5]
+        assert isinstance(budget, int)
         offered.append((source.id, budget))  # type: ignore[attr-defined]
         return (budget, budget, budget, 0, [], []) if source.id == "source-0" else (0, 0, 0, 0, [], [])  # type: ignore[attr-defined]
 
@@ -2202,7 +2234,8 @@ def test_a_source_that_exhausts_its_allowance_gets_the_leftover_budget(tmp_path:
 
     def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
         source = args[4]
-        budget = int(args[5])
+        budget = args[5]
+        assert isinstance(budget, int)
         offered.append((source.id, budget))  # type: ignore[attr-defined]
         return budget, budget, budget, 0, [], []
 
@@ -2257,7 +2290,7 @@ def test_prune_dry_run_reports_what_it_would_delete_and_deletes_nothing(
     )
     newsletter_database.connection.commit()
 
-    with pipeline.ProcessLock(newsletter_settings.lock_path):
+    with ProcessLock(newsletter_settings.lock_path):
         before = directory_digest(newsletter_settings.database_path.parent)
         preview = pipeline.prune_database(newsletter_settings, days=1, dry_run=True)
         assert directory_digest(newsletter_settings.database_path.parent) == before
@@ -2356,7 +2389,7 @@ class PerSourceGmailClient(StubGmailClient):
     sharing a query is protecting - but it is not what this test is about.
     """
 
-    def iter_messages(self, query: str):
+    def iter_messages(self, query: str) -> Iterator[str]:
         match = re.search(r"from:s(\d+)\.example", query)
         assert match is not None, query
         prefix = f"source-{match.group(1)}-"
@@ -2465,7 +2498,8 @@ def test_a_smaller_command_budget_is_still_shared_between_sources(tmp_path: Path
 
     def process_gmail(*args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
         source = args[4]
-        budget = int(args[5])
+        budget = args[5]
+        assert isinstance(budget, int)
         offered.append((source.id, budget))  # type: ignore[attr-defined]
         return budget, budget, budget, 0, [], []
 
@@ -2485,7 +2519,7 @@ def _cursor_gmail_messages(per_source: int) -> tuple[list[str], dict[str, dict[s
         return urlsafe_b64encode(value.encode()).decode().rstrip("=")
 
     message_ids = [f"source-{source}-{message}" for message in range(per_source) for source in range(3)]
-    messages = {
+    messages: dict[str, dict[str, object]] = {
         message_id: {
             "threadId": f"thread-{message_id}",
             "internalDate": "1784786400000",

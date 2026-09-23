@@ -115,8 +115,8 @@ def test_only_the_model_loading_unit_opts_out_of_device_isolation() -> None:
     for unit in ("2busy1miss-runtime.service", "2busy1miss-runtime-agenda.service", "2bored1made-runtime.service"):
         assert "PrivateDevices=true" in (UNITS / unit).read_text(encoding="utf-8")
 
-    for unit in UNITS.glob("*.service"):
-        assert "MemoryDenyWriteExecute" not in unit.read_text(encoding="utf-8")
+    for service in UNITS.glob("*.service"):
+        assert "MemoryDenyWriteExecute" not in service.read_text(encoding="utf-8")
 
 
 def test_2busy1miss_agenda_timer_is_an_installer_template() -> None:
