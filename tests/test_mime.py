@@ -2,8 +2,17 @@ import base64
 from email.message import EmailMessage
 
 import pytest
+from bs4.element import Tag
 
-from two_much_two_read.mime import EmailExtractionError, EmptyEmailError, extract_gmail_payload, extract_mime, html_to_text
+from two_much_two_read.mime import (
+    MAX_LINK_CANDIDATES,
+    MAX_LINK_OCCURRENCES,
+    EmailExtractionError,
+    EmptyEmailError,
+    extract_gmail_payload,
+    extract_mime,
+    html_to_text,
+)
 
 
 @pytest.mark.parametrize(("plain", "html"), [("plain wins", None), ("plain wins", "<p>html loses</p>")])
@@ -254,14 +263,70 @@ def test_extract_gmail_payload_rejects_total_decoded_bytes() -> None:
     assert error.value.code == "EMAIL_TOO_LARGE"
 
 
-def test_extract_gmail_payload_counts_duplicate_links_toward_limit() -> None:
-    html = "".join('<a href="https://example.com/article">article</a>' for _ in range(1_000))
-    payload: dict[str, object] = {"mimeType": "text/html", "body": {"data": base64.urlsafe_b64encode(html.encode()).decode()}}
+def _body(mime_type: str, text: str) -> dict[str, object]:
+    return {"mimeType": mime_type, "body": {"data": base64.urlsafe_b64encode(text.encode()).decode()}}
 
-    with pytest.raises(EmailExtractionError) as error:
-        extract_gmail_payload(payload)
 
-    assert error.value.code == "EMAIL_TOO_MANY_LINKS"
+def _stories(count: int) -> list[str]:
+    return [f"https://example.com/story-{number}" for number in range(count)]
+
+
+def test_a_newsletter_that_repeats_its_links_in_both_parts_keeps_them_all() -> None:
+    # The shape AINews, SemiAnalysis and Risky Bulletin arrive in: each story linked once in the
+    # HTML and again in the plain part. 150 stories are 300 occurrences, and counting occurrences
+    # against the 200 cap failed the whole email.
+    urls = _stories(150)
+    html = "".join(f'<p><a href="{url}">Story {number}</a></p>' for number, url in enumerate(urls))
+    plain = "\n".join(f"Story {number} {url}" for number, url in enumerate(urls))
+    payload: dict[str, object] = {
+        "mimeType": "multipart/alternative",
+        "parts": [_body("text/plain", plain), _body("text/html", html)],
+    }
+
+    content = extract_gmail_payload(payload)
+
+    assert [str(candidate.raw_url) for candidate in content.link_candidates] == urls
+
+
+def test_more_distinct_links_than_the_cap_keeps_the_first_ones_in_order() -> None:
+    urls = _stories(500)
+    html = "".join(f'<a href="{url}">Story {number}</a>' for number, url in enumerate(urls))
+
+    content = extract_gmail_payload(_body("text/html", html))
+
+    assert [str(candidate.raw_url) for candidate in content.link_candidates] == urls[:MAX_LINK_CANDIDATES]
+
+
+def test_repeats_still_count_toward_the_work_bound() -> None:
+    # The cap on kept links alone would let a message of endless copies of one anchor be scanned to
+    # the end. A distinct link placed just past the bound shows where the scan stopped.
+    repeated = '<a href="https://example.com/article">article</a>' * MAX_LINK_OCCURRENCES
+    html = repeated + '<a href="https://example.com/past-the-bound">late</a>'
+
+    content = extract_gmail_payload(_body("text/html", html))
+
+    assert [str(candidate.raw_url) for candidate in content.link_candidates] == ["https://example.com/article"]
+
+
+def test_only_kept_links_pay_for_their_surrounding_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Finding a link's heading walks back through the document, so paying for it on every repeat
+    # would make the work bound quadratic in practice.
+    import two_much_two_read.mime as module
+
+    calls: list[object] = []
+    real = module._nearby_text
+
+    def counting(anchor: Tag) -> str:
+        calls.append(anchor)
+        return real(anchor)
+
+    monkeypatch.setattr(module, "_nearby_text", counting)
+    html = '<h2>Top</h2><a href="https://example.com/article">article</a>' * 1_000
+
+    content = extract_gmail_payload(_body("text/html", html))
+
+    assert len(content.link_candidates) == 1
+    assert len(calls) == 1
 
 
 @pytest.mark.parametrize(("length", "truncated"), [(45_000, False), (45_001, True)])
