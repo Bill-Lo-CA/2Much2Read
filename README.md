@@ -249,8 +249,9 @@ unused slots, so a quiet security day costs nothing.
 
 The reserved slots only put security in front of the reviewer, so its choice has a floor as well.
 When none of the headlines shown is a `SECURITY` story and no CVE is among the mentions that will
-be shown, a security story takes the last headline slot and the headline it displaces moves to the
-top of the mentions. One the reviewer selected comes first — with `DIGEST_MAX_ITEMS` above
+be shown, a security story takes the last headline slot and the headline it displaces becomes a
+mention, outside the `DIGEST_SECONDARY_ITEMS` quota, which stays for the candidates the reviewer
+passed over. One the reviewer selected comes first — with `DIGEST_MAX_ITEMS` above
 `DIGEST_TOP_ITEMS` it can rank past the headlines shown — and otherwise the best one it passed over.
 A CVE counts from the mention list because it is a one-line fact; any other security story needs a
 headline. A day with no security candidates is left alone, and so is one the reviewer chose

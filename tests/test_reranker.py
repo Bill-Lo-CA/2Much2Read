@@ -348,9 +348,10 @@ def test_a_cve_the_mention_cap_cuts_does_not_count() -> None:
 
     headlines, mentions = _floored(entries, headline_limit=2, secondary_items=1)
 
-    # Promoted from beyond the cap: the floor looks at every passed-over candidate, not only the shown ones.
+    # Promoted from beyond the cap: the floor looks at every passed-over candidate, not only the shown
+    # ones. GPT-6 was the reviewer's choice, so it sits outside the one-mention quota Rune IDE fills.
     assert headlines == ["Opus 5.5", "Docker patches CVE-2026-77179"]
-    assert mentions == ["GPT-6"]
+    assert mentions == ["GPT-6", "Rune IDE"]
 
 
 def test_a_short_headline_list_gains_the_security_story_without_losing_one() -> None:
@@ -494,3 +495,18 @@ def test_the_promotion_record_carries_no_terminal_controls() -> None:
     _, promotion = pipeline._merged_entries(entries, 10, never_the_same, headline_limit=1)
 
     assert promotion == SecurityFloorPromotion(promoted="Muse 2J 0-day", source="Risky Biz", displaced="Opus 5.5")
+
+
+def test_demoted_headlines_leave_the_passed_over_quota_alone() -> None:
+    # DIGEST_MAX_ITEMS above DIGEST_TOP_ITEMS: the reviewer chose four, the renderer shows two. The
+    # two past the cap rendered outside DIGEST_SECONDARY_ITEMS before the floor acted, and counting
+    # them against it afterwards cut both passed-over mentions.
+    entries = _digest(
+        [("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL"), ("Qwen image", "AI_MODEL"), ("Gemini TTS", "AI_MODEL")],
+        [("Rune IDE", "DEV_TOOL"), ("Drop sandbox", "DEV_TOOL"), ("Muse 0-day", "SECURITY")],
+    )
+
+    headlines, mentions = _floored(entries, headline_limit=2, secondary_items=2)
+
+    assert headlines == ["Opus 5.5", "Muse 0-day"]
+    assert mentions == ["GPT-6", "Qwen image", "Gemini TTS", "Rune IDE", "Drop sandbox"]

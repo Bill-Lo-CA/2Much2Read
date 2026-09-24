@@ -272,15 +272,18 @@ def _merged_entries(
 ) -> tuple[list[DigestEntry], SecurityFloorPromotion | None]:
     """Merge repeat coverage, apply the security floor when headline_limit is given, then cap mentions.
 
-    Returns the entries, and what the floor promoted if it had to act.
+    Returns the entries, and what the floor promoted if it had to act. secondary_items caps the
+    candidates the reviewer passed over; headlines the floor demoted were the reviewer's choices and
+    sit outside it, as the ones past the render cap already did before it acted.
     """
     headlines = [entry for entry in entries if entry.review_score is not None]
     mentions = [entry for entry in entries if entry.review_score is None]
     headlines, mentions = merge_related_entries(headlines, mentions, same_story)
+    demoted: list[DigestEntry] = []
     promotion = None
     if headline_limit is not None:
-        headlines, mentions, promotion = _with_security_floor(headlines, mentions, headline_limit, secondary_items)
-    return headlines + mentions[:secondary_items], promotion
+        headlines, demoted, mentions, promotion = _with_security_floor(headlines, mentions, headline_limit, secondary_items)
+    return headlines + demoted + mentions[:secondary_items], promotion
 
 
 def _inert(value: str) -> str:
@@ -300,7 +303,7 @@ def _is_cve(entry: DigestEntry) -> bool:
 
 def _with_security_floor(
     headlines: list[DigestEntry], mentions: list[DigestEntry], headline_limit: int, secondary_items: int
-) -> tuple[list[DigestEntry], list[DigestEntry], SecurityFloorPromotion | None]:
+) -> tuple[list[DigestEntry], list[DigestEntry], list[DigestEntry], SecurityFloorPromotion | None]:
     """Make sure the digest shows at least one security story.
 
     The reviewer picks headlines on one scale, and on a day of big AI releases security loses: on
@@ -310,29 +313,31 @@ def _with_security_floor(
 
     A security headline satisfies it, and so does a CVE among the mentions that will be shown: a
     CVE is a one-line fact, and a mention is where it belongs. Otherwise a security story takes the
-    last headline slot, and the headline it displaces heads the mentions. The reviewer's own choice
+    last headline slot, and the headline it displaces becomes a mention. The reviewer's own choice
     comes first: with DIGEST_MAX_ITEMS above DIGEST_TOP_ITEMS it can select a security story that
     ranks past the headlines render_digest shows, and promoting a rejected one over it would
     overrule the reviewer to satisfy a rule it already met. Failing that, the best security
-    mention in reranker order. Headlines past headline_limit move to the mentions too, which is
-    where render_digest would have put them, so that the promoted story is the last headline shown
-    rather than one the renderer cuts. A pool with no security story is left alone.
+    mention in reranker order. Headlines past headline_limit become mentions too, which is where
+    render_digest would have put them, so that the promoted story is the last headline shown rather
+    than one the renderer cuts. Both are returned apart from the passed-over mentions, so that they
+    stay outside DIGEST_SECONDARY_ITEMS rather than using up the quota meant for those. A pool with
+    no security story is left alone.
 
     So is a digest the reviewer chose nothing for. render_digest then falls back to the ranked list
     for its headlines, and only while no entry carries a review score: promoting one would end the
     fallback and leave that story as the only headline, with everything else pushed into mentions.
     """
     if not headlines:
-        return headlines, mentions, None
+        return headlines, [], mentions, None
     ordered = sorted(headlines, key=_entry_rank, reverse=True)
     visible, hidden = ordered[:headline_limit], ordered[headline_limit:]
     if headline_limit <= 0 or any(entry.item.category == RESERVED_CATEGORY for entry in visible):
-        return headlines, mentions, None
+        return headlines, [], mentions, None
     if any(entry.item.category == RESERVED_CATEGORY and _is_cve(entry) for entry in mentions[:secondary_items]):
-        return headlines, mentions, None
+        return headlines, [], mentions, None
     promoted = next((entry for entry in [*hidden, *mentions] if entry.item.category == RESERVED_CATEGORY), None)
     if promoted is None:
-        return headlines, mentions, None
+        return headlines, [], mentions, None
     kept = visible[: headline_limit - 1]
     # Only a shown headline counts as displaced: those past the limit were mentions either way.
     promotion = SecurityFloorPromotion(
@@ -341,10 +346,11 @@ def _with_security_floor(
         displaced=_inert(visible[headline_limit - 1].item.title) if len(visible) == headline_limit else None,
     )
     kept_ids = {id(entry) for entry in [*kept, promoted]}
-    displaced = [replace(entry, review_score=None) for entry in ordered if id(entry) not in kept_ids]
+    demoted = [replace(entry, review_score=None) for entry in ordered if id(entry) not in kept_ids]
     return (
         [*kept, replace(promoted, review_score=FLOOR_REVIEW_SCORE)],
-        [*displaced, *(entry for entry in mentions if entry is not promoted)],
+        demoted,
+        [entry for entry in mentions if entry is not promoted],
         promotion,
     )
 
