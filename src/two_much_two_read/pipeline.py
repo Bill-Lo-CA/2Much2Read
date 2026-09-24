@@ -288,23 +288,27 @@ def _with_security_floor(
     is the floor on what it hands back.
 
     A security headline satisfies it, and so does a CVE among the mentions that will be shown: a
-    CVE is a one-line fact, and a mention is where it belongs. Otherwise the best security mention,
-    in reranker order, takes the last headline slot, and the headline it displaces heads the
-    mentions. Headlines past headline_limit move to the mentions too, which is where render_digest
-    would have put them, so that the promoted story is the last headline shown rather than one the
-    renderer cuts. A pool with no security story is left alone.
+    CVE is a one-line fact, and a mention is where it belongs. Otherwise a security story takes the
+    last headline slot, and the headline it displaces heads the mentions. The reviewer's own choice
+    comes first: with DIGEST_MAX_ITEMS above DIGEST_TOP_ITEMS it can select a security story that
+    ranks past the headlines render_digest shows, and promoting a rejected one over it would
+    overrule the reviewer to satisfy a rule it already met. Failing that, the best security
+    mention in reranker order. Headlines past headline_limit move to the mentions too, which is
+    where render_digest would have put them, so that the promoted story is the last headline shown
+    rather than one the renderer cuts. A pool with no security story is left alone.
     """
-    visible = sorted(headlines, key=_entry_rank, reverse=True)[:headline_limit]
+    ordered = sorted(headlines, key=_entry_rank, reverse=True)
+    visible, hidden = ordered[:headline_limit], ordered[headline_limit:]
     if headline_limit <= 0 or any(entry.item.category == RESERVED_CATEGORY for entry in visible):
         return headlines, mentions
     if any(entry.item.category == RESERVED_CATEGORY and _is_cve(entry) for entry in mentions[:secondary_items]):
         return headlines, mentions
-    promoted = next((entry for entry in mentions if entry.item.category == RESERVED_CATEGORY), None)
+    promoted = next((entry for entry in [*hidden, *mentions] if entry.item.category == RESERVED_CATEGORY), None)
     if promoted is None:
         return headlines, mentions
     kept = visible[: headline_limit - 1]
-    kept_ids = {id(entry) for entry in kept}
-    displaced = [replace(entry, review_score=None) for entry in headlines if id(entry) not in kept_ids]
+    kept_ids = {id(entry) for entry in [*kept, promoted]}
+    displaced = [replace(entry, review_score=None) for entry in ordered if id(entry) not in kept_ids]
     # A score of 0 sorts below every reviewed headline, so the floor never outranks the reviewer.
     return [*kept, replace(promoted, review_score=0)], [*displaced, *(entry for entry in mentions if entry is not promoted)]
 

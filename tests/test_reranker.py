@@ -362,3 +362,24 @@ def test_a_pool_without_security_is_left_alone() -> None:
     entries = _digest([("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL")], [("Rune IDE", "DEV_TOOL")])
 
     assert _floored(entries, headline_limit=2) == (["Opus 5.5", "GPT-6"], ["Rune IDE"])
+
+
+@pytest.mark.parametrize(
+    ("mentions", "expected_mentions"),
+    [
+        ([("Muse 0-day", "SECURITY")], ["GPT-6", "Muse 0-day"]),
+        ([("Rune IDE", "DEV_TOOL")], ["GPT-6", "Rune IDE"]),
+    ],
+)
+def test_a_security_story_the_reviewer_chose_is_promoted_before_one_it_passed_over(
+    mentions: list[tuple[str, DigestCategory]], expected_mentions: list[str]
+) -> None:
+    # With DIGEST_MAX_ITEMS above DIGEST_TOP_ITEMS the reviewer can choose a security story that
+    # ranks past the headlines the renderer shows. It is the one to surface: a passed-over story in
+    # its place overrules the reviewer, and with no other security story the digest showed none.
+    entries = _digest([("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL"), ("Docker escape", "SECURITY")], mentions)
+
+    headlines, shown = _floored(entries, headline_limit=2)
+
+    assert headlines == ["Opus 5.5", "Docker escape"]
+    assert shown == expected_mentions
