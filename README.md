@@ -248,11 +248,12 @@ and tooling stories by as much. Splitting the slots keeps both. Either group tak
 unused slots, so a quiet security day costs nothing.
 
 The reserved slots only put security in front of the reviewer, so its choice has a floor as well.
-When none of the headlines it picked is a `SECURITY` story and no CVE is among the mentions that
-will be shown, the best security candidate it passed over takes the last headline slot, and the
-headline it displaces moves to the top of the mentions. A CVE counts from the mention list because
-it is a one-line fact; any other security story needs a headline. A day with no security candidates
-is left alone.
+When none of the headlines shown is a `SECURITY` story and no CVE is among the mentions that will
+be shown, a security story takes the last headline slot and the headline it displaces moves to the
+top of the mentions. One the reviewer selected comes first — with `DIGEST_MAX_ITEMS` above
+`DIGEST_TOP_ITEMS` it can rank past the headlines shown — and otherwise the best one it passed over.
+A CVE counts from the mention list because it is a one-line fact; any other security story needs a
+headline. A day with no security candidates is left alone.
 
 Every reranked candidate is recorded in the append-only `reranker_scores` table with the model,
 prompt version, and timestamp. Scores are stored exactly as the model produced them rather than

@@ -139,8 +139,13 @@ def _entry_key(entry: DigestEntry) -> str:
     return normalized_title(entry.item.title)
 
 
-def _entry_rank(entry: DigestEntry) -> tuple[int, float, int, float, int, int, float]:
+def _entry_rank(entry: DigestEntry) -> tuple[bool, int, float, int, float, int, int, float]:
     return (
+        # Headlines before mentions whatever the score. render_digest takes the mentions as what
+        # follows the headlines in this order, so a headline sorting among them would render twice
+        # and push a mention out; the security floor gives its headline a score below any the
+        # reviewer can give, so that it sorts after every reviewed one.
+        entry.review_score is not None,
         entry.review_score if entry.review_score is not None else -1,
         # Only the headline items carry a review score, so the reranker decides the order of the
         # secondary mentions, which is the order it already ranked them in.

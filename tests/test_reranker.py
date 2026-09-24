@@ -383,3 +383,46 @@ def test_a_security_story_the_reviewer_chose_is_promoted_before_one_it_passed_ov
 
     assert headlines == ["Opus 5.5", "Docker escape"]
     assert shown == expected_mentions
+
+
+def test_the_promoted_story_renders_after_a_headline_the_reviewer_scored_zero() -> None:
+    # The reviewer may give 0. A promoted story tied with it on 0 fell through to the reranker and,
+    # scored higher there, rendered ahead of the reviewer's own choice. Below 0 it would sort among
+    # the mentions instead, and render_digest reads the mentions as what follows the headlines: the
+    # promoted story rendered twice and Rune IDE, ranked above it, was cut.
+    entries = [
+        replace(entry(1, "Opus 5.5", "TLDR"), review_score=90, reranker_score=0.9),
+        replace(entry(2, "Reviewer's zero", "TLDR"), review_score=0, reranker_score=0.1),
+        replace(entry(3, "Rune IDE", "TLDR", "DEV_TOOL"), reranker_score=0.6),
+        replace(entry(4, "Muse 0-day", "TLDR", "SECURITY"), reranker_score=0.5),
+    ]
+
+    content = render_digest(
+        pipeline._merged_entries(entries, 10, never_the_same, headline_limit=3), datetime(2026, 9, 24), "AI", "TLDR", 3
+    )
+
+    top, rest = content.split("🧰")
+    assert [line.split(" ", 1)[1] for line in top.splitlines() if line[:2] in ("1.", "2.", "3.")] == [
+        "Opus 5.5",
+        "Reviewer's zero",
+        "Muse 0-day",
+    ]
+    assert [line for line in rest.splitlines() if line.startswith("•")] == ["• Rune IDE · TLDR"]
+
+
+@pytest.mark.parametrize(
+    "summary",
+    ["Docker 修復 CVE-2026-77179 漏洞", "Docker 修復CVE-2026-77179漏洞", "（CVE-2026-77179）"],
+)
+def test_a_cve_is_recognised_however_the_summary_spaces_it(summary: str) -> None:
+    # \b would miss the middle one: CJK characters are word characters to Python's re.
+    cve = entry(1, "Docker 沙盒漏洞", "TLDR", "SECURITY")
+    cve = replace(cve, item=cve.item.model_copy(update={"summary_zh_tw": summary}))
+
+    assert pipeline._is_cve(cve)
+
+
+def test_a_cve_like_token_inside_another_word_is_not_a_cve() -> None:
+    lookalike = entry(1, "XCVE-2026-77179 bundle", "TLDR", "SECURITY")
+
+    assert not pipeline._is_cve(lookalike)

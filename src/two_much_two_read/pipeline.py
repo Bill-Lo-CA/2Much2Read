@@ -45,7 +45,13 @@ StatusReporter = Callable[[str], None]
 # The category whose reviewer slots are reserved by DIGEST_SECURITY_CANDIDATE_SLOTS, and whose
 # stories _with_security_floor keeps in every digest that has one to show.
 RESERVED_CATEGORY = "SECURITY"
-CVE_PATTERN = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
+# Bounded by ASCII letters and digits rather than \b: Python counts CJK as word characters, so \b
+# finds no boundary in 修復CVE-2026-77179漏洞, and 10 of the 23 CVE items in the live database are
+# written that way.
+CVE_PATTERN = re.compile(r"(?<![A-Za-z0-9])CVE-\d{4}-\d{4,}(?![0-9])", re.IGNORECASE)
+# Below the 0-100 range DigestReviewSelection allows, so a story the floor promotes sorts after
+# every headline the reviewer chose, a zero-scored one included; _entry_rank keeps it a headline.
+FLOOR_REVIEW_SCORE = -1
 
 
 def _ignore_status(_: str) -> None:
@@ -309,8 +315,10 @@ def _with_security_floor(
     kept = visible[: headline_limit - 1]
     kept_ids = {id(entry) for entry in [*kept, promoted]}
     displaced = [replace(entry, review_score=None) for entry in ordered if id(entry) not in kept_ids]
-    # A score of 0 sorts below every reviewed headline, so the floor never outranks the reviewer.
-    return [*kept, replace(promoted, review_score=0)], [*displaced, *(entry for entry in mentions if entry is not promoted)]
+    return [*kept, replace(promoted, review_score=FLOOR_REVIEW_SCORE)], [
+        *displaced,
+        *(entry for entry in mentions if entry is not promoted),
+    ]
 
 
 def _article_to_deepen_from(entry: DigestEntry) -> str | None:
