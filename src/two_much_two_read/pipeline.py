@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -21,10 +22,12 @@ from .command_models import (
     MaintenancePruneResult,
     NewsletterRetryResult,
     NewsletterRunResult,
+    SecurityFloorPromotion,
 )
 from .config import GmailSource, HackerNewsSource, Settings, SourceConfig, load_sources
 from .digest import (
     DigestEntry,
+    _entry_rank,
     canonical_url,
     dedupe_entries,
     merge_related_entries,
@@ -40,8 +43,16 @@ from .storage import Database
 from .url_enrichment import UrlEnricher, resolve_match
 
 StatusReporter = Callable[[str], None]
-# The category whose reviewer slots are reserved by DIGEST_SECURITY_CANDIDATE_SLOTS.
+# The category whose reviewer slots are reserved by DIGEST_SECURITY_CANDIDATE_SLOTS, and whose
+# stories _with_security_floor keeps in every digest that has one to show.
 RESERVED_CATEGORY = "SECURITY"
+# Bounded by ASCII letters and digits rather than \b: Python counts CJK as word characters, so \b
+# finds no boundary in 修復CVE-2026-77179漏洞, and 10 of the 23 CVE items in the live database are
+# written that way.
+CVE_PATTERN = re.compile(r"(?<![A-Za-z0-9])CVE-\d{4}-\d{4,}(?![A-Za-z0-9])", re.IGNORECASE)
+# Below the 0-100 range DigestReviewSelection allows, so a story the floor promotes sorts after
+# every headline the reviewer chose, a zero-scored one included; _entry_rank keeps it a headline.
+FLOOR_REVIEW_SCORE = -1
 
 
 def _ignore_status(_: str) -> None:
@@ -253,12 +264,95 @@ def _judged(entry: DigestEntry) -> dict[str, str]:
 
 
 def _merged_entries(
-    entries: list[DigestEntry], secondary_items: int, same_story: Callable[[DigestEntry, DigestEntry], bool]
-) -> list[DigestEntry]:
+    entries: list[DigestEntry],
+    secondary_items: int,
+    same_story: Callable[[DigestEntry, DigestEntry], bool],
+    *,
+    headline_limit: int | None = None,
+) -> tuple[list[DigestEntry], SecurityFloorPromotion | None]:
+    """Merge repeat coverage, apply the security floor when headline_limit is given, then cap mentions.
+
+    Returns the entries, and what the floor promoted if it had to act. secondary_items caps the
+    candidates the reviewer passed over; headlines the floor demoted were the reviewer's choices and
+    sit outside it, as the ones past the render cap already did before it acted.
+    """
     headlines = [entry for entry in entries if entry.review_score is not None]
     mentions = [entry for entry in entries if entry.review_score is None]
     headlines, mentions = merge_related_entries(headlines, mentions, same_story)
-    return headlines + mentions[:secondary_items]
+    demoted: list[DigestEntry] = []
+    promotion = None
+    if headline_limit is not None:
+        headlines, demoted, mentions, promotion = _with_security_floor(headlines, mentions, headline_limit, secondary_items)
+    return headlines + demoted + mentions[:secondary_items], promotion
+
+
+def _inert(value: str) -> str:
+    """Model-written text made safe to print: the promotion record reaches stdout and the journal.
+
+    JSON escapes only U+0000-U+001F, and the CLI writes with ensure_ascii=False, so a C1 control such
+    as U+009B - which terminals treat as ESC [ - or a bidirectional override would reach the
+    terminal as it is. Same substitution as the progress line, so words do not run together.
+    """
+    return " ".join("".join(character if is_inert(character, keep="") else " " for character in value).split())
+
+
+def _is_cve(entry: DigestEntry) -> bool:
+    item = entry.item
+    return any(CVE_PATTERN.search(text) for text in (item.title, item.summary_zh_tw, item.why_it_matters_zh_tw))
+
+
+def _with_security_floor(
+    headlines: list[DigestEntry], mentions: list[DigestEntry], headline_limit: int, secondary_items: int
+) -> tuple[list[DigestEntry], list[DigestEntry], list[DigestEntry], SecurityFloorPromotion | None]:
+    """Make sure the digest shows at least one security story.
+
+    The reviewer picks headlines on one scale, and on a day of big AI releases security loses: on
+    2026-09-24 thirteen SECURITY candidates reached the reviewer and a Meta Muse 0-day it rated 9 of
+    10 was left out. The reserved reviewer slots only put security in front of the reviewer; this
+    is the floor on what it hands back.
+
+    A security headline satisfies it, and so does a CVE among the mentions that will be shown: a
+    CVE is a one-line fact, and a mention is where it belongs. Otherwise a security story takes the
+    last headline slot, and the headline it displaces becomes a mention. The reviewer's own choice
+    comes first: with DIGEST_MAX_ITEMS above DIGEST_TOP_ITEMS it can select a security story that
+    ranks past the headlines render_digest shows, and promoting a rejected one over it would
+    overrule the reviewer to satisfy a rule it already met. Failing that, the best security
+    mention in reranker order. Headlines past headline_limit become mentions too, which is where
+    render_digest would have put them, so that the promoted story is the last headline shown rather
+    than one the renderer cuts. Both are returned apart from the passed-over mentions, so that they
+    stay outside DIGEST_SECONDARY_ITEMS rather than using up the quota meant for those. A pool with
+    no security story is left alone.
+
+    So is a digest the reviewer chose nothing for. render_digest then falls back to the ranked list
+    for its headlines, and only while no entry carries a review score: promoting one would end the
+    fallback and leave that story as the only headline, with everything else pushed into mentions.
+    """
+    if not headlines:
+        return headlines, [], mentions, None
+    ordered = sorted(headlines, key=_entry_rank, reverse=True)
+    visible, hidden = ordered[:headline_limit], ordered[headline_limit:]
+    if headline_limit <= 0 or any(entry.item.category == RESERVED_CATEGORY for entry in visible):
+        return headlines, [], mentions, None
+    if any(entry.item.category == RESERVED_CATEGORY and _is_cve(entry) for entry in mentions[:secondary_items]):
+        return headlines, [], mentions, None
+    promoted = next((entry for entry in [*hidden, *mentions] if entry.item.category == RESERVED_CATEGORY), None)
+    if promoted is None:
+        return headlines, [], mentions, None
+    kept = visible[: headline_limit - 1]
+    # Only a shown headline counts as displaced: those past the limit were mentions either way.
+    promotion = SecurityFloorPromotion(
+        promoted=_inert(promoted.item.title),
+        source=_inert(promoted.source_name or promoted.source_id or "") or None,
+        displaced=_inert(visible[headline_limit - 1].item.title) if len(visible) == headline_limit else None,
+    )
+    kept_ids = {id(entry) for entry in [*kept, promoted]}
+    demoted = [replace(entry, review_score=None) for entry in ordered if id(entry) not in kept_ids]
+    return (
+        [*kept, replace(promoted, review_score=FLOOR_REVIEW_SCORE)],
+        demoted,
+        [entry for entry in mentions if entry is not promoted],
+        promotion,
+    )
 
 
 def _article_to_deepen_from(entry: DigestEntry) -> str | None:
@@ -858,11 +952,14 @@ def run_pipeline(
 
             try:
                 reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
-                reviewed_entries = _merged_entries(
+                reviewed_entries, security_floor = _merged_entries(
                     reviewed_entries,
                     settings.digest_secondary_items,
                     _story_judge(ollama, settings.digest_merge_judgements, status),
+                    headline_limit=min(settings.digest_max_items, settings.digest_top_items),
                 )
+                if security_floor is not None:
+                    status(f"Security floor: promoted {security_floor.promoted}")
                 reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status)
             finally:
                 _unload_model(ollama, settings.ollama_review_model, status)
@@ -927,6 +1024,7 @@ def run_pipeline(
                 delivery_succeeded=delivery_succeeded if digest_id is not None and not no_deliver else 0,
                 delivery_failed=delivery_failed if digest_id is not None and not no_deliver else 0,
                 delivery_pending=delivery_pending if digest_id is not None and not no_deliver else len(destinations),
+                security_floor=security_floor,
             )
             run_status = result.status
             return result

@@ -12,6 +12,15 @@ class CommandResult(BaseModel):
     status: str = "ok"
 
 
+class SecurityFloorPromotion(BaseModel):
+    """The story the security floor put among the headlines, and the headline it took the place of."""
+
+    promoted: str
+    source: str | None = None
+    # None when the reviewer chose fewer headlines than are shown, so nothing had to make room.
+    displaced: str | None = None
+
+
 class NewsletterRunResult(CommandResult):
     status: Literal["ok", "partial", "no_content", "skipped"]
     discovered: int
@@ -25,6 +34,9 @@ class NewsletterRunResult(CommandResult):
     delivery_failed: int = 0
     delivery_pending: int = 0
     reason: Literal["daily_digest_exists"] | None = None
+    # Set only when the digest needed the floor, so an ordinary run's output is unchanged. The run's
+    # progress messages are dropped without a terminal, so for a scheduled run this is the record.
+    security_floor: SecurityFloorPromotion | None = None
 
 
 class NewsletterRetryResult(CommandResult):
