@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -25,6 +26,7 @@ from .command_models import (
 from .config import GmailSource, HackerNewsSource, Settings, SourceConfig, load_sources
 from .digest import (
     DigestEntry,
+    _entry_rank,
     canonical_url,
     dedupe_entries,
     merge_related_entries,
@@ -40,8 +42,10 @@ from .storage import Database
 from .url_enrichment import UrlEnricher, resolve_match
 
 StatusReporter = Callable[[str], None]
-# The category whose reviewer slots are reserved by DIGEST_SECURITY_CANDIDATE_SLOTS.
+# The category whose reviewer slots are reserved by DIGEST_SECURITY_CANDIDATE_SLOTS, and whose
+# stories _with_security_floor keeps in every digest that has one to show.
 RESERVED_CATEGORY = "SECURITY"
+CVE_PATTERN = re.compile(r"\bCVE-\d{4}-\d{4,}\b", re.IGNORECASE)
 
 
 def _ignore_status(_: str) -> None:
@@ -253,12 +257,56 @@ def _judged(entry: DigestEntry) -> dict[str, str]:
 
 
 def _merged_entries(
-    entries: list[DigestEntry], secondary_items: int, same_story: Callable[[DigestEntry, DigestEntry], bool]
+    entries: list[DigestEntry],
+    secondary_items: int,
+    same_story: Callable[[DigestEntry, DigestEntry], bool],
+    *,
+    headline_limit: int | None = None,
 ) -> list[DigestEntry]:
+    """Merge repeat coverage, apply the security floor when headline_limit is given, then cap mentions."""
     headlines = [entry for entry in entries if entry.review_score is not None]
     mentions = [entry for entry in entries if entry.review_score is None]
     headlines, mentions = merge_related_entries(headlines, mentions, same_story)
+    if headline_limit is not None:
+        headlines, mentions = _with_security_floor(headlines, mentions, headline_limit, secondary_items)
     return headlines + mentions[:secondary_items]
+
+
+def _is_cve(entry: DigestEntry) -> bool:
+    item = entry.item
+    return any(CVE_PATTERN.search(text) for text in (item.title, item.summary_zh_tw, item.why_it_matters_zh_tw))
+
+
+def _with_security_floor(
+    headlines: list[DigestEntry], mentions: list[DigestEntry], headline_limit: int, secondary_items: int
+) -> tuple[list[DigestEntry], list[DigestEntry]]:
+    """Make sure the digest shows at least one security story.
+
+    The reviewer picks headlines on one scale, and on a day of big AI releases security loses: on
+    2026-09-24 thirteen SECURITY candidates reached the reviewer and a Meta Muse 0-day it rated 9 of
+    10 was left out. The reserved reviewer slots only put security in front of the reviewer; this
+    is the floor on what it hands back.
+
+    A security headline satisfies it, and so does a CVE among the mentions that will be shown: a
+    CVE is a one-line fact, and a mention is where it belongs. Otherwise the best security mention,
+    in reranker order, takes the last headline slot, and the headline it displaces heads the
+    mentions. Headlines past headline_limit move to the mentions too, which is where render_digest
+    would have put them, so that the promoted story is the last headline shown rather than one the
+    renderer cuts. A pool with no security story is left alone.
+    """
+    visible = sorted(headlines, key=_entry_rank, reverse=True)[:headline_limit]
+    if headline_limit <= 0 or any(entry.item.category == RESERVED_CATEGORY for entry in visible):
+        return headlines, mentions
+    if any(entry.item.category == RESERVED_CATEGORY and _is_cve(entry) for entry in mentions[:secondary_items]):
+        return headlines, mentions
+    promoted = next((entry for entry in mentions if entry.item.category == RESERVED_CATEGORY), None)
+    if promoted is None:
+        return headlines, mentions
+    kept = visible[: headline_limit - 1]
+    kept_ids = {id(entry) for entry in kept}
+    displaced = [replace(entry, review_score=None) for entry in headlines if id(entry) not in kept_ids]
+    # A score of 0 sorts below every reviewed headline, so the floor never outranks the reviewer.
+    return [*kept, replace(promoted, review_score=0)], [*displaced, *(entry for entry in mentions if entry is not promoted)]
 
 
 def _article_to_deepen_from(entry: DigestEntry) -> str | None:
@@ -862,6 +910,7 @@ def run_pipeline(
                     reviewed_entries,
                     settings.digest_secondary_items,
                     _story_judge(ollama, settings.digest_merge_judgements, status),
+                    headline_limit=min(settings.digest_max_items, settings.digest_top_items),
                 )
                 reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status)
             finally:

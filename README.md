@@ -247,6 +247,13 @@ global top 20, with named CVEs at ranks 35 and 43 — and prompt wording that li
 and tooling stories by as much. Splitting the slots keeps both. Either group takes the other's
 unused slots, so a quiet security day costs nothing.
 
+The reserved slots only put security in front of the reviewer, so its choice has a floor as well.
+When none of the headlines it picked is a `SECURITY` story and no CVE is among the mentions that
+will be shown, the best security candidate it passed over takes the last headline slot, and the
+headline it displaces moves to the top of the mentions. A CVE counts from the mention list because
+it is a one-line fact; any other security story needs a headline. A day with no security candidates
+is left alone.
+
 Every reranked candidate is recorded in the append-only `reranker_scores` table with the model,
 prompt version, and timestamp. Scores are stored exactly as the model produced them rather than
 normalized, and the table carries no foreign key to `items` so the history survives reprocessing,

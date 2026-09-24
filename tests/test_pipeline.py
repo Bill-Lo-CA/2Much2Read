@@ -32,6 +32,7 @@ from two_much_two_read.ollama import OllamaSchemaError
 from two_much_two_read.pipeline import deliver_digest, run_pipeline
 from two_much_two_read.schemas import (
     ArticleAnalysis,
+    DigestCategory,
     DigestItem,
     EmailExtraction,
     ExtractedEmailContent,
@@ -2625,3 +2626,71 @@ def test_gmail_source_cursor_is_saved_before_source_processing_can_fail(tmp_path
     run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 25, 12, tzinfo=UTC))
 
     assert extracted == ["source-1", "source-2"]
+
+
+def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # The floor lives in _merged_entries only when the pipeline passes it a headline limit; this is
+    # the check that the scheduled run does.
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "digest.lock",
+        digest_max_items=1,
+        digest_top_items=1,
+    )
+    body = urlsafe_b64encode(b"Two stories").decode().rstrip("=")
+    gmail = StubGmailClient(
+        ["gmail-1"],
+        {
+            "gmail-1": {
+                "threadId": "thread-1",
+                "internalDate": "1784786400000",
+                "payload": {
+                    "headers": [{"name": "Subject", "value": "Newsletter"}, {"name": "From", "value": "news@example.com"}],
+                    "mimeType": "text/plain",
+                    "body": {"data": body},
+                },
+            }
+        },
+    )
+
+    def story(title: str, category: DigestCategory) -> NewsletterItemAnalysis:
+        return NewsletterItemAnalysis(
+            title=title,
+            source_title=title,
+            category=category,
+            summary_zh_tw="摘要",
+            why_it_matters_zh_tw="原因",
+            importance=8,
+            confidence=0.9,
+        )
+
+    ollama = StubOllamaClient(
+        EmailExtraction(
+            source_id="alphasignal",
+            newsletter_title="Newsletter",
+            newsletter_date=None,
+            overview_zh_tw="摘要",
+            items=[story("Opus 5.5", "AI_MODEL"), story("Muse 0-day", "SECURITY")],
+        )
+    )
+
+    def reviewer_that_skips_security(_settings: Settings, _ollama: object, entries: list[DigestEntry]) -> list[DigestEntry]:
+        chosen = [replace(entry, review_score=90) for entry in entries if entry.item.category != "SECURITY"]
+        return chosen + [entry for entry in entries if entry.item.category == "SECURITY"]
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
+    monkeypatch.setattr(pipeline, "_reviewed_entries", reviewer_that_skips_security)
+
+    run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, tzinfo=UTC))
+
+    database = Database(settings.database_path)
+    content = str(database.connection.execute("SELECT rendered_content FROM digests").fetchone()[0])
+    database.close()
+    top, rest = content.split("🧰")
+    assert "1. Muse 0-day" in top
+    assert "Opus 5.5" in rest

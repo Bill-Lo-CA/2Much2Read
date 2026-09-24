@@ -5,12 +5,13 @@ import sys
 import types
 from collections.abc import Sequence
 from dataclasses import replace
+from datetime import datetime
 
 import pytest
 
 from two_much_two_read import pipeline
 from two_much_two_read.config import Settings
-from two_much_two_read.digest import DigestEntry
+from two_much_two_read.digest import DigestEntry, render_digest
 from two_much_two_read.reranker import (
     RERANK_INSTRUCTION,
     RERANK_QUERY,
@@ -266,3 +267,98 @@ def test_secondary_mentions_can_be_turned_off() -> None:
     reviewed = pipeline._reviewed_entries(settings, FakeOllama(), ranked)
 
     assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 0, never_the_same)] == [1]
+
+
+def _digest(headlines: Sequence[tuple[str, DigestCategory]], mentions: Sequence[tuple[str, DigestCategory]]) -> list[DigestEntry]:
+    """Reviewed headlines scored 90, 80, ... and passed-over mentions in falling reranker order."""
+    reviewed = [
+        replace(entry(index, title, "TLDR", category), review_score=90 - 10 * index, reranker_score=0.9)
+        for index, (title, category) in enumerate(headlines)
+    ]
+    passed_over = [
+        replace(entry(100 + index, title, "TLDR", category), reranker_score=0.5 - 0.01 * index)
+        for index, (title, category) in enumerate(mentions)
+    ]
+    return reviewed + passed_over
+
+
+def _floored(entries: list[DigestEntry], headline_limit: int, secondary_items: int = 10) -> tuple[list[str], list[str]]:
+    result = pipeline._merged_entries(entries, secondary_items, never_the_same, headline_limit=headline_limit)
+    return (
+        [value.item.title for value in result if value.review_score is not None],
+        [value.item.title for value in result if value.review_score is None],
+    )
+
+
+def test_a_digest_without_security_headlines_promotes_the_best_security_mention() -> None:
+    # 2026-09-24: thirteen SECURITY candidates reached the reviewer and it chose none of the ones
+    # that mattered, a 0-day it had itself rated 9 of 10 among them.
+    entries = _digest(
+        [("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL"), ("Qwen image", "AI_MODEL")],
+        [("Rune IDE", "DEV_TOOL"), ("Muse 0-day", "SECURITY"), ("Clop leak site", "SECURITY")],
+    )
+
+    headlines, mentions = _floored(entries, headline_limit=3)
+
+    assert headlines == ["Opus 5.5", "GPT-6", "Muse 0-day"]
+    assert mentions == ["Qwen image", "Rune IDE", "Clop leak site"]
+
+
+def test_the_promoted_story_renders_as_the_last_headline() -> None:
+    entries = _digest(
+        [("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL")],
+        [("Rune IDE", "DEV_TOOL"), ("Muse 0-day", "SECURITY")],
+    )
+
+    content = render_digest(
+        pipeline._merged_entries(entries, 10, never_the_same, headline_limit=2), datetime(2026, 9, 24), "AI", "TLDR", 2
+    )
+
+    top, rest = content.split("🧰")
+    assert "1. Opus 5.5" in top
+    assert "2. Muse 0-day" in top
+    assert "GPT-6" in rest
+
+
+def test_a_security_headline_already_satisfies_the_floor() -> None:
+    entries = _digest([("Opus 5.5", "AI_MODEL"), ("Docker escape", "SECURITY")], [("Muse 0-day", "SECURITY")])
+
+    assert _floored(entries, headline_limit=2) == (["Opus 5.5", "Docker escape"], ["Muse 0-day"])
+
+
+def test_a_cve_among_the_shown_mentions_satisfies_the_floor() -> None:
+    # A CVE is a one-line fact, so a mention is where it belongs.
+    entries = _digest(
+        [("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL")],
+        [("Docker patches CVE-2026-77179", "SECURITY"), ("Muse 0-day", "SECURITY")],
+    )
+
+    assert _floored(entries, headline_limit=2) == (
+        ["Opus 5.5", "GPT-6"],
+        ["Docker patches CVE-2026-77179", "Muse 0-day"],
+    )
+
+
+def test_a_cve_the_mention_cap_cuts_does_not_count() -> None:
+    entries = _digest(
+        [("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL")],
+        [("Rune IDE", "DEV_TOOL"), ("Docker patches CVE-2026-77179", "SECURITY")],
+    )
+
+    headlines, mentions = _floored(entries, headline_limit=2, secondary_items=1)
+
+    # Promoted from beyond the cap: the floor looks at every passed-over candidate, not only the shown ones.
+    assert headlines == ["Opus 5.5", "Docker patches CVE-2026-77179"]
+    assert mentions == ["GPT-6"]
+
+
+def test_a_short_headline_list_gains_the_security_story_without_losing_one() -> None:
+    entries = _digest([("Opus 5.5", "AI_MODEL")], [("Rune IDE", "DEV_TOOL"), ("Muse 0-day", "SECURITY")])
+
+    assert _floored(entries, headline_limit=3) == (["Opus 5.5", "Muse 0-day"], ["Rune IDE"])
+
+
+def test_a_pool_without_security_is_left_alone() -> None:
+    entries = _digest([("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL")], [("Rune IDE", "DEV_TOOL")])
+
+    assert _floored(entries, headline_limit=2) == (["Opus 5.5", "GPT-6"], ["Rune IDE"])
