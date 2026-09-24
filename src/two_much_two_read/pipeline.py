@@ -283,6 +283,16 @@ def _merged_entries(
     return headlines + mentions[:secondary_items], promotion
 
 
+def _inert(value: str) -> str:
+    """Model-written text made safe to print: the promotion record reaches stdout and the journal.
+
+    JSON escapes only U+0000-U+001F, and the CLI writes with ensure_ascii=False, so a C1 control such
+    as U+009B - which terminals treat as ESC [ - or a bidirectional override would reach the
+    terminal as it is. Same substitution as the progress line, so words do not run together.
+    """
+    return " ".join("".join(character if is_inert(character, keep="") else " " for character in value).split())
+
+
 def _is_cve(entry: DigestEntry) -> bool:
     item = entry.item
     return any(CVE_PATTERN.search(text) for text in (item.title, item.summary_zh_tw, item.why_it_matters_zh_tw))
@@ -307,7 +317,13 @@ def _with_security_floor(
     mention in reranker order. Headlines past headline_limit move to the mentions too, which is
     where render_digest would have put them, so that the promoted story is the last headline shown
     rather than one the renderer cuts. A pool with no security story is left alone.
+
+    So is a digest the reviewer chose nothing for. render_digest then falls back to the ranked list
+    for its headlines, and only while no entry carries a review score: promoting one would end the
+    fallback and leave that story as the only headline, with everything else pushed into mentions.
     """
+    if not headlines:
+        return headlines, mentions, None
     ordered = sorted(headlines, key=_entry_rank, reverse=True)
     visible, hidden = ordered[:headline_limit], ordered[headline_limit:]
     if headline_limit <= 0 or any(entry.item.category == RESERVED_CATEGORY for entry in visible):
@@ -320,9 +336,9 @@ def _with_security_floor(
     kept = visible[: headline_limit - 1]
     # Only a shown headline counts as displaced: those past the limit were mentions either way.
     promotion = SecurityFloorPromotion(
-        promoted=promoted.item.title,
-        source=promoted.source_name or promoted.source_id,
-        displaced=visible[headline_limit - 1].item.title if len(visible) == headline_limit else None,
+        promoted=_inert(promoted.item.title),
+        source=_inert(promoted.source_name or promoted.source_id or "") or None,
+        displaced=_inert(visible[headline_limit - 1].item.title) if len(visible) == headline_limit else None,
     )
     kept_ids = {id(entry) for entry in [*kept, promoted]}
     displaced = [replace(entry, review_score=None) for entry in ordered if id(entry) not in kept_ids]

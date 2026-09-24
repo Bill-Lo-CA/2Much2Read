@@ -464,3 +464,33 @@ def test_a_floor_that_did_not_act_reports_nothing(
     _, promotion = pipeline._merged_entries(_digest(headlines, mentions), 10, never_the_same, headline_limit=1)
 
     assert promotion is None
+
+
+def test_a_digest_the_reviewer_chose_nothing_for_keeps_its_ranked_headlines() -> None:
+    # render_digest falls back to the ranked list while no entry has a review score. Promoting one
+    # ended that fallback: three headlines became one, and the other two were pushed into mentions.
+    entries = _digest([], [("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL"), ("Rune IDE", "DEV_TOOL"), ("Muse 0-day", "SECURITY")])
+
+    merged, promotion = pipeline._merged_entries(entries, 10, never_the_same, headline_limit=3)
+    content = render_digest(merged, datetime(2026, 9, 24), "AI", "TLDR", 3)
+
+    top = content.split("🧰")[0]
+    assert [line.split(" ", 1)[1] for line in top.splitlines() if line[:2] in ("1.", "2.", "3.")] == [
+        "Opus 5.5",
+        "GPT-6",
+        "Rune IDE",
+    ]
+    assert promotion is None
+
+
+def test_the_promotion_record_carries_no_terminal_controls() -> None:
+    # The record is printed as JSON with ensure_ascii=False, which escapes only U+0000-U+001F.
+    # U+009B is the C1 CSI and U+202E reverses the text after it.
+    entries = [
+        replace(entry(1, "Opus 5.5", "TLDR"), review_score=90, reranker_score=0.9),
+        replace(entry(2, "Muse\x9b2J 0-day‮", "Risky\x9bBiz", "SECURITY"), reranker_score=0.5),
+    ]
+
+    _, promotion = pipeline._merged_entries(entries, 10, never_the_same, headline_limit=1)
+
+    assert promotion == SecurityFloorPromotion(promoted="Muse 2J 0-day", source="Risky Biz", displaced="Opus 5.5")
