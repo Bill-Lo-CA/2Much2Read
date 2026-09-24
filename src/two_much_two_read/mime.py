@@ -3,9 +3,11 @@ from __future__ import annotations
 import base64
 import binascii
 import re
+from collections.abc import Callable
 from email import policy
 from email.message import Message
 from email.parser import BytesParser
+from functools import partial
 from typing import Literal
 from urllib.parse import urlsplit, urlunsplit
 
@@ -21,6 +23,7 @@ MAX_PLAIN_BYTES = 2 * 1024 * 1024
 MAX_HTML_BYTES = 2 * 1024 * 1024
 MAX_ANALYSIS_CHARS = 45_000
 MAX_LINK_CANDIDATES = 200
+MAX_LINK_OCCURRENCES = 2_000
 
 FOOTER_LINE_PATTERN = re.compile(
     r"^(?:unsubscribe|manage preferences|privacy policy|取消訂閱)(?:\s*[|·/]\s*"
@@ -112,15 +115,33 @@ def _plain_context(text: str, position: int, raw_url: str) -> str:
 
 
 def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
+    """The links an email offers, in document order, for matching its items to their articles.
+
+    Two bounds, and neither fails the email. MAX_LINK_OCCURRENCES caps the work: every link the
+    scan meets counts, repeats included, so a thousand copies of one anchor cost what a thousand
+    distinct ones would. MAX_LINK_CANDIDATES caps what is kept. Reaching either ends the scan and
+    keeps what came first, which in a newsletter is the stories, with the footer last.
+
+    One counter used to do both jobs and raised when it passed 200. Link-dense issues repeat each
+    link in the HTML and the plain part, so they crossed it on repeats alone and the whole email
+    failed - AINews lost 11 of 25 issues that way - when the cost of a cut is only that items
+    further down match no link.
+    """
     candidates: list[LinkCandidate] = []
     seen: set[str] = set()
-    processed = 0
+    scanned = 0
 
-    def add(raw_url: str, anchor_text: str, nearby_text: str, kind: Literal["article", "unknown"] = "article") -> None:
-        nonlocal processed
-        processed += 1
-        if processed > MAX_LINK_CANDIDATES:
-            raise EmailExtractionError("email contains too many link candidates", "EMAIL_TOO_MANY_LINKS")
+    def full() -> bool:
+        return scanned >= MAX_LINK_OCCURRENCES or len(candidates) >= MAX_LINK_CANDIDATES
+
+    def add(
+        raw_url: str, anchor_text: str, nearby_text: str | Callable[[], str], kind: Literal["article", "unknown"] = "article"
+    ) -> None:
+        # An anchor's nearby_text comes as a callable, because it walks back through the document for
+        # a heading and only the links that are kept should pay for that. A plain-text link's is one
+        # line, cheap enough to take either way.
+        nonlocal scanned
+        scanned += 1
         safe_url = _safe_url(raw_url)
         if safe_url is None or safe_url in seen:
             return
@@ -136,20 +157,30 @@ def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
                 candidate_id=f"link-{len(candidates) + 1:04d}",
                 raw_url=validated_url,
                 anchor_text=anchor_text,
-                nearby_text=nearby_text,
+                nearby_text=nearby_text if isinstance(nearby_text, str) else nearby_text(),
                 position=len(candidates),
                 kind=kind,
             )
         )
 
-    for anchor in _visible_soup(html).find_all("a", limit=MAX_LINK_CANDIDATES + 1):
+    for anchor in _visible_soup(html).find_all("a", limit=MAX_LINK_OCCURRENCES):
+        if full():
+            return candidates
         anchor_text = anchor.get_text(" ", strip=True)
-        nearby_text = _nearby_text(anchor)
-        add(str(anchor.get("href", "")), anchor_text, nearby_text, "article" if anchor_text else "unknown")
+        add(
+            str(anchor.get("href", "")),
+            anchor_text,
+            partial(_nearby_text, anchor),
+            "article" if anchor_text else "unknown",
+        )
     for match in MARKDOWN_LINK_PATTERN.finditer(plain):
+        if full():
+            return candidates
         raw_url = match.group(2)
         add(raw_url, match.group(1), _plain_context(plain, match.start(), raw_url))
     for match in URL_PATTERN.finditer(plain):
+        if full():
+            return candidates
         matched_url = match.group()
         raw_url = matched_url.rstrip(".,;:!?]}")
         while raw_url.endswith(")") and raw_url.count("(") < raw_url.count(")"):
