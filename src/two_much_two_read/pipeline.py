@@ -49,7 +49,7 @@ RESERVED_CATEGORY = "SECURITY"
 # Bounded by ASCII letters and digits rather than \b: Python counts CJK as word characters, so \b
 # finds no boundary in 修復CVE-2026-77179漏洞, and 10 of the 23 CVE items in the live database are
 # written that way.
-CVE_PATTERN = re.compile(r"(?<![A-Za-z0-9])CVE-\d{4}-\d{4,}(?![0-9])", re.IGNORECASE)
+CVE_PATTERN = re.compile(r"(?<![A-Za-z0-9])CVE-\d{4}-\d{4,}(?![A-Za-z0-9])", re.IGNORECASE)
 # Below the 0-100 range DigestReviewSelection allows, so a story the floor promotes sorts after
 # every headline the reviewer chose, a zero-scored one included; _entry_rank keeps it a headline.
 FLOOR_REVIEW_SCORE = -1

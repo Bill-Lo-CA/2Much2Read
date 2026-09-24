@@ -423,8 +423,10 @@ def test_a_cve_is_recognised_however_the_summary_spaces_it(summary: str) -> None
     assert pipeline._is_cve(cve)
 
 
-def test_a_cve_like_token_inside_another_word_is_not_a_cve() -> None:
-    lookalike = entry(1, "XCVE-2026-77179 bundle", "TLDR", "SECURITY")
+@pytest.mark.parametrize("title", ["XCVE-2026-77179 bundle", "CVE-2026-77179A patch", "CVE-2026-77179based scanner"])
+def test_a_cve_like_token_inside_another_word_is_not_a_cve(title: str) -> None:
+    # Either side: a lookalike in a shown mention would satisfy the floor and leave no security headline.
+    lookalike = entry(1, title, "TLDR", "SECURITY")
 
     assert not pipeline._is_cve(lookalike)
 
