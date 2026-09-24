@@ -10,6 +10,7 @@ from datetime import datetime
 import pytest
 
 from two_much_two_read import pipeline
+from two_much_two_read.command_models import SecurityFloorPromotion
 from two_much_two_read.config import Settings
 from two_much_two_read.digest import DigestEntry, render_digest
 from two_much_two_read.reranker import (
@@ -251,7 +252,7 @@ def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None
         (4, None),
         (5, None),
     ]
-    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 2, never_the_same)] == [1, 2, 3]
+    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 2, never_the_same)[0]] == [1, 2, 3]
 
 
 def test_secondary_mentions_can_be_turned_off() -> None:
@@ -266,7 +267,7 @@ def test_secondary_mentions_can_be_turned_off() -> None:
     ranked = [entry(index, f"Story {index}", "TLDR AI") for index in range(1, 4)]
     reviewed = pipeline._reviewed_entries(settings, FakeOllama(), ranked)
 
-    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 0, never_the_same)] == [1]
+    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 0, never_the_same)[0]] == [1]
 
 
 def _digest(headlines: Sequence[tuple[str, DigestCategory]], mentions: Sequence[tuple[str, DigestCategory]]) -> list[DigestEntry]:
@@ -283,7 +284,7 @@ def _digest(headlines: Sequence[tuple[str, DigestCategory]], mentions: Sequence[
 
 
 def _floored(entries: list[DigestEntry], headline_limit: int, secondary_items: int = 10) -> tuple[list[str], list[str]]:
-    result = pipeline._merged_entries(entries, secondary_items, never_the_same, headline_limit=headline_limit)
+    result, _ = pipeline._merged_entries(entries, secondary_items, never_the_same, headline_limit=headline_limit)
     return (
         [value.item.title for value in result if value.review_score is not None],
         [value.item.title for value in result if value.review_score is None],
@@ -311,7 +312,7 @@ def test_the_promoted_story_renders_as_the_last_headline() -> None:
     )
 
     content = render_digest(
-        pipeline._merged_entries(entries, 10, never_the_same, headline_limit=2), datetime(2026, 9, 24), "AI", "TLDR", 2
+        pipeline._merged_entries(entries, 10, never_the_same, headline_limit=2)[0], datetime(2026, 9, 24), "AI", "TLDR", 2
     )
 
     top, rest = content.split("🧰")
@@ -398,7 +399,7 @@ def test_the_promoted_story_renders_after_a_headline_the_reviewer_scored_zero() 
     ]
 
     content = render_digest(
-        pipeline._merged_entries(entries, 10, never_the_same, headline_limit=3), datetime(2026, 9, 24), "AI", "TLDR", 3
+        pipeline._merged_entries(entries, 10, never_the_same, headline_limit=3)[0], datetime(2026, 9, 24), "AI", "TLDR", 3
     )
 
     top, rest = content.split("🧰")
@@ -426,3 +427,38 @@ def test_a_cve_like_token_inside_another_word_is_not_a_cve() -> None:
     lookalike = entry(1, "XCVE-2026-77179 bundle", "TLDR", "SECURITY")
 
     assert not pipeline._is_cve(lookalike)
+
+
+def test_the_floor_reports_what_it_promoted_and_what_made_room() -> None:
+    entries = _digest(
+        [("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL")],
+        [("Rune IDE", "DEV_TOOL"), ("Muse 0-day", "SECURITY")],
+    )
+
+    _, promotion = pipeline._merged_entries(entries, 10, never_the_same, headline_limit=2)
+
+    assert promotion == SecurityFloorPromotion(promoted="Muse 0-day", source="TLDR", displaced="GPT-6")
+
+
+def test_a_floor_that_only_filled_an_empty_slot_displaced_nothing() -> None:
+    entries = _digest([("Opus 5.5", "AI_MODEL")], [("Muse 0-day", "SECURITY")])
+
+    _, promotion = pipeline._merged_entries(entries, 10, never_the_same, headline_limit=3)
+
+    assert promotion == SecurityFloorPromotion(promoted="Muse 0-day", source="TLDR", displaced=None)
+
+
+@pytest.mark.parametrize(
+    ("headlines", "mentions"),
+    [
+        ([("Docker escape", "SECURITY")], [("Muse 0-day", "SECURITY")]),
+        ([("Opus 5.5", "AI_MODEL")], [("Docker patches CVE-2026-77179", "SECURITY")]),
+        ([("Opus 5.5", "AI_MODEL")], [("Rune IDE", "DEV_TOOL")]),
+    ],
+)
+def test_a_floor_that_did_not_act_reports_nothing(
+    headlines: list[tuple[str, DigestCategory]], mentions: list[tuple[str, DigestCategory]]
+) -> None:
+    _, promotion = pipeline._merged_entries(_digest(headlines, mentions), 10, never_the_same, headline_limit=1)
+
+    assert promotion is None

@@ -22,6 +22,7 @@ from .command_models import (
     MaintenancePruneResult,
     NewsletterRetryResult,
     NewsletterRunResult,
+    SecurityFloorPromotion,
 )
 from .config import GmailSource, HackerNewsSource, Settings, SourceConfig, load_sources
 from .digest import (
@@ -268,14 +269,18 @@ def _merged_entries(
     same_story: Callable[[DigestEntry, DigestEntry], bool],
     *,
     headline_limit: int | None = None,
-) -> list[DigestEntry]:
-    """Merge repeat coverage, apply the security floor when headline_limit is given, then cap mentions."""
+) -> tuple[list[DigestEntry], SecurityFloorPromotion | None]:
+    """Merge repeat coverage, apply the security floor when headline_limit is given, then cap mentions.
+
+    Returns the entries, and what the floor promoted if it had to act.
+    """
     headlines = [entry for entry in entries if entry.review_score is not None]
     mentions = [entry for entry in entries if entry.review_score is None]
     headlines, mentions = merge_related_entries(headlines, mentions, same_story)
+    promotion = None
     if headline_limit is not None:
-        headlines, mentions = _with_security_floor(headlines, mentions, headline_limit, secondary_items)
-    return headlines + mentions[:secondary_items]
+        headlines, mentions, promotion = _with_security_floor(headlines, mentions, headline_limit, secondary_items)
+    return headlines + mentions[:secondary_items], promotion
 
 
 def _is_cve(entry: DigestEntry) -> bool:
@@ -285,7 +290,7 @@ def _is_cve(entry: DigestEntry) -> bool:
 
 def _with_security_floor(
     headlines: list[DigestEntry], mentions: list[DigestEntry], headline_limit: int, secondary_items: int
-) -> tuple[list[DigestEntry], list[DigestEntry]]:
+) -> tuple[list[DigestEntry], list[DigestEntry], SecurityFloorPromotion | None]:
     """Make sure the digest shows at least one security story.
 
     The reviewer picks headlines on one scale, and on a day of big AI releases security loses: on
@@ -306,19 +311,26 @@ def _with_security_floor(
     ordered = sorted(headlines, key=_entry_rank, reverse=True)
     visible, hidden = ordered[:headline_limit], ordered[headline_limit:]
     if headline_limit <= 0 or any(entry.item.category == RESERVED_CATEGORY for entry in visible):
-        return headlines, mentions
+        return headlines, mentions, None
     if any(entry.item.category == RESERVED_CATEGORY and _is_cve(entry) for entry in mentions[:secondary_items]):
-        return headlines, mentions
+        return headlines, mentions, None
     promoted = next((entry for entry in [*hidden, *mentions] if entry.item.category == RESERVED_CATEGORY), None)
     if promoted is None:
-        return headlines, mentions
+        return headlines, mentions, None
     kept = visible[: headline_limit - 1]
+    # Only a shown headline counts as displaced: those past the limit were mentions either way.
+    promotion = SecurityFloorPromotion(
+        promoted=promoted.item.title,
+        source=promoted.source_name or promoted.source_id,
+        displaced=visible[headline_limit - 1].item.title if len(visible) == headline_limit else None,
+    )
     kept_ids = {id(entry) for entry in [*kept, promoted]}
     displaced = [replace(entry, review_score=None) for entry in ordered if id(entry) not in kept_ids]
-    return [*kept, replace(promoted, review_score=FLOOR_REVIEW_SCORE)], [
-        *displaced,
-        *(entry for entry in mentions if entry is not promoted),
-    ]
+    return (
+        [*kept, replace(promoted, review_score=FLOOR_REVIEW_SCORE)],
+        [*displaced, *(entry for entry in mentions if entry is not promoted)],
+        promotion,
+    )
 
 
 def _article_to_deepen_from(entry: DigestEntry) -> str | None:
@@ -918,12 +930,14 @@ def run_pipeline(
 
             try:
                 reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
-                reviewed_entries = _merged_entries(
+                reviewed_entries, security_floor = _merged_entries(
                     reviewed_entries,
                     settings.digest_secondary_items,
                     _story_judge(ollama, settings.digest_merge_judgements, status),
                     headline_limit=min(settings.digest_max_items, settings.digest_top_items),
                 )
+                if security_floor is not None:
+                    status(f"Security floor: promoted {security_floor.promoted}")
                 reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status)
             finally:
                 _unload_model(ollama, settings.ollama_review_model, status)
@@ -988,6 +1002,7 @@ def run_pipeline(
                 delivery_succeeded=delivery_succeeded if digest_id is not None and not no_deliver else 0,
                 delivery_failed=delivery_failed if digest_id is not None and not no_deliver else 0,
                 delivery_pending=delivery_pending if digest_id is not None and not no_deliver else len(destinations),
+                security_floor=security_floor,
             )
             run_status = result.status
             return result

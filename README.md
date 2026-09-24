@@ -253,7 +253,10 @@ be shown, a security story takes the last headline slot and the headline it disp
 top of the mentions. One the reviewer selected comes first — with `DIGEST_MAX_ITEMS` above
 `DIGEST_TOP_ITEMS` it can rank past the headlines shown — and otherwise the best one it passed over.
 A CVE counts from the mention list because it is a one-line fact; any other security story needs a
-headline. A day with no security candidates is left alone.
+headline. A day with no security candidates is left alone. When the floor acts, the run's JSON output
+carries `security_floor` with the promoted title, its source, and the headline it displaced, so a
+scheduled run records it in the journal (`journalctl --user -u 2much2read-runtime.service`); the
+field is absent otherwise.
 
 Every reranked candidate is recorded in the append-only `reranker_scores` table with the model,
 prompt version, and timestamp. Scores are stored exactly as the model produced them rather than

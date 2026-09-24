@@ -694,6 +694,7 @@ def test_empty_news_day_records_no_content_run(newsletter_settings: Settings, mo
         "delivery_failed": 0,
         "delivery_pending": 0,
         "reason": None,
+        "security_floor": None,
     }
 
     database = Database(settings.database_path)
@@ -1407,6 +1408,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
         "delivery_failed": 0,
         "delivery_pending": 0,
         "reason": None,
+        "security_floor": None,
     }
     assert gmail.applied_labels == [
         ("bad", "failed"),
@@ -1510,6 +1512,7 @@ def test_mime_failure_marks_one_message_failed_and_continues(
         "delivery_failed": 0,
         "delivery_pending": 0,
         "reason": None,
+        "security_floor": None,
     }
     assert gmail.applied_labels == ([] if dry_run else [("bad", "failed"), ("good", "processed")])
     if dry_run:
@@ -1645,6 +1648,7 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
         "delivery_failed": 0,
         "delivery_pending": 0,
         "reason": None,
+        "security_floor": None,
     }
     assert gmail.applied_labels == [("transient", "processed")]
 
@@ -1681,6 +1685,7 @@ def test_existing_daily_digest_skips_before_gmail_access(tmp_path: Path, monkeyp
         "delivery_failed": 0,
         "delivery_pending": 0,
         "reason": "daily_digest_exists",
+        "security_floor": None,
     }
     database = Database(settings.database_path)
     assert database.connection.execute("SELECT status FROM runs ORDER BY id DESC").fetchone()[0] == "skipped"
@@ -2043,7 +2048,7 @@ def test_only_shortlisted_pairs_reach_the_model() -> None:
     unrelated = judged_entry(2, "Rust 1.94 釋出", "Rust 團隊釋出 1.94 版。")
     related = judged_entry(3, "GPT-5.6 Sol 開放使用", "OpenAI 開放 GPT-5.6 Sol。")
 
-    merged = pipeline._merged_entries([headline, unrelated, related], 10, pipeline._story_judge(ollama, 10, lambda _: None))
+    merged, _ = pipeline._merged_entries([headline, unrelated, related], 10, pipeline._story_judge(ollama, 10, lambda _: None))
 
     assert len(ollama.seen) == 1
     assert [entry.item.title for entry in merged] == ["GPT-5.6 Sol 發表", "Rust 1.94 釋出"]
@@ -2686,7 +2691,7 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
     monkeypatch.setattr(pipeline, "_reviewed_entries", reviewer_that_skips_security)
 
-    run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, tzinfo=UTC))
+    result = run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, tzinfo=UTC))
 
     database = Database(settings.database_path)
     content = str(database.connection.execute("SELECT rendered_content FROM digests").fetchone()[0])
@@ -2694,3 +2699,10 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
     top, rest = content.split("🧰")
     assert "1. Muse 0-day" in top
     assert "Opus 5.5" in rest
+    # Progress messages are dropped without a terminal, so the scheduled run's JSON is the record.
+    assert isinstance(result, NewsletterRunResult)
+    assert result.model_dump(mode="json", exclude_none=True)["security_floor"] == {
+        "promoted": "Muse 0-day",
+        "source": "AlphaSignal",
+        "displaced": "Opus 5.5",
+    }
