@@ -31,7 +31,6 @@ REQUIRED_SANDBOX = {
     "RestrictNamespaces=true",
     "SystemCallArchitectures=native",
     "SystemCallFilter=@system-service",
-    "SystemCallFilter=~@privileged @resources",
 }
 
 CONFIG_ROOT = "%h/.config/2much2read-runtime"
@@ -100,6 +99,23 @@ def test_user_units_declare_no_protectproc(unit: str) -> None:
     service = (UNITS / unit).read_text(encoding="utf-8")
 
     assert "ProtectProc" not in service
+
+
+def test_only_the_model_loading_unit_may_set_cpu_affinity() -> None:
+    """The reranker is PyTorch, and PyTorch calls sched_setaffinity (x86_64 syscall 203) as it loads.
+
+    That call is in @resources. Denying it does not fail the call, it kills the process with
+    SIGSYS: on 2026-09-25 the scheduled run extracted every newsletter, reached the reranker nine
+    minutes in, and dumped core with no digest. systemd-analyze verify accepts either filter, so only
+    loading the model under the unit's sandbox shows it; this keeps the exemption to the one unit
+    that loads a model, and the other three keep denying @resources.
+    """
+    newsletter = (UNITS / "2much2read-runtime.service").read_text(encoding="utf-8").splitlines()
+    assert "SystemCallFilter=~@privileged" in newsletter
+    assert not any("@resources" in line for line in newsletter if line.startswith("SystemCallFilter="))
+
+    for unit in ("2busy1miss-runtime.service", "2busy1miss-runtime-agenda.service", "2bored1made-runtime.service"):
+        assert "SystemCallFilter=~@privileged @resources" in (UNITS / unit).read_text(encoding="utf-8").splitlines()
 
 
 def test_only_the_model_loading_unit_opts_out_of_device_isolation() -> None:
