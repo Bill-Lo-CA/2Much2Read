@@ -335,12 +335,13 @@ def _detected_language(text: str, expected: str) -> str:
 def _wrong_script(value: str, expected: str) -> bool:
     """Whether one field is plainly not written in the expected script.
 
-    Telling Traditional from Simplified needs volume, so detection runs over the joined fields.
-    Script does not, and that difference is what lets one field hide behind another: an English
-    practical-significance field beside a long Chinese summary never moves the aggregate, which
-    reports only the dominant language. Checked per field, it has nowhere to hide. Length-insensitive
-    is the point - "降低延遲。" is far too short to classify as Traditional and still unmistakably CJK,
-    and every one of 476 real items carries CJK in both fields.
+    Telling Traditional from Simplified needs volume, so detection runs over joined fields - an
+    item's two, or a whole answer's. Script does not, and that difference is what lets one field
+    hide behind another: an English practical-significance field beside a long Chinese summary
+    never moves the detected language, which reports only the dominant one. Checked per field, it
+    has nowhere to hide. Length-insensitive is the point - "降低延遲。" is far too short to classify
+    as Traditional and still unmistakably CJK, and every one of 476 real items carries CJK in both
+    fields.
     """
     cjk = len(CJK_PATTERN.findall(value))
     if expected.startswith("zh"):
@@ -359,10 +360,11 @@ def _validate_digest_language(language: str, values: list[str]) -> None:
 def _validate_language_variety(language: str, values: list[str]) -> None:
     """Whether the fields, taken together, are the configured language and not a neighbour of it.
 
-    Traditional against Simplified, or French in an English digest: a whole answer goes one way or
-    the other, and telling them apart needs the volume of every field at once. Fields in the wrong
-    script are left out - they are one field's problem, handled per item - and with none left there
-    is nothing to tell.
+    Traditional against Simplified, or French in an English digest. An answer gone the wrong way as
+    a whole is asked for again in one repair round, cheaper than translating every item; one item
+    gone that way among many right ones leaves the aggregate right, and is caught on its own by
+    _in_other_variety. Fields in the wrong script are left out - they are one field's problem,
+    handled per item - and with none left there is nothing to tell.
     """
     expected = digest_language_code(language)
     in_script = [value for value in values if not _wrong_script(value, expected)]
@@ -374,6 +376,24 @@ def _validate_language_variety(language: str, values: list[str]) -> None:
         raise ValueError(f"could not detect DIGEST_LANGUAGE={language!r}") from error
     if detected != expected:
         raise ValueError(f"model returned {detected!r} for DIGEST_LANGUAGE={language!r}")
+
+
+def _in_other_variety(language: str, item: NewsletterItemAnalysis) -> bool:
+    """Whether the item's summary and significance, read on their own, are a neighbour of the language.
+
+    Script cannot tell them: a Simplified item among Traditional ones, or a French one in an English
+    digest, is in the right script, and the aggregate reports only the dominant language. One item is
+    volume enough - none of 1,896 stored items was misread, nor any of 243 English newsletter
+    paragraphs - and an item too short to tell at all is left as it is.
+    """
+    expected = digest_language_code(language)
+    values = [value for value in (item.summary_zh_tw, item.why_it_matters_zh_tw) if not _wrong_script(value, expected)]
+    if not values:
+        return False
+    try:
+        return _detected_language("\n".join(values), expected) != expected
+    except (LangDetectException, ChineseLangDetectException):
+        return False
 
 
 class OllamaSchemaError(ValueError):
@@ -518,31 +538,36 @@ class OllamaClient:
         One English field used to fail the whole email: the check ran over every field at once, the
         repair round asked for the whole answer again, and a second miss lost every item - two of
         twelve emails in one run, each for a single field. Now the items with a field in the wrong
-        script are translated on their own, and an item whose summary or significance still is not
-        in the digest language is dropped alone. A title may stay as it is: "Claude Opus 5.5" has
-        nothing to translate. The email fails only when no item is left.
+        script, or written in a neighbour of the language, are translated on their own, and an item
+        whose summary or significance still is not in the digest language is dropped alone. A title
+        may stay as it is: "Claude Opus 5.5" has nothing to translate. The email fails only when no
+        item is left.
         """
         expected = digest_language_code(self.digest_language)
-        pending = [
-            index
-            for index, item in enumerate(result.items)
-            if any(_wrong_script(value, expected) for value in (item.title, item.summary_zh_tw, item.why_it_matters_zh_tw))
-        ]
+
+        def outside(item: NewsletterItemAnalysis) -> bool:
+            return (
+                _wrong_script(item.summary_zh_tw, expected)
+                or _wrong_script(item.why_it_matters_zh_tw, expected)
+                or _in_other_variety(self.digest_language, item)
+            )
+
+        pending = [index for index, item in enumerate(result.items) if _wrong_script(item.title, expected) or outside(item)]
         if not pending:
             return result
         translated: dict[int, NewsletterItemAnalysis] = {}
         for index in pending:
             for _ in range(TRANSLATE_ATTEMPTS):
+                # A translation into the neighbouring variety - Simplified for a Traditional digest -
+                # is no translation at all, and is tried again like an untranslated answer.
                 answer = self._translated_items(source_id, {index: result.items[index]}).get(index)
-                if answer is not None and not any(
-                    _wrong_script(value, expected) for value in (answer.summary_zh_tw, answer.why_it_matters_zh_tw)
-                ):
+                if answer is not None and not outside(answer):
                     translated[index] = answer
                     break
         kept: list[NewsletterItemAnalysis] = []
         for index, item in enumerate(result.items):
             item = translated.get(index, item)
-            if _wrong_script(item.summary_zh_tw, expected) or _wrong_script(item.why_it_matters_zh_tw, expected):
+            if outside(item):
                 continue
             kept.append(item)
         dropped = len(result.items) - len(kept)
@@ -610,16 +635,6 @@ class OllamaClient:
                 )
             except ValidationError:
                 continue
-        # A translation into the neighbouring variety - Simplified for a Traditional digest - is no
-        # translation at all. One item is enough to tell: over 300 stored items, none was misread.
-        try:
-            _validate_language_variety(
-                self.digest_language,
-                [value for item in translated.values() for value in (item.summary_zh_tw, item.why_it_matters_zh_tw)],
-            )
-        except ValueError:
-            logger.warning("translation for %s returned the wrong language variety", source_id)
-            return {}
         return translated
 
     def analyze_article(

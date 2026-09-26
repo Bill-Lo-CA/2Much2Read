@@ -852,3 +852,29 @@ def test_items_are_translated_one_at_a_time_and_a_miss_is_tried_again() -> None:
     assert len(result.items) == 2 and result.dropped_for_language == 0
     sent = [json.loads(call.request.content)["messages"][1]["content"] for call in route.calls[1:]]
     assert ['"index": 0' in text and '"index": 1' not in text for text in sent] == [True, False, False]
+
+
+@pytest.mark.parametrize(
+    ("digest_language", "prose", "neighbour", "title"),
+    [("zh-TW", TRADITIONAL_CHINESE, SIMPLIFIED_CHINESE, "模型發布"), ("en", ENGLISH, FRENCH, "Model release")],
+)
+@respx.mock
+def test_one_item_in_a_neighbouring_language_is_translated_though_its_script_is_right(
+    digest_language: str, prose: tuple[str, str, str], neighbour: tuple[str, str, str], title: str
+) -> None:
+    # The script is right and the whole answer reads as the digest language, so only the item alone
+    # shows it is Simplified in a Traditional digest, or French in an English one.
+    right = (title, prose[1], prose[2])
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[
+            _chat(_items_result(right, right, right, (title, neighbour[1], neighbour[2]))),
+            _chat({"items": [{"index": 3, "title": title, "summary": prose[1], "why_it_matters": prose[2]}]}),
+        ]
+    )
+
+    result = OllamaClient(digest_language=digest_language).extract("alphasignal", "News")
+
+    assert [item.summary_zh_tw for item in result.items] == [prose[1]] * 4
+    assert result.dropped_for_language == 0
+    assert route.call_count == 2
+    assert '"index": 3' in json.loads(route.calls[1].request.content)["messages"][1]["content"]
