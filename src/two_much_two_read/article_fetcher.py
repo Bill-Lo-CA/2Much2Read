@@ -34,6 +34,9 @@ PAGE_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
 # shown where the link leads, and it opens in a reader's browser. A missing page (404) or a failing
 # server does not qualify.
 LINK_WITHOUT_PAGE_STATUSES = {401, 403, 429}
+# What a refusal is written in. A server that turns a crawler away with anything else - a zip or an
+# executable - may hand a browser the same download, so that refusal is no link.
+REFUSAL_CONTENT_TYPES = {"", *PAGE_CONTENT_TYPES, "text/plain", "application/json"}
 # HubSpot answers a click-tracking link (/e3t/) with a page that reaches its redirect by script. The
 # next hop is a tracking URL on the same host, which redirects properly; it is read out of the page,
 # never run.
@@ -159,7 +162,7 @@ class ArticleFetcher:
                 continue
             if not 200 <= response.status_code < 300:
                 raise ArticleFetchError("ARTICLE_FETCH_FAILED")
-            content_type = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
+            content_type = _content_type(response)
             if content_type not in {"text/html", "application/xhtml+xml", "text/plain"}:
                 raise ArticleFetchError("ARTICLE_CONTENT_TYPE_UNSUPPORTED")
             return FetchedArticle(requested_url, current.url, content_type, response.body)
@@ -191,11 +194,13 @@ class ArticleFetcher:
                     if not location:
                         raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
                 elif response.status_code in LINK_WITHOUT_PAGE_STATUSES:
+                    if _content_type(response) not in REFUSAL_CONTENT_TYPES:
+                        raise ArticleFetchError("ARTICLE_CONTENT_TYPE_UNSUPPORTED")
                     return ResolvedUrl(requested_url, current.url, None)
                 elif not 200 <= response.status_code < 300:
                     raise ArticleFetchError("ARTICLE_FETCH_FAILED")
                 else:
-                    content_type = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
+                    content_type = _content_type(response)
                     if content_type == "application/pdf":
                         return ResolvedUrl(requested_url, current.url, None)
                     if content_type not in PAGE_CONTENT_TYPES:
@@ -487,6 +492,10 @@ class ArticleFetcher:
             if timeout_deadline is not None:
                 timeout = min(timeout, self._remaining(timeout_deadline))
             connection.sock.settimeout(min(READ_TIMEOUT_SECONDS, timeout))
+
+
+def _content_type(response: ArticleResponse) -> str:
+    return response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
 
 
 def _url_error_code(article_code: str) -> str:

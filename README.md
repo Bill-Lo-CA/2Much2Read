@@ -315,8 +315,9 @@ Besides HTTP redirects this passes HubSpot's click page, which redirects by scri
 read out of the page on the same scheme and host, never run - and a meta refresh of ten seconds or
 less. Every hop is validated like the first request: public addresses only, ports 80 and 443, no
 credentials, at most 2,083 characters and five hops. Once the chain arrives, the destination is the
-link even when its page turns a crawler away (401, 403, 429), is too large to read whole, or is a PDF;
-any other download is refused, so a digest never links an executable or an archive. The link shown
+link even when its page turns a crawler away (401, 403, 429) with a page or plain text, is too large
+to read whole, or is a PDF; any other download is refused, a refusal served as one included, so a
+digest never links an executable or an archive. The link shown
 drops campaign tags and the parameters that carry the subscriber's identity (HubSpot's `_hsenc` and
 `ecid`, Mailchimp's `mc_eid`, and the like), so it does not tell whoever opens it who received the
 email. On one run this took The New Stack and The Batch from no article links to all of them.

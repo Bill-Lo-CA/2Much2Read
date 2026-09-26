@@ -351,6 +351,26 @@ def test_a_destination_that_turns_crawlers_away_is_still_the_link(status: int) -
     assert (resolved.final_url, resolved.canonical_url) == ("https://news.example/story", None)
 
 
+@pytest.mark.parametrize("content_type", ["application/zip", "application/octet-stream", "application/x-msdownload"])
+def test_a_refusal_that_is_a_download_is_no_link(content_type: str) -> None:
+    # A server that turns the crawler away with a file may hand a browser the same file.
+    def response_provider(_: ValidatedURL) -> ArticleResponse:
+        return ArticleResponse(403, {"content-type": content_type}, b"PK")
+
+    with pytest.raises(UrlResolutionError, match="URL_CONTENT_TYPE_UNSUPPORTED"):
+        ArticleFetcher(public_dns, response_provider).resolve_url("https://files.example/setup")
+
+
+@pytest.mark.parametrize("headers", [{}, {"content-type": "text/plain"}, {"content-type": "application/json; charset=utf-8"}])
+def test_a_refusal_in_text_or_without_a_type_is_still_the_link(headers: dict[str, str]) -> None:
+    def response_provider(_: ValidatedURL) -> ArticleResponse:
+        return ArticleResponse(429, headers, b"slow down")
+
+    resolved = ArticleFetcher(public_dns, response_provider).resolve_url("https://news.example/story")
+
+    assert resolved.final_url == "https://news.example/story"
+
+
 @pytest.mark.parametrize(("status", "code"), [(404, "URL_RESOLUTION_FAILED"), (503, "URL_RESOLUTION_FAILED")])
 def test_a_missing_or_failing_destination_is_no_link(status: int, code: str) -> None:
     def response_provider(_: ValidatedURL) -> ArticleResponse:
