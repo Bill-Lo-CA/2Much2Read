@@ -771,12 +771,16 @@ def test_one_field_in_the_wrong_language_costs_that_item_a_translation_not_the_e
 )
 @respx.mock
 def test_an_item_that_stays_outside_the_language_is_dropped_alone(answer: httpx.Response) -> None:
-    respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_chat(_items_result(GOOD, ENGLISH_SUMMARY)), answer])
+    # Both tries fail the same way.
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[_chat(_items_result(GOOD, ENGLISH_SUMMARY)), answer, answer]
+    )
 
     result = OllamaClient().extract("tldr-devops", "News")
 
     assert [item.title for item in result.items] == ["模型發布"]
     assert result.dropped_for_language == 1
+    assert route.call_count == 3
 
 
 @respx.mock
@@ -785,13 +789,9 @@ def test_a_title_is_translated_and_one_that_is_only_names_is_kept() -> None:
         side_effect=[
             _chat(_items_result(("Viggle ships turbo image model", *GOOD[1:]), ("Claude Opus 5.5", *GOOD[1:]))),
             _chat(
-                {
-                    "items": [
-                        {"index": 0, "title": "Viggle 推出 Turbo 影像模型", "summary": GOOD[1], "why_it_matters": GOOD[2]},
-                        {"index": 1, "title": "Claude Opus 5.5 release", "summary": GOOD[1], "why_it_matters": GOOD[2]},
-                    ]
-                }
+                {"items": [{"index": 0, "title": "Viggle 推出 Turbo 影像模型", "summary": GOOD[1], "why_it_matters": GOOD[2]}]}
             ),
+            _chat({"items": [{"index": 1, "title": "Claude Opus 5.5 release", "summary": GOOD[1], "why_it_matters": GOOD[2]}]}),
         ]
     )
 
@@ -816,11 +816,39 @@ def test_an_email_fails_only_when_no_item_can_be_brought_into_the_language() -> 
     english = _items_result(ENGLISH_SUMMARY)
     failed_translation = _chat({"items": [{"index": 0, "title": "t", "summary": "English.", "why_it_matters": "English."}]})
     route = respx.post("http://127.0.0.1:11434/api/chat").mock(
-        side_effect=[_chat(english), failed_translation, _chat(english), failed_translation]
+        side_effect=[
+            _chat(english),
+            failed_translation,
+            failed_translation,
+            _chat(english),
+            failed_translation,
+            failed_translation,
+        ]
     )
 
     with pytest.raises(OllamaSchemaError, match="OLLAMA_LANGUAGE_INVALID"):
         OllamaClient().extract("tldr-devops", "News")
 
     # The first answer earned the repair round; its repeat failed the email.
-    assert route.call_count == 4
+    assert route.call_count == 6
+
+
+@respx.mock
+def test_items_are_translated_one_at_a_time_and_a_miss_is_tried_again() -> None:
+    # Five English items in one request came back untranslated every time; one at a time they did not.
+    second = ("Cloudflare 生命週期", "Cloudflare introduced an Agent Development Lifecycle.", "It replaces ad hoc steps.")
+    translated = {"title": "t", "summary": TRADITIONAL_CHINESE[1], "why_it_matters": TRADITIONAL_CHINESE[2]}
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[
+            _chat(_items_result(ENGLISH_SUMMARY, second)),
+            _chat({"items": [{"index": 0, **translated}]}),
+            _chat({"items": [{"index": 1, "title": "t", "summary": "Still English.", "why_it_matters": "Still English."}]}),
+            _chat({"items": [{"index": 1, **translated}]}),
+        ]
+    )
+
+    result = OllamaClient().extract("tldr-devops", "News")
+
+    assert len(result.items) == 2 and result.dropped_for_language == 0
+    sent = [json.loads(call.request.content)["messages"][1]["content"] for call in route.calls[1:]]
+    assert ['"index": 0' in text and '"index": 1' not in text for text in sent] == [True, False, False]
