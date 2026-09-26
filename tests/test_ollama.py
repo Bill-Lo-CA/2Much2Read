@@ -10,6 +10,7 @@ from two_much_two_read.config import Settings
 from two_much_two_read.digest import digest_language_code
 from two_much_two_read.ollama import (
     OllamaClient,
+    OllamaContextError,
     OllamaSchemaError,
     _language_instruction,
     _ollama_schema,
@@ -550,6 +551,50 @@ def test_a_repair_round_is_refitted_around_the_answer_it_sends_back() -> None:
     assert repair[0]["content"] == first[0]["content"]
     reserved = 10 * ollama.EXTRACT_RESERVED_TOKENS_PER_ITEM + ollama.EXTRACT_RESERVED_OUTPUT_BASE
     assert sum(ollama._estimated_tokens(message["content"]) for message in repair) + reserved <= 16384
+
+
+@respx.mock
+def test_an_extraction_with_no_room_for_the_newsletter_is_refused_not_sent() -> None:
+    # At the smallest supported num_ctx the output reservation alone fills the window; sending the
+    # instructions without the newsletter would come back schema-valid and describe nothing.
+    route = _extraction_route()
+
+    with pytest.raises(OllamaContextError, match="OLLAMA_EXTRACT_NO_ROOM num_ctx=2048"):
+        OllamaClient(num_ctx=2048).extract("alphasignal", "One story", max_items=10)
+
+    assert not route.called
+
+
+@respx.mock
+def test_a_repair_round_with_no_room_left_is_refused_not_sent() -> None:
+    invalid = valid_result()
+    invalid["items"][0]["confidence"] = 9  # type: ignore[index]
+    invalid["overview_zh_tw"] = "摘要" * 8_000
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": json.dumps(invalid, ensure_ascii=False)}})
+    )
+
+    with pytest.raises(OllamaContextError, match="OLLAMA_EXTRACT_NO_ROOM .*attempt=2"):
+        OllamaClient(num_ctx=16384).extract("alphasignal", "One story", max_items=10)
+
+    assert route.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "measured"),
+    [
+        # Token counts from the Qwen3 tokenizer, which these rates have to stay above.
+        ("오픈AI는 새로운 모델을 발표했으며 이는 코드 생성과 추론 능력을 크게 향상시켰다고 밝혔다. " * 5, 177),
+        ("こんにちは。これはテストです。アップデートがリリースされました。" * 5, 70),
+        ("🔥🚀✅🔁📌💡🧠⚠️🎉👉👨‍👩‍👧" * 5, 90),
+        ("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" * 20, 1180),
+    ],
+    ids=["hangul", "kana", "emoji", "hex"],
+)
+def test_the_estimate_stays_above_scripts_that_tokenise_densely(text: str, measured: int) -> None:
+    # Charging these at the English rate let a Korean newsletter keep twice the tokens the
+    # budget allowed, and an overflow drops the system prompt rather than the tail.
+    assert ollama._estimated_tokens(text) >= measured
 
 
 @respx.mock

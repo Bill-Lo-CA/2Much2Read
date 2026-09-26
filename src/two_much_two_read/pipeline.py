@@ -619,7 +619,7 @@ def _process_source(
         status(f"{source.id}: extracting {subject}")
         try:
             extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
-        except OllamaSchemaError as error:
+        except (OllamaContextError, OllamaSchemaError) as error:
             reason = str(error).split(" response_preview=", 1)[0]
             database.fail_document(document_id, reason)
             failed += 1

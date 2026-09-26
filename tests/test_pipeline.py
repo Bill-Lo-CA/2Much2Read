@@ -28,7 +28,7 @@ from two_much_two_read.hackernews import (
     ResolvedHackerNewsContent,
 )
 from two_much_two_read.mime import EmailExtractionError, extract_gmail_payload
-from two_much_two_read.ollama import OllamaSchemaError
+from two_much_two_read.ollama import OllamaContextError, OllamaSchemaError
 from two_much_two_read.pipeline import deliver_digest, run_pipeline
 from two_much_two_read.schemas import (
     ArticleAnalysis,
@@ -1335,7 +1335,23 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
     assert result.processed == 3
 
 
-def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("error", "reason"),
+    [
+        (
+            OllamaSchemaError("OLLAMA_SCHEMA_INVALID error='missing category' response_preview='newsletter body'"),
+            "OLLAMA_SCHEMA_INVALID error='missing category'",
+        ),
+        (
+            OllamaContextError("OLLAMA_EXTRACT_NO_ROOM num_ctx=2048 source='alphasignal'"),
+            "OLLAMA_EXTRACT_NO_ROOM num_ctx=2048 source='alphasignal'",
+        ),
+    ],
+    ids=["schema", "no-room"],
+)
+def test_ollama_failure_marks_one_message_failed_and_continues(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, error: ValueError, reason: str
+) -> None:
     sources_path = tmp_path / "sources.yaml"
     write_sources(sources_path)
     settings = Settings(
@@ -1367,7 +1383,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
 
         def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
             if content == "bad":
-                raise OllamaSchemaError("OLLAMA_SCHEMA_INVALID error='missing category' response_preview='newsletter body'")
+                raise error
             return EmailExtraction(
                 source_id=source_id,
                 newsletter_title="Good news",
@@ -1418,7 +1434,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
         "Starting 1 source(s)",
         "alphasignal: scanning messages",
         "alphasignal: extracting bad",
-        "alphasignal: failed bad (OLLAMA_SCHEMA_INVALID error='missing category')",
+        f"alphasignal: failed bad ({reason})",
         "alphasignal: extracting good",
         "alphasignal: processed good",
     ]
@@ -1428,7 +1444,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(tmp_path: Path, m
         JOIN gmail_document_state g ON g.document_id=d.id ORDER BY d.id"""
     ).fetchall()
     assert [tuple(row) for row in rows] == [
-        ("bad", "failed", "OLLAMA_SCHEMA_INVALID error='missing category'"),
+        ("bad", "failed", reason),
         ("good", "processed", None),
     ]
     database.close()

@@ -89,10 +89,21 @@ CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 JAPANESE_KANA_PATTERN = re.compile(r"[\u3040-\u30ff]")
 HANGUL_PATTERN = re.compile(r"[\uac00-\ud7af]")
 ARTICLE_ANALYSIS_MAX_CHARACTERS = 30_000
-# No tokenizer ships with this project, so the review budget uses deliberately high
+# No tokenizer ships with this project, so prompt budgets use deliberately high
 # characters-to-tokens ratios: overestimating shrinks the prompt, underestimating overflows it.
+# Measured against the Qwen3 tokenizer: Traditional Chinese averages 0.70 per ideograph (0.87 at
+# worst per item), Hangul 0.66, kana 0.48, emoji 1.0 to 2.0 with joiners, and hex or base64 runs
+# 0.74 to 0.92 - so those runs take the ceiling, since a byte-level tokenizer never spends more
+# than one token on an ASCII byte. At the English rate a Korean page passed for half its size.
 REVIEW_TOKENS_PER_CJK_CHARACTER = 0.8
 REVIEW_TOKENS_PER_OTHER_CHARACTER = 0.3
+TOKENS_PER_OTHER_NON_ASCII_CHARACTER = 1.0
+TOKENS_PER_ASTRAL_CHARACTER = 2.0
+TOKENS_PER_DENSE_ASCII_CHARACTER = 1.0
+NON_ASCII_PATTERN = re.compile(r"[^\x00-\x7f]")
+ASTRAL_PATTERN = re.compile(r"[\U00010000-\U0010ffff]")
+# Unbroken printable ASCII this long is an identifier, hash, or encoded blob rather than prose.
+DENSE_ASCII_RUN = re.compile(r"[!-~]{24,}")
 REVIEW_TOKENS_PER_CANDIDATE_SEPARATOR = 4
 REVIEW_RESERVED_TOKENS_PER_SELECTION = 280
 REVIEW_RESERVED_OUTPUT_TOKENS = 256
@@ -123,7 +134,17 @@ def _preview(value: str, limit: int = 800) -> str:
 
 def _estimated_tokens(value: str) -> int:
     cjk = len(CJK_PATTERN.findall(value))
-    return math.ceil(cjk * REVIEW_TOKENS_PER_CJK_CHARACTER + (len(value) - cjk) * REVIEW_TOKENS_PER_OTHER_CHARACTER)
+    astral = len(ASTRAL_PATTERN.findall(value))
+    other_non_ascii = len(NON_ASCII_PATTERN.findall(value)) - cjk - astral
+    dense = sum(len(run) for run in DENSE_ASCII_RUN.findall(value))
+    plain = len(value) - cjk - astral - other_non_ascii - dense
+    return math.ceil(
+        cjk * REVIEW_TOKENS_PER_CJK_CHARACTER
+        + astral * TOKENS_PER_ASTRAL_CHARACTER
+        + other_non_ascii * TOKENS_PER_OTHER_NON_ASCII_CHARACTER
+        + dense * TOKENS_PER_DENSE_ASCII_CHARACTER
+        + plain * REVIEW_TOKENS_PER_OTHER_CHARACTER
+    )
 
 
 def _review_tail_guard(maximum: int) -> str:
@@ -349,6 +370,10 @@ class OllamaClient:
 
         overhead = _estimated_tokens(system) + _estimated_tokens(prompt_for("", True))
         sent, trimmed = fitted_extraction_content(content, overhead, self.num_ctx, max_items)
+        if content and not sent:
+            # A small OLLAMA_NUM_CTX can leave the instructions and the output reservation filling the
+            # whole window. The request would still return schema-valid JSON, read from nothing.
+            raise OllamaContextError(f"OLLAMA_EXTRACT_NO_ROOM num_ctx={self.num_ctx} source={source_id!r}")
         truncated = truncated or trimmed
         messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt_for(sent, truncated)}]
         for attempt in range(2):
@@ -394,6 +419,10 @@ class OllamaClient:
                 # rather than letting the longer conversation overflow and lose the system prompt.
                 repair_overhead = overhead + _estimated_tokens(raw) + EXTRACT_REPAIR_OVERHEAD_TOKENS
                 sent, trimmed = fitted_extraction_content(content, repair_overhead, self.num_ctx, max_items)
+                if content and not sent:
+                    raise OllamaContextError(
+                        f"OLLAMA_EXTRACT_NO_ROOM num_ctx={self.num_ctx} source={source_id!r} attempt=2"
+                    ) from None
                 truncated = truncated or trimmed
                 messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt_for(sent, truncated)}]
                 messages.extend(
