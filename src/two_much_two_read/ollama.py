@@ -33,6 +33,8 @@ Every link in the newsletter has been replaced by a code in square brackets, suc
 to the code of the item's own article link: the one its headline points to, never a comments,
 discussion, sponsor, share, or subscription link. Use null when the item has no link of its own.
 Codes never belong in any other field.
+When the newsletter gives an item nothing but its headline and link, its summary and why-it-matters
+say only what the headline says; never add a detail the newsletter does not give.
 One newsletter lists many unrelated items in a row. Derive each item only from its own headline and
 body: a neighbouring item must never influence this item's category, importance, or confidence.
 Categories: AI_MODEL for model and AI product releases, AI_RESEARCH for papers and experimental

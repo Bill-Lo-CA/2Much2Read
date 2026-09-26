@@ -18,7 +18,7 @@ from pydantic import HttpUrl
 
 from two_much_two_read import mail_operations, pipeline
 from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl
-from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult
+from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult, SourceItemCounts
 from two_much_two_read.config import HackerNewsSource, Settings
 from two_much_two_read.digest import DigestEntry
 from two_much_two_read.hackernews import (
@@ -695,6 +695,7 @@ def test_empty_news_day_records_no_content_run(newsletter_settings: Settings, mo
         "delivery_pending": 0,
         "reason": None,
         "security_floor": None,
+        "no_article_by_source": None,
     }
 
     database = Database(settings.database_path)
@@ -721,7 +722,7 @@ def test_run_pipeline_uses_one_captured_time_for_digest_metadata(tmp_path: Path,
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
     monkeypatch.setattr(pipeline, "_process_source", lambda *args, **kwargs: (0, 0, 0, 0, [], []))
-    monkeypatch.setattr(pipeline, "render_digest", lambda *args: "digest")
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args, **kwargs: "digest")
     now = datetime(2026, 1, 1, 9, 30, tzinfo=ZoneInfo("America/Montreal"))
 
     assert run_pipeline(settings, no_deliver=True, force=True, now=now).status == "ok"
@@ -1229,7 +1230,7 @@ def test_invalid_discord_config_queues_digest_for_retry(tmp_path: Path, monkeypa
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
     monkeypatch.setattr(pipeline, "_process_source", process_source)
-    monkeypatch.setattr(pipeline, "render_digest", lambda *args: "digest")
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args, **kwargs: "digest")
 
     result = run_pipeline(settings, now=datetime(2026, 1, 1, tzinfo=UTC))
 
@@ -1271,7 +1272,7 @@ def test_no_deliver_queues_configured_destinations(newsletter_settings: Settings
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
     monkeypatch.setattr(pipeline, "_process_source", lambda *args, **kwargs: (0, 0, 0, 0, [], []))
-    monkeypatch.setattr(pipeline, "render_digest", lambda *args: "digest")
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args, **kwargs: "digest")
 
     result = run_pipeline(settings, no_deliver=True, force=True, now=datetime(2026, 1, 1, tzinfo=UTC))
 
@@ -1425,6 +1426,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(
         "delivery_pending": 0,
         "reason": None,
         "security_floor": None,
+        "no_article_by_source": {"alphasignal": {"items": 1, "no_article": 1}},
     }
     assert gmail.applied_labels == [
         ("bad", "failed"),
@@ -1529,6 +1531,7 @@ def test_mime_failure_marks_one_message_failed_and_continues(
         "delivery_pending": 0,
         "reason": None,
         "security_floor": None,
+        "no_article_by_source": {"alphasignal": {"items": 1, "no_article": 1}},
     }
     assert gmail.applied_labels == ([] if dry_run else [("bad", "failed"), ("good", "processed")])
     if dry_run:
@@ -1581,7 +1584,7 @@ def test_digest_render_failure_leaves_extractions_retryable(tmp_path: Path, monk
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: StubOllamaClient(extraction))
     monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
-    monkeypatch.setattr(pipeline, "render_digest", lambda *args: (_ for _ in ()).throw(RuntimeError("render failed")))
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("render failed")))
 
     with pytest.raises(RuntimeError, match="render failed"):
         run_pipeline(settings, no_deliver=True)
@@ -1592,7 +1595,7 @@ def test_digest_render_failure_leaves_extractions_retryable(tmp_path: Path, monk
     database.close()
     assert gmail.applied_labels == []
 
-    monkeypatch.setattr(pipeline, "render_digest", lambda *args: "digest")
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args, **kwargs: "digest")
     assert run_pipeline(settings, no_deliver=True).status == "ok"
     assert gmail.applied_labels == [("newsletter", "processed")]
     database = Database(settings.database_path)
@@ -1665,6 +1668,7 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
         "delivery_pending": 0,
         "reason": None,
         "security_floor": None,
+        "no_article_by_source": {"alphasignal": {"items": 1, "no_article": 1}},
     }
     assert gmail.applied_labels == [("transient", "processed")]
 
@@ -1702,6 +1706,7 @@ def test_existing_daily_digest_skips_before_gmail_access(tmp_path: Path, monkeyp
         "delivery_pending": 0,
         "reason": "daily_digest_exists",
         "security_floor": None,
+        "no_article_by_source": None,
     }
     database = Database(settings.database_path)
     assert database.connection.execute("SELECT status FROM runs ORDER BY id DESC").fetchone()[0] == "skipped"
@@ -1728,7 +1733,7 @@ def test_forced_run_uses_a_separate_digest_key_after_daily_reservation(tmp_path:
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
     monkeypatch.setattr(pipeline, "_process_source", lambda *args, **kwargs: (0, 0, 0, 0, [], []))
-    monkeypatch.setattr(pipeline, "render_digest", lambda *args: "forced digest")
+    monkeypatch.setattr(pipeline, "render_digest", lambda *args, **kwargs: "forced digest")
 
     assert run_pipeline(settings, force=True, no_deliver=True, now=now).status == "ok"
     database = Database(settings.database_path)
@@ -2661,7 +2666,12 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
         digest_max_items=1,
         digest_top_items=1,
     )
-    body = urlsafe_b64encode(b"Two stories").decode().rstrip("=")
+    # Two stories link to their articles; the third is a bare title, as a link list prints one.
+    body = (
+        urlsafe_b64encode(b"Opus 5.5 https://example.com/opus\nMuse 0-day https://example.com/muse\nGrok 4.7")
+        .decode()
+        .rstrip("=")
+    )
     gmail = StubGmailClient(
         ["gmail-1"],
         {
@@ -2677,10 +2687,11 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
         },
     )
 
-    def story(title: str, category: DigestCategory) -> NewsletterItemAnalysis:
+    def story(title: str, category: DigestCategory, link: str | None = None) -> NewsletterItemAnalysis:
         return NewsletterItemAnalysis(
             title=title,
             source_title=title,
+            link=link,
             category=category,
             summary_zh_tw="摘要",
             why_it_matters_zh_tw="原因",
@@ -2694,7 +2705,11 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
             newsletter_title="Newsletter",
             newsletter_date=None,
             overview_zh_tw="摘要",
-            items=[story("Opus 5.5", "AI_MODEL"), story("Muse 0-day", "SECURITY")],
+            items=[
+                story("Opus 5.5", "AI_MODEL", "L1"),
+                story("Muse 0-day", "SECURITY", "L2"),
+                story("Grok 4.7", "AI_MODEL"),
+            ],
         )
     )
 
@@ -2706,6 +2721,12 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
     monkeypatch.setattr(pipeline, "_reviewed_entries", reviewer_that_skips_security)
+
+    class FakeFetcher:
+        def resolve_url(self, raw_url: str) -> ResolvedUrl:
+            return ResolvedUrl(raw_url, raw_url, None)
+
+    monkeypatch.setattr(pipeline, "ArticleFetcher", FakeFetcher)
 
     result = run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, tzinfo=UTC))
 
@@ -2722,3 +2743,62 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
         "source": "AlphaSignal",
         "displaced": "Opus 5.5",
     }
+    # The per-source share of items with no article, the evidence for weighting sources later.
+    assert result.no_article_by_source == {"alphasignal": SourceItemCounts(items=3, no_article=1)}
+
+
+def test_a_run_never_headlines_what_the_reviewer_did_not_pick(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Nothing had source text, so no entry was scored; merging then found another newsletter's copy
+    # and gave the entry coverage. The renderer's fallback for unscored lists must not apply here.
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(sources_config_path=sources_path, database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "l")
+    body = urlsafe_b64encode(b"Grok 4.7").decode().rstrip("=")
+    gmail = StubGmailClient(
+        ["gmail-1"],
+        {
+            "gmail-1": {
+                "threadId": "thread-1",
+                "internalDate": "1784786400000",
+                "payload": {
+                    "headers": [{"name": "Subject", "value": "Links"}, {"name": "From", "value": "news@example.com"}],
+                    "mimeType": "text/plain",
+                    "body": {"data": body},
+                },
+            }
+        },
+    )
+    extraction = EmailExtraction(
+        source_id="alphasignal",
+        newsletter_title="Links",
+        newsletter_date=None,
+        overview_zh_tw="摘要",
+        items=[
+            NewsletterItemAnalysis(
+                title="Grok 4.7",
+                source_title="Grok 4.7",
+                category="AI_MODEL",
+                summary_zh_tw="摘要",
+                why_it_matters_zh_tw="原因",
+                importance=8,
+                confidence=0.9,
+            )
+        ],
+    )
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: StubOllamaClient(extraction))
+    monkeypatch.setattr(pipeline, "_reviewed_entries", lambda _settings, _ollama, entries: list(entries))
+    monkeypatch.setattr(
+        pipeline,
+        "_merged_entries",
+        lambda entries, *_args, **_kwargs: ([replace(entry, also_from=("TLDR AI",)) for entry in entries], None),
+    )
+
+    run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, tzinfo=UTC))
+
+    database = Database(settings.database_path)
+    content = str(database.connection.execute("SELECT rendered_content FROM digests").fetchone()[0])
+    database.close()
+    assert "🔥" not in content
+    assert "• Grok 4.7" in content

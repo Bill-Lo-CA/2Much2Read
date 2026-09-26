@@ -102,6 +102,21 @@ class DigestEntry:
     merged_summaries: tuple[str, ...] = ()
 
 
+def has_source_text(entry: DigestEntry) -> bool:
+    """Whether anything fuller than the extractor's own summary stands behind this entry.
+
+    The article itself - read by the extractor for a Hacker News story, or linked from a newsletter
+    and there for the headline rewrite to fetch - or another newsletter's coverage of the same
+    story. Without either, the summary is whatever the extractor made of the newsletter's text,
+    and for a link list that is the headline alone. A Hacker News post whose body could not be read
+    falls back to metadata and stores its discussion page as the article link; that page was never
+    read, so it counts for nothing. Nor does a second copy from the same newsletter, which merges
+    into merged_summaries as well but is the same text again: only another source's coverage counts,
+    and that is what also_from records.
+    """
+    return entry.content_basis in {"article", "hn_self_post"} or _article_url(entry) is not None or bool(entry.also_from)
+
+
 def canonical_url(value: str | None) -> str | None:
     if not value:
         return None
@@ -216,7 +231,7 @@ def dedupe_entries(items: list[DigestEntry]) -> list[DigestEntry]:
         current = winners.get(key)
         if current is None:
             winners[key] = item
-        elif _entry_rank(item) > _entry_rank(current):
+        elif (has_source_text(item), _entry_rank(item)) > (has_source_text(current), _entry_rank(current)):
             winners[key] = _absorbed(item, current)
         else:
             winners[key] = _absorbed(current, item)
@@ -295,7 +310,16 @@ def merge_related_entries(
         if index is None:
             deduped.append(mention)
             continue
-        deduped[index] = _absorbed(deduped[index], mention)
+        kept = deduped[index]
+        if has_source_text(mention) and not has_source_text(kept):
+            # The one with something behind it becomes primary whichever ranked higher: its summary
+            # is the one worth keeping, and its article is the one a reader can open. The story keeps
+            # the higher rank, which the list position already reflects - the mention quota cuts in
+            # this order, so a lower score here would hold a slot a higher-scoring story is denied.
+            scores = [score for score in (kept.reranker_score, mention.reranker_score) if score is not None]
+            deduped[index] = replace(_absorbed(mention, kept), reranker_score=max(scores, default=None))
+        else:
+            deduped[index] = _absorbed(kept, mention)
     return merged, deduped
 
 
@@ -335,6 +359,8 @@ def render_digest(
     source_names: str,
     top_items: int = 5,
     language: str = "zh-TW",
+    *,
+    reviewed: bool = False,
 ) -> str:
     labels = _labels(language)
     safe_topic = sanitize_discord_text(topic)
@@ -387,14 +413,19 @@ def render_digest(
 
     # Only what the reviewer selected may hold a headline slot. Entries without a review score are
     # the candidates it passed over, so filling spare headline slots from them would republish
-    # exactly what the final quality filter rejected. Rendering a plain item list keeps every slot.
+    # exactly what the final quality filter rejected. That holds even when nothing is scored: a run
+    # that skipped the reviewer because nothing had source text can still merge two bare entries
+    # from different newsletters into one with coverage, and nobody reviewed it. Only a plain item
+    # list, which never went through a review, fills the slots from what has something behind it;
+    # an entry with nothing stays a mention even there.
     scored = [value for value in eligible if value.review_score is not None]
-    top = (scored or eligible)[:top_items]
-    rest = eligible[len(top) :]
-    sections = [
-        f"📰 {safe_topic} 2much2read — {when:%Y-%m-%d}",
-        labels["top"] + "\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)),
-    ]
+    unreviewed = [] if reviewed else [value for value in eligible if has_source_text(value)]
+    top = (scored or unreviewed)[:top_items]
+    shown = {id(value) for value in top}
+    rest = [value for value in eligible if id(value) not in shown]
+    sections = [f"📰 {safe_topic} 2much2read — {when:%Y-%m-%d}"]
+    if top:
+        sections.append(labels["top"] + "\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)))
     if rest:
         sections.append(labels["rest"] + "\n" + "\n".join(mention(item) for item in rest))
     sections.append(

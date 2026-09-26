@@ -598,3 +598,55 @@ def _gmail_state(database: Database, gmail_id: str) -> str:
     row = database.gmail_document(gmail_id)
     assert row is not None, f"no gmail_document_state row for {gmail_id}"
     return str(row["state"])
+
+
+def test_items_without_an_article_are_counted_per_source(tmp_path: Path) -> None:
+    from two_much_two_read.schemas import DigestItem
+
+    def item(title: str, url: str | None) -> DigestItem:
+        return DigestItem.model_validate(
+            {
+                "title": title,
+                "category": "AI_MODEL",
+                "summary_zh_tw": "摘要",
+                "why_it_matters_zh_tw": "原因",
+                "importance": 5,
+                "confidence": 0.5,
+                "source_url": url,
+            }
+        )
+
+    database = Database(tmp_path / "test.sqlite3")
+    links = discover(database, "gmail-1")
+    assert links is not None
+    database.connection.execute("UPDATE documents SET source_id='link-list' WHERE id=?", (links,))
+    prose = discover(database, "gmail-2")
+    assert prose is not None
+    database.store_items(links, [item("Grok 4.7", None), item("Opus 5.5", None), item("Essay", "https://example.com/essay")])
+    database.store_items(prose, [item("Deep dive", "https://example.com/deep")])
+    # Hacker News stories store the discussion page as the link when there is no article: a self-post
+    # whose body was read has its text behind it, one that fell back to metadata has nothing, and an
+    # external story whose fetch failed still links its article.
+    hacker_news: list[int] = []
+    for gmail_id, basis, url in (
+        ("hn-1", "hn_self_post", "https://news.ycombinator.com/item?id=1"),
+        ("hn-2", "metadata", "https://news.ycombinator.com/item?id=2"),
+        ("hn-3", "metadata", "https://example.com/external"),
+    ):
+        document_id = discover(database, gmail_id)
+        assert document_id is not None
+        discussion = "https://news.ycombinator.com/item?id=" + gmail_id.removeprefix("hn-")
+        database.connection.execute(
+            "UPDATE documents SET source_id='hn-best', content_basis=?, discussion_url=? WHERE id=?",
+            (basis, discussion, document_id),
+        )
+        database.store_items(document_id, [item(gmail_id, url)])
+        hacker_news.append(document_id)
+
+    assert database.no_article_counts([links, prose, *hacker_news]) == {
+        "hn-best": (3, 1),
+        "link-list": (3, 2),
+        "source": (1, 0),
+    }
+    assert database.no_article_counts([]) == {}
+    database.close()

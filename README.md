@@ -152,6 +152,16 @@ extracted and ranked, so listing them costs nothing beyond the message length; s
 for a headline-only digest. `DIGEST_TOP_ITEMS` controls how many entries the renderer puts in the
 headline section, so keep it equal to `DIGEST_MAX_ITEMS` unless you want mentions promoted into it.
 
+A headline needs something behind it: an article to read, another newsletter's coverage of the same
+story, or a text the extractor read in full (a Hacker News story or self-post). An item with none of
+these may still be a mention, but it never reaches the reviewer, whose picks become headlines. Its
+summary is only what the extractor made of the newsletter's own text, and the headline rewrite has
+nothing fuller to work from. For a link list such as Hacker Newsletter, that text is the bare title:
+on 2026-09-25 two of the first six headlines were one-line guesses of this kind, and one of them was
+wrong. When copies of one story merge, the one with something behind it stays primary, whichever
+ranked higher. Each run's JSON reports `no_article_by_source`, the items and articleless items per
+source, which is the evidence for how much weight each source should get.
+
 Several newsletters cover the same story, and the reviewer drops the copies from its own selection,
 which used to land them in the secondary section under the headline they duplicate. Repeat coverage
 is now folded into the entry it duplicates: the strongest one keeps its place, the other newsletters

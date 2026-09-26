@@ -12,7 +12,14 @@ import pytest
 from two_much_two_read import pipeline
 from two_much_two_read.command_models import SecurityFloorPromotion
 from two_much_two_read.config import Settings
-from two_much_two_read.digest import DigestEntry, render_digest
+from two_much_two_read.digest import (
+    DigestEntry,
+    _entry_rank,
+    dedupe_entries,
+    has_source_text,
+    merge_related_entries,
+    render_digest,
+)
 from two_much_two_read.reranker import (
     RERANK_INSTRUCTION,
     RERANK_QUERY,
@@ -24,6 +31,7 @@ from two_much_two_read.schemas import DigestCategory, DigestItem, DigestReview
 
 
 def entry(candidate_id: int, title: str, source_name: str, category: DigestCategory = "AI_MODEL") -> DigestEntry:
+    """A candidate with an article behind it, as nearly every one is once its link is matched."""
     return DigestEntry(
         DigestItem(
             title=title,
@@ -36,6 +44,7 @@ def entry(candidate_id: int, title: str, source_name: str, category: DigestCateg
         candidate_id=candidate_id,
         source_id=source_name.casefold(),
         source_name=source_name,
+        article_url=f"https://example.com/story-{candidate_id}",
     )
 
 
@@ -409,7 +418,7 @@ def test_the_promoted_story_renders_after_a_headline_the_reviewer_scored_zero() 
         "Reviewer's zero",
         "Muse 0-day",
     ]
-    assert [line for line in rest.splitlines() if line.startswith("•")] == ["• Rune IDE · TLDR"]
+    assert [line for line in rest.splitlines() if line.startswith("•")] == ["• Rune IDE · TLDR · <https://example.com/story-3>"]
 
 
 @pytest.mark.parametrize(
@@ -510,3 +519,164 @@ def test_demoted_headlines_leave_the_passed_over_quota_alone() -> None:
 
     assert headlines == ["Opus 5.5", "Muse 0-day"]
     assert mentions == ["GPT-6", "Qwen image", "Gemini TTS", "Rune IDE", "Drop sandbox"]
+
+
+def _headline_only(candidate_id: int, title: str, category: DigestCategory = "AI_MODEL") -> DigestEntry:
+    """A link-list item whose link was never matched: nothing behind it but the headline."""
+    return replace(entry(candidate_id, title, "Hacker Newsletter", category), article_url=None, content_basis="newsletter")
+
+
+def test_items_with_nothing_behind_them_are_kept_from_the_reviewer_but_stay_mentions() -> None:
+    # With no article and no other coverage the summary can only restate or invent, so it may not
+    # become a headline; it is still worth a line among the mentions, in the reranker's order.
+    seen: list[object] = []
+
+    class FakeOllama:
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
+            seen.extend(candidate["candidate_id"] for candidate in candidates)
+            return DigestReview.model_validate({"selected": [{"candidate_id": 2, "score": 90, "reason_zh_tw": "具體"}]})
+
+    ranked = [_headline_only(1, "Grok 4.7"), entry(2, "Opus 5.5 pricing", "AlphaSignal"), _headline_only(3, "GPT-6 Sol")]
+
+    reviewed = pipeline._reviewed_entries(Settings(digest_max_items=1), FakeOllama(), ranked)
+
+    assert seen == [2]
+    assert [(value.candidate_id, value.review_score) for value in reviewed] == [(2, 90), (1, None), (3, None)]
+
+
+def test_a_pool_of_only_headlines_skips_the_reviewer() -> None:
+    class Unused:
+        def review_digest(self, *_: object) -> DigestReview:
+            raise AssertionError("nothing it could select may be a headline")
+
+    ranked = [_headline_only(1, "Grok 4.7"), _headline_only(2, "GPT-6 Sol")]
+
+    assert pipeline._reviewed_entries(Settings(), Unused(), ranked) == ranked
+
+
+def test_the_security_floor_never_promotes_a_story_with_nothing_behind_it() -> None:
+    headlines = [replace(entry(1, "Opus 5.5", "TLDR"), review_score=90, reranker_score=0.9)]
+    muse = replace(_headline_only(2, "Muse 0-day", "SECURITY"), reranker_score=0.6)
+    clop = replace(entry(3, "Clop leak site", "TLDR", "SECURITY"), reranker_score=0.4)
+
+    promoted, _ = pipeline._merged_entries([*headlines, muse, clop], 10, never_the_same, headline_limit=2)
+    alone, promotion = pipeline._merged_entries([*headlines, muse], 10, never_the_same, headline_limit=2)
+
+    assert [value.item.title for value in promoted if value.review_score is not None] == ["Opus 5.5", "Clop leak site"]
+    assert promotion is None
+    assert [value.item.title for value in alone if value.review_score is not None] == ["Opus 5.5"]
+
+
+def test_the_security_floor_never_promotes_coverage_gained_after_the_review() -> None:
+    # Two bare copies of one 0-day from different newsletters: merged, the entry has another source's
+    # coverage, but neither copy reached the reviewer, so the floor may not make it a headline. A
+    # copy with an article did reach it, and when that copy takes over the merge it stays eligible.
+    headlines = [replace(entry(1, "Opus 5.5", "TLDR"), review_score=90, reranker_score=0.9)]
+    muse = replace(_headline_only(2, "Muse 0-day", "SECURITY"), reranker_score=0.6)
+    muse_again = replace(_headline_only(3, "Meta Muse 0-day", "SECURITY"), source_name="Risky Business", reranker_score=0.5)
+    muse_written = replace(entry(4, "Meta patches Muse 0-day", "SANS", "SECURITY"), reranker_score=0.4)
+
+    def muse_is_muse(left: DigestEntry, right: DigestEntry) -> bool:
+        return "Muse" in left.item.title and "Muse" in right.item.title
+
+    bare, bare_promotion = pipeline._merged_entries([*headlines, muse, muse_again], 10, muse_is_muse, headline_limit=2)
+    backed, backed_promotion = pipeline._merged_entries([*headlines, muse, muse_written], 10, muse_is_muse, headline_limit=2)
+
+    assert bare_promotion is None
+    assert [value.item.title for value in bare if value.review_score is not None] == ["Opus 5.5"]
+    assert backed_promotion is not None and backed_promotion.promoted == "Meta patches Muse 0-day"
+
+
+def test_the_copy_with_an_article_is_kept_when_a_bare_one_repeats_it() -> None:
+    # Hacker Newsletter's "Grok 4.7" ranked above AlphaSignal's write-up of the same launch; kept as
+    # the primary, its one guessed line would have replaced the real summary and its article.
+    listed = replace(_headline_only(1, "Grok 4.7"), reranker_score=0.9)
+    written = replace(entry(2, "xAI releases Grok 4.7", "AlphaSignal"), reranker_score=0.5)
+
+    _, mentions = merge_related_entries([], [listed, written], lambda _left, _right: True)
+
+    assert len(mentions) == 1
+    assert (mentions[0].item.title, mentions[0].also_from) == ("xAI releases Grok 4.7", ("Hacker Newsletter",))
+
+
+def test_a_story_keeps_its_higher_rank_when_its_backed_copy_takes_over() -> None:
+    # The bare copy ranked first and the backed one last, with an unrelated story between. The merged
+    # story holds the first slot, so it keeps the first slot's score: with the lower one, the mention
+    # quota - which cuts in list order - would keep it over the unrelated story it now sorts below.
+    listed = replace(_headline_only(1, "Grok 4.7"), reranker_score=0.9)
+    unrelated = replace(entry(2, "Rust 2.0 ships", "TLDR"), reranker_score=0.7)
+    written = replace(entry(3, "xAI releases Grok 4.7", "AlphaSignal"), reranker_score=0.3)
+
+    _, mentions = merge_related_entries(
+        [], [listed, unrelated, written], lambda left, right: {left.candidate_id, right.candidate_id} == {1, 3}
+    )
+
+    assert [(value.item.title, value.reranker_score) for value in mentions] == [
+        ("xAI releases Grok 4.7", 0.9),
+        ("Rust 2.0 ships", 0.7),
+    ]
+    assert sorted(mentions, key=_entry_rank, reverse=True) == mentions
+
+
+def test_an_identical_bare_copy_loses_to_the_one_with_coverage_behind_it() -> None:
+    # Same title and no article on either side, so dedupe_entries keys them together; the one other
+    # newsletters also covered is kept, whatever the reranker thought of the two.
+    listed = replace(_headline_only(1, "Grok 4.7"), reranker_score=0.9)
+    covered = replace(
+        _headline_only(2, "Grok 4.7"),
+        source_name="AlphaSignal",
+        reranker_score=0.5,
+        also_from=("TLDR AI",),
+        merged_summaries=("xAI 發布 Grok 4.7。",),
+    )
+
+    kept = dedupe_entries([listed, covered])
+
+    assert len(kept) == 1
+    assert kept[0].source_name == "AlphaSignal"
+
+
+HN_DISCUSSION = "https://news.ycombinator.com/item?id=123"
+
+
+@pytest.mark.parametrize(
+    ("article_url", "content_basis", "also_from", "expected"),
+    [
+        ("https://example.com/story", "newsletter", (), True),
+        (None, "newsletter", (), False),
+        (None, "newsletter", ("AlphaSignal",), True),
+        (None, "hn_self_post", (), True),
+        (None, "article", (), True),
+        (None, "metadata", (), False),
+        # A self-post whose body could not be read stores its discussion page as the article link.
+        (HN_DISCUSSION, "metadata", (), False),
+        (HN_DISCUSSION, "hn_self_post", (), True),
+        ("https://example.com/story", "metadata", (), True),
+    ],
+)
+def test_what_counts_as_something_behind_an_entry(
+    article_url: str | None, content_basis: str, also_from: tuple[str, ...], expected: bool
+) -> None:
+    # An article to fetch, another newsletter's coverage, or a text the extractor read in full.
+    story = replace(
+        entry(1, "Story", "TLDR"),
+        article_url=article_url,
+        discussion_url=HN_DISCUSSION,
+        content_basis=content_basis,
+        also_from=also_from,
+        merged_summaries=("另一份電子報的摘要",) if also_from else (),
+    )
+
+    assert has_source_text(story) is expected
+
+
+def test_a_second_copy_from_the_same_newsletter_is_not_coverage() -> None:
+    # Deduping folds the copy's summary into merged_summaries, but it is the same newsletter's text
+    # again; left counting, the title would reach the reviewer and could become a headline.
+    first = _headline_only(1, "Grok 4.7")
+    copy = replace(_headline_only(2, "Grok 4.7"), item=first.item.model_copy(update={"summary_zh_tw": "另一段摘要"}))
+
+    kept = dedupe_entries([first, copy])
+
+    assert len(kept) == 1 and kept[0].merged_summaries
+    assert not has_source_text(kept[0])

@@ -667,3 +667,17 @@ def test_the_extractor_is_told_what_a_link_code_is_and_answers_with_one() -> Non
     assert "[L7]" in system
     assert "never a comments" in system
     assert result.items[0].link == "L2"
+
+
+@respx.mock
+def test_the_extractor_is_told_not_to_embellish_a_bare_headline() -> None:
+    # Hacker Newsletter's "Claude Opus 5.5" came back as "stronger reasoning and multilingual
+    # handling"; the real release was 40% cheaper and 30% faster. With this rule it says only that
+    # Anthropic released Claude Opus 5.5.
+    route = _extraction_route()
+
+    OllamaClient().extract("hacker-newsletter", "Grok 4.7 [L1] //x comments [L2]")
+
+    system = json.loads(route.calls[0].request.content)["messages"][0]["content"]
+    assert "nothing but its headline" in system
+    assert "never add a detail" in system
