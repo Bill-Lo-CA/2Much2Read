@@ -811,7 +811,10 @@ def _process_source(
             items.append(url_enricher.resolved_item(match, resolved))
         database.store_items(document_id, items, replace=True, finalize=False)
         processed += 1
-        status(f"{source.id}: processed {subject}")
+        dropped = extraction.dropped_for_language
+        status(
+            f"{source.id}: processed {subject}" + (f" ({dropped} item(s) outside the digest language dropped)" if dropped else "")
+        )
         processed_document_ids.append(document_id)
         processed_documents.append((document_id, gmail_id))
     return discovered, discovered, processed, failed, processed_document_ids, processed_documents
