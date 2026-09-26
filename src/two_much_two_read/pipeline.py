@@ -44,7 +44,7 @@ from .ollama import OllamaClient, OllamaContextError, OllamaSchemaError, close_o
 from .reranker import RelevanceReranker
 from .schemas import ArticleAnalysis, DigestItem, DigestReview, ExtractedEmailContent, ItemDeepening, ResolvedContent
 from .storage import Database
-from .url_enrichment import UrlEnricher, resolve_match
+from .url_enrichment import UrlEnricher, resolve_match, tracking_url
 
 StatusReporter = Callable[[str], None]
 # The category whose reviewer slots are reserved by DIGEST_SECURITY_CANDIDATE_SLOTS, and whose
@@ -780,6 +780,15 @@ def _process_source(
                 continue
             raw_url = str(match.candidate.raw_url)
             cached = database.cached_url_resolution(raw_url)
+            if (
+                cached is not None
+                and cached["status"] == "resolved"
+                and not cached["canonical_url"]
+                and tracking_url(str(cached["resolved_url"]))
+            ):
+                # Resolved before the resolver could pass a tracker's page-level hop, so it stopped on
+                # the click page; the link deserves another try rather than 30 days of no article.
+                cached = None
             if cached is not None:
                 if cached["status"] == "resolved" and cached["resolved_url"]:
                     items.append(

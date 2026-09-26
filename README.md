@@ -310,6 +310,17 @@ article link, and that code is used first; the verbatim-headline matcher only co
 no usable code. Link-list newsletters that put an article and a comments link beside every headline
 matched none of their items by title alone, since both links score alike.
 
+A matched link is then followed to its destination, and the destination is what is stored and shown.
+Besides HTTP redirects this passes HubSpot's click page, which redirects by script - its next hop is
+read out of the page on the same scheme and host, never run - and a meta refresh of ten seconds or
+less. Every hop is validated like the first request: public addresses only, ports 80 and 443, no
+credentials, at most 2,083 characters and five hops. Once the chain arrives, the destination is the
+link even when its page turns a crawler away (401, 403, 429), is too large to read whole, or is a PDF;
+any other download is refused, so a digest never links an executable or an archive. The link shown
+drops campaign tags and the parameters that carry the subscriber's identity (HubSpot's `_hsenc` and
+`ecid`, Mailchimp's `mc_eid`, and the like), so it does not tell whoever opens it who received the
+email. On one run this took The New Stack and The Batch from no article links to all of them.
+
 On an 8 GB GPU the reviewer is the binding constraint: `qwen3:8b` at `OLLAMA_NUM_CTX=16384`
 needs roughly 8 GB for Q4 weights plus an f16 KV cache, so Ollama offloads layers to the
 CPU. Quantizing the KV cache on the Ollama server halves the cache cost:

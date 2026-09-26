@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from typing import Literal, TypeAlias, cast
 from urllib.parse import parse_qsl, urlsplit
 
+from pydantic import HttpUrl, ValidationError
+
 from .article_fetcher import ArticleFetcher, ResolvedUrl, UrlResolutionError
 from .digest import canonical_url
 from .schemas import HTTP_URL, DigestItem, ItemAnalysis, LinkCandidate, NewsletterItemAnalysis
@@ -57,12 +59,25 @@ def _score(title: str, candidate: LinkCandidate) -> tuple[MatchMethod, float]:
     return ("url_slug", slug_score) if slug_score >= 0.7 else ("unmatched", 0.0)
 
 
-def _tracking_url(value: str) -> bool:
+def _http_url(value: str | None) -> HttpUrl | None:
+    """The value as a URL, or None: stripping parameters can re-encode a URL past HttpUrl's length."""
+    if not value:
+        return None
+    try:
+        return HTTP_URL.validate_python(value)
+    except ValidationError:
+        return None
+
+
+def tracking_url(value: str) -> bool:
     parts = urlsplit(value)
     hostname = (parts.hostname or "").casefold()
     query_keys = {key.casefold() for key, _ in parse_qsl(parts.query, keep_blank_values=True)}
+    path = parts.path.casefold()
     return (
-        "/e3t/" in parts.path.casefold()
+        "/e3t/" in path
+        # HubSpot's second hop, should a resolution ever stop on it.
+        or "/events/public/v1/encoded/track/" in path
         or "hubspot" in hostname
         or "mailchimp" in hostname
         or bool(query_keys & TRACKING_PARAMETERS)
@@ -123,11 +138,11 @@ class UrlEnricher:
         raw_url = str(match.candidate.raw_url)
         if resolved is not None:
             display = canonical_url(resolved.canonical_url or resolved.final_url)
-            if resolved.canonical_url is None and _tracking_url(resolved.final_url):
+            if resolved.canonical_url is None and tracking_url(resolved.final_url):
                 display = None
             return DigestItem(
                 **values,
-                source_url=HTTP_URL.validate_python(display) if display else None,
+                source_url=_http_url(display),
                 raw_url=HTTP_URL.validate_python(raw_url),
                 resolved_url=HTTP_URL.validate_python(resolved.final_url),
                 canonical_url=HTTP_URL.validate_python(resolved.canonical_url) if resolved.canonical_url else None,
