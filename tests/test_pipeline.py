@@ -127,7 +127,14 @@ def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pipeline, "_deepened_entries", lambda _settings, _ollama, entries, _status: entries)
 
 
-def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("link", "stale_cache"),
+    [("https://short.example/go", False), ("https://info.example.io/e3t/Ctc/L2+113/abc", True)],
+    ids=["fresh", "stale-tracker-cache"],
+)
+def test_gmail_url_enrichment_owns_and_persists_resolved_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link: str, stale_cache: bool
+) -> None:
     sources_path = tmp_path / "sources.yaml"
     write_sources(sources_path)
     settings = Settings(
@@ -135,6 +142,12 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, mon
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
     )
+    if stale_cache:
+        # Cached before the resolver could pass HubSpot's click page: it stopped on the page itself,
+        # and 30 days of that answer would keep the story's article out of the digest.
+        seeded = Database(settings.database_path)
+        seeded.cache_url_resolution(link, "resolved", resolved_url=link)
+        seeded.close()
 
     def encoded(value: str) -> str:
         return urlsafe_b64encode(value.encode()).decode().rstrip("=")
@@ -151,9 +164,7 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, mon
                         {"mimeType": "text/plain", "body": {"data": encoded("A useful article")}},
                         {
                             "mimeType": "text/html",
-                            "body": {
-                                "data": encoded('<h2>Useful article</h2><a href="https://short.example/go">Useful article</a>')
-                            },
+                            "body": {"data": encoded(f'<h2>Useful article</h2><a href="{link}">Useful article</a>')},
                         },
                     ],
                 },
@@ -182,7 +193,7 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, mon
 
     class FakeFetcher:
         def resolve_url(self, raw_url: str) -> ResolvedUrl:
-            assert raw_url == "https://short.example/go"
+            assert raw_url == link
             return ResolvedUrl(raw_url, "https://publisher.example/article", "https://publisher.example/canonical")
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
@@ -200,7 +211,7 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, mon
     assert result.status == "ok"
     assert tuple(row) == (
         "https://publisher.example/canonical",
-        "https://short.example/go",
+        link,
         "https://publisher.example/article",
         "https://publisher.example/canonical",
         "matched",

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import html
 import http.client
 import ipaddress
 import logging
@@ -26,6 +27,23 @@ READ_TIMEOUT_SECONDS = 15
 ARTICLE_FETCH_DEADLINE_SECONDS = 30
 URL_RESOLUTION_DEADLINE_SECONDS = 10
 ROBOTS_DEADLINE_SECONDS = 2
+# The most any browser or HttpUrl accepts; longer is either broken or built to exhaust something.
+MAX_URL_LENGTH = 2083
+PAGE_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
+# A destination that turns a crawler away still names the article: the redirect chain has already
+# shown where the link leads, and it opens in a reader's browser. A missing page (404) or a failing
+# server does not qualify.
+LINK_WITHOUT_PAGE_STATUSES = {401, 403, 429}
+# HubSpot answers a click-tracking link (/e3t/) with a page that reaches its redirect by script. The
+# next hop is a tracking URL on the same host, which redirects properly; it is read out of the page,
+# never run.
+HUBSPOT_CLICK_PATH = "/e3t/"
+# Up to the end of the attribute or string it sits in: the hop carries a query (?_ud=) that HubSpot
+# needs, and a truncated hop is answered with the same click page again.
+HUBSPOT_NEXT_HOP_PATH = r"/events/public/v1/encoded/track/tc/[^\s\"'<>\\]+"
+# A refresh this soon is the page redirecting; a longer one is a page reloading itself.
+MAX_META_REFRESH_SECONDS = 10
+META_REFRESH = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[;,]\s*url\s*=\s*['\"]?([^'\"\s]+)", re.IGNORECASE)
 _DNS_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="article-dns")
 
 logger = logging.getLogger(__name__)
@@ -148,6 +166,15 @@ class ArticleFetcher:
         raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
 
     def resolve_url(self, requested_url: str) -> ResolvedUrl:
+        """Follow a newsletter link to the page it stands for, and name that page.
+
+        HTTP redirects, and the two page-level hops trackers use in their place: HubSpot's click
+        page and a prompt meta refresh. Every hop is validated as a Location header is - public
+        addresses only, no credentials, ports 80 and 443 - and nothing on a page is ever run. Once the
+        chain arrives, the destination is the link even when its page will not serve a crawler, is
+        too large to read whole, or is a PDF: the address is what the digest stores and shows. Any
+        other download is refused, so a link never leads a reader to an executable or an archive.
+        """
         deadline = self.clock() + URL_RESOLUTION_DEADLINE_SECONDS
         try:
             self._check_deadline(deadline)
@@ -155,33 +182,62 @@ class ArticleFetcher:
             seen_urls = {current.url}
             for redirects in range(MAX_REDIRECTS + 1):
                 self._check_deadline(deadline)
-                response = self._read(current, MAX_METADATA_BYTES, deadline)
+                # Only the head is read: the canonical link sits there, and a long page is still a page.
+                response = self._read(current, MAX_METADATA_BYTES, deadline, truncate=True)
                 self._check_deadline(deadline)
+                page_hop = False
                 if 300 <= response.status_code < 400:
                     location = response.headers.get("location")
-                    if not location or redirects == MAX_REDIRECTS:
+                    if not location:
                         raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
-                    next_url = self._validate_url(urljoin(current.url, location), redirect=True, deadline=deadline)
-                    if next_url.url in seen_urls:
-                        raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
-                    seen_urls.add(next_url.url)
-                    current = next_url
-                    continue
-                if not 200 <= response.status_code < 300:
+                elif response.status_code in LINK_WITHOUT_PAGE_STATUSES:
+                    return ResolvedUrl(requested_url, current.url, None)
+                elif not 200 <= response.status_code < 300:
                     raise ArticleFetchError("ARTICLE_FETCH_FAILED")
-                content_type = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
-                if content_type not in {"text/html", "application/xhtml+xml"}:
-                    raise ArticleFetchError("ARTICLE_CONTENT_TYPE_UNSUPPORTED")
-                canonical_url = self._canonical_url(current, response.body, deadline)
-                self._check_deadline(deadline)
-                return ResolvedUrl(requested_url, current.url, canonical_url)
+                else:
+                    content_type = response.headers.get("content-type", "").split(";", 1)[0].lower().strip()
+                    if content_type == "application/pdf":
+                        return ResolvedUrl(requested_url, current.url, None)
+                    if content_type not in PAGE_CONTENT_TYPES:
+                        raise ArticleFetchError("ARTICLE_CONTENT_TYPE_UNSUPPORTED")
+                    soup = BeautifulSoup(response.body, "lxml")
+                    self._check_deadline(deadline)
+                    page_location = self._page_redirect(current, response.body, soup)
+                    if page_location is None:
+                        return ResolvedUrl(requested_url, current.url, self._canonical_url(current, soup, deadline))
+                    location, page_hop = page_location, True
+                if redirects == MAX_REDIRECTS:
+                    raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
+                next_url = self._validate_url(urljoin(current.url, location), redirect=True, deadline=deadline)
+                if page_hop and next_url.url == current.url:
+                    # A page that refreshes to itself is the destination, not a hop.
+                    return ResolvedUrl(requested_url, current.url, self._canonical_url(current, soup, deadline))
+                if next_url.url in seen_urls:
+                    raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
+                seen_urls.add(next_url.url)
+                current = next_url
         except ArticleFetchError as error:
             raise UrlResolutionError(_url_error_code(error.code)) from None
         raise AssertionError("unreachable")
 
-    def _canonical_url(self, page: ValidatedURL, body: bytes, deadline: float) -> str | None:
-        self._check_deadline(deadline)
-        soup = BeautifulSoup(body, "lxml")
+    def _page_redirect(self, page: ValidatedURL, body: bytes, soup: BeautifulSoup) -> str | None:
+        """Where a page sends its reader on, when the page is only a hop, or None."""
+        if HUBSPOT_CLICK_PATH in urlsplit(page.url).path:
+            # The same scheme and host only: a click page naming anywhere else is not HubSpot's own
+            # next hop, and a hop from https down to http is not one to take.
+            text = body.decode("utf-8", errors="replace")
+            origin = f"{urlsplit(page.url).scheme}://{page.host_header}"
+            match = re.search(rf"{re.escape(origin)}{HUBSPOT_NEXT_HOP_PATH}", text)
+            if match:
+                return html.unescape(match.group())
+        refresh = soup.find("meta", attrs={"http-equiv": re.compile(r"^refresh$", re.IGNORECASE)})
+        if refresh is not None:
+            match = META_REFRESH.match(str(refresh.get("content", "")))
+            if match and float(match.group(1)) <= MAX_META_REFRESH_SECONDS:
+                return match.group(2)
+        return None
+
+    def _canonical_url(self, page: ValidatedURL, soup: BeautifulSoup, deadline: float) -> str | None:
         self._check_deadline(deadline)
         canonical = soup.find("link", rel=lambda value: value and "canonical" in value)
         value = str(canonical.get("href", "")) if canonical else ""
@@ -204,6 +260,8 @@ class ArticleFetcher:
         if deadline is not None:
             self._check_deadline(deadline)
         code = "ARTICLE_REDIRECT_BLOCKED" if redirect else "ARTICLE_URL_BLOCKED"
+        if len(value) > MAX_URL_LENGTH:
+            raise ArticleFetchError(code)
         try:
             parsed = urlsplit(value)
             port = parsed.port
@@ -274,13 +332,15 @@ class ArticleFetcher:
         deadline: float,
         *,
         timeout_deadline: float | None = None,
+        truncate: bool = False,
     ) -> ArticleResponse:
+        """Read a response of at most limit bytes: past it, raise, or with truncate keep the first limit."""
         try:
             self._check_deadline(deadline)
             if self.response_provider is not None:
                 provided_response = self.response_provider(url)
                 self._check_deadline(deadline)
-                return self._bounded_response(provided_response, limit, deadline)
+                return self._bounded_response(provided_response, limit, deadline, truncate=truncate)
             connection: http.client.HTTPConnection
             timeout = min(CONNECT_TIMEOUT_SECONDS, self._remaining(deadline))
             if timeout_deadline is not None:
@@ -308,7 +368,7 @@ class ArticleFetcher:
                 headers = {name.lower(): value for name, value in http_response.getheaders()}
                 self._check_deadline(deadline)
                 content_length = headers.get("content-length")
-                if content_length and int(content_length) > limit:
+                if content_length and int(content_length) > limit and not truncate:
                     raise ArticleFetchError("ARTICLE_TOO_LARGE")
                 body = bytearray()
                 while True:
@@ -319,7 +379,10 @@ class ArticleFetcher:
                         break
                     body.extend(chunk)
                     if len(body) > limit:
-                        raise ArticleFetchError("ARTICLE_TOO_LARGE")
+                        if not truncate:
+                            raise ArticleFetchError("ARTICLE_TOO_LARGE")
+                        del body[limit:]
+                        break
                 return ArticleResponse(http_response.status, headers, bytes(body))
             finally:
                 connection.close()
@@ -332,7 +395,9 @@ class ArticleFetcher:
         except (http.client.HTTPException, OSError, ValueError) as error:
             raise ArticleFetchError("ARTICLE_FETCH_FAILED") from error
 
-    def _bounded_response(self, response: ArticleResponse, limit: int, deadline: float) -> ArticleResponse:
+    def _bounded_response(
+        self, response: ArticleResponse, limit: int, deadline: float, *, truncate: bool = False
+    ) -> ArticleResponse:
         self._check_deadline(deadline)
         headers = {name.lower(): value for name, value in response.headers.items()}
         content_length = headers.get("content-length")
@@ -340,6 +405,9 @@ class ArticleFetcher:
             declared_length = int(content_length) if content_length else None
         except ValueError as error:
             raise ArticleFetchError("ARTICLE_FETCH_FAILED") from error
+        if truncate:
+            self._check_deadline(deadline)
+            return ArticleResponse(response.status_code, headers, response.body[:limit])
         if declared_length is not None and declared_length > limit:
             raise ArticleFetchError("ARTICLE_TOO_LARGE")
         if len(response.body) > limit:
