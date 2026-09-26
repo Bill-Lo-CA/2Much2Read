@@ -108,9 +108,11 @@ def has_source_text(entry: DigestEntry) -> bool:
     The article itself - read by the extractor for a Hacker News story, or linked from a newsletter
     and there for the headline rewrite to fetch - or another newsletter's coverage of the same
     story. Without either, the summary is whatever the extractor made of the newsletter's text,
-    and for a link list that is the headline alone.
+    and for a link list that is the headline alone. A Hacker News post whose body could not be read
+    falls back to metadata and stores its discussion page as the article link; that page was never
+    read, so it counts for nothing.
     """
-    return entry.content_basis in {"article", "hn_self_post"} or entry.article_url is not None or bool(entry.merged_summaries)
+    return entry.content_basis in {"article", "hn_self_post"} or _article_url(entry) is not None or bool(entry.merged_summaries)
 
 
 def canonical_url(value: str | None) -> str | None:
@@ -403,14 +405,17 @@ def render_digest(
 
     # Only what the reviewer selected may hold a headline slot. Entries without a review score are
     # the candidates it passed over, so filling spare headline slots from them would republish
-    # exactly what the final quality filter rejected. Rendering a plain item list keeps every slot.
+    # exactly what the final quality filter rejected. Without any scores - a plain item list, or a
+    # day the reviewer was never asked because nothing had source text - the slots go to what has
+    # something behind it, and an entry with nothing stays a mention even then: on a link-list-only
+    # day, filling them from the rest would headline exactly the one-line guesses held back.
     scored = [value for value in eligible if value.review_score is not None]
-    top = (scored or eligible)[:top_items]
-    rest = eligible[len(top) :]
-    sections = [
-        f"📰 {safe_topic} 2much2read — {when:%Y-%m-%d}",
-        labels["top"] + "\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)),
-    ]
+    top = (scored or [value for value in eligible if has_source_text(value)])[:top_items]
+    shown = {id(value) for value in top}
+    rest = [value for value in eligible if id(value) not in shown]
+    sections = [f"📰 {safe_topic} 2much2read — {when:%Y-%m-%d}"]
+    if top:
+        sections.append(labels["top"] + "\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)))
     if rest:
         sections.append(labels["rest"] + "\n" + "\n".join(mention(item) for item in rest))
     sections.append(

@@ -586,6 +586,9 @@ def test_an_identical_bare_copy_loses_to_the_one_with_coverage_behind_it() -> No
     assert kept[0].source_name == "AlphaSignal"
 
 
+HN_DISCUSSION = "https://news.ycombinator.com/item?id=123"
+
+
 @pytest.mark.parametrize(
     ("article_url", "content_basis", "merged_summaries", "expected"),
     [
@@ -595,6 +598,10 @@ def test_an_identical_bare_copy_loses_to_the_one_with_coverage_behind_it() -> No
         (None, "hn_self_post", (), True),
         (None, "article", (), True),
         (None, "metadata", (), False),
+        # A self-post whose body could not be read stores its discussion page as the article link.
+        (HN_DISCUSSION, "metadata", (), False),
+        (HN_DISCUSSION, "hn_self_post", (), True),
+        ("https://example.com/story", "metadata", (), True),
     ],
 )
 def test_what_counts_as_something_behind_an_entry(
@@ -602,7 +609,11 @@ def test_what_counts_as_something_behind_an_entry(
 ) -> None:
     # An article to fetch, another newsletter's coverage, or a text the extractor read in full.
     story = replace(
-        entry(1, "Story", "TLDR"), article_url=article_url, content_basis=content_basis, merged_summaries=merged_summaries
+        entry(1, "Story", "TLDR"),
+        article_url=article_url,
+        discussion_url=HN_DISCUSSION,
+        content_basis=content_basis,
+        merged_summaries=merged_summaries,
     )
 
     assert has_source_text(story) is expected

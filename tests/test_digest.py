@@ -69,7 +69,7 @@ def test_renderer_sanitizes_untrusted_fields_and_preserves_application_urls() ->
     )
 
     text = render_digest(
-        [DigestEntry(hostile_item, source_name=hostile)],
+        [DigestEntry(hostile_item, source_name=hostile, article_url="https://example.com/article")],
         datetime(2026, 6, 22, tzinfo=UTC),
         hostile,
         hostile,
@@ -87,7 +87,7 @@ def test_renderer_sanitizes_untrusted_fields_and_preserves_application_urls() ->
 def test_renderer_preserves_multilingual_readability_and_code_punctuation() -> None:
     digest_item = item(
         "C++ v2.0 API() — équipe 日本語",
-        None,
+        "https://example.com/cpp",
     ).model_copy(
         update={
             "summary_zh_tw": "Résumé：這是日本語與繁體中文的摘要，呼叫 x()。",
@@ -130,13 +130,17 @@ def test_renderer_uses_actual_topic_and_sources(topic: str) -> None:
     ],
 )
 def test_renderer_localizes_labels(language: str, labels: tuple[str, str, str, str]) -> None:
-    text = render_digest([item("Update", None)], datetime(2026, 6, 22, tzinfo=UTC), "AI", "Source", language=language)
+    text = render_digest(
+        [item("Update", "https://example.com/update")], datetime(2026, 6, 22, tzinfo=UTC), "AI", "Source", language=language
+    )
 
     assert all(label in text for label in labels)
 
 
 def test_renderer_uses_neutral_labels_for_unmapped_language() -> None:
-    text = render_digest([item("Update", None)], datetime(2026, 6, 22, tzinfo=UTC), "AI", "Source", language="de")
+    text = render_digest(
+        [item("Update", "https://example.com/update")], datetime(2026, 6, 22, tzinfo=UTC), "AI", "Source", language="de"
+    )
 
     assert "摘要：" not in text
     assert "   •：摘要" in text
@@ -292,11 +296,31 @@ def test_spare_headline_slots_are_not_filled_with_items_the_reviewer_rejected() 
 
 
 def test_an_unreviewed_item_list_still_fills_the_headline_section() -> None:
-    """Rendering plain items has no review scores, and every one of them is a headline."""
-    text = render_digest([item("First", None), item("Second", None)], datetime(2026, 6, 22, tzinfo=UTC), "AI", "TLDR")
+    """Rendering plain items has no review scores, and every one with an article is a headline."""
+    text = render_digest(
+        [item("First", "https://example.com/1"), item("Second", "https://example.com/2")],
+        datetime(2026, 6, 22, tzinfo=UTC),
+        "AI",
+        "TLDR",
+    )
 
     assert "1. First" in text and "2. Second" in text
     assert "🧰" not in text
+
+
+def test_a_day_of_bare_headlines_renders_mentions_and_no_top_stories() -> None:
+    # The reviewer is never asked when nothing has source text, so no entry carries a score. Filling
+    # the headline section from the ranking would put exactly those one-line guesses back on top.
+    bare = [DigestEntry(item("First", None), source_name="Hacker Newsletter", reranker_score=0.9)]
+    backed = DigestEntry(item("Backed", "https://example.com/b"), article_url="https://example.com/b", reranker_score=0.1)
+
+    only_bare = render_digest(bare, datetime(2026, 6, 22, tzinfo=UTC), "AI", "HN")
+    mixed = render_digest([*bare, backed], datetime(2026, 6, 22, tzinfo=UTC), "AI", "HN")
+
+    assert "🔥" not in only_bare
+    assert "摘要：" not in only_bare
+    assert "🧰" in only_bare and "• First" in only_bare
+    assert "1. Backed" in mixed and "• First" in mixed
 
 
 def merged_entry(title: str, summary: str, source: str, url: str | None = None, review_score: int | None = None) -> DigestEntry:
