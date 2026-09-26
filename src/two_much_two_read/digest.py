@@ -355,6 +355,8 @@ def render_digest(
     source_names: str,
     top_items: int = 5,
     language: str = "zh-TW",
+    *,
+    reviewed: bool = False,
 ) -> str:
     labels = _labels(language)
     safe_topic = sanitize_discord_text(topic)
@@ -407,12 +409,14 @@ def render_digest(
 
     # Only what the reviewer selected may hold a headline slot. Entries without a review score are
     # the candidates it passed over, so filling spare headline slots from them would republish
-    # exactly what the final quality filter rejected. Without any scores - a plain item list, or a
-    # day the reviewer was never asked because nothing had source text - the slots go to what has
-    # something behind it, and an entry with nothing stays a mention even then: on a link-list-only
-    # day, filling them from the rest would headline exactly the one-line guesses held back.
+    # exactly what the final quality filter rejected. That holds even when nothing is scored: a run
+    # that skipped the reviewer because nothing had source text can still merge two bare entries
+    # from different newsletters into one with coverage, and nobody reviewed it. Only a plain item
+    # list, which never went through a review, fills the slots from what has something behind it;
+    # an entry with nothing stays a mention even there.
     scored = [value for value in eligible if value.review_score is not None]
-    top = (scored or [value for value in eligible if has_source_text(value)])[:top_items]
+    unreviewed = [] if reviewed else [value for value in eligible if has_source_text(value)]
+    top = (scored or unreviewed)[:top_items]
     shown = {id(value) for value in top}
     rest = [value for value in eligible if id(value) not in shown]
     sections = [f"📰 {safe_topic} 2much2read — {when:%Y-%m-%d}"]

@@ -323,6 +323,24 @@ def test_a_day_of_bare_headlines_renders_mentions_and_no_top_stories() -> None:
     assert "1. Backed" in mixed and "• First" in mixed
 
 
+def test_after_a_review_only_the_reviewers_picks_are_headlines_even_when_none_are_scored() -> None:
+    # A run that skipped the reviewer can still merge two bare entries from different newsletters,
+    # and the result has coverage behind it; nobody reviewed it, so it stays a mention.
+    merged = DigestEntry(item("Grok 4.7", None), source_name="Hacker Newsletter", also_from=("TLDR AI",), reranker_score=0.9)
+
+    text = render_digest([merged], datetime(2026, 6, 22, tzinfo=UTC), "AI", "HN", reviewed=True)
+    picked = render_digest(
+        [merged, replace(merged, item=item("Opus 5.5", None), review_score=90)],
+        datetime(2026, 6, 22, tzinfo=UTC),
+        "AI",
+        "HN",
+        reviewed=True,
+    )
+
+    assert "🔥" not in text and "• Grok 4.7" in text
+    assert "1. Opus 5.5" in picked and "• Grok 4.7" in picked
+
+
 def merged_entry(title: str, summary: str, source: str, url: str | None = None, review_score: int | None = None) -> DigestEntry:
     return (
         DigestEntry(

@@ -992,6 +992,7 @@ def run_pipeline(
                 ", ".join(dict.fromkeys(entry.source_name or entry.source_id or "Unknown" for entry in reviewed_entries)),
                 settings.digest_top_items,
                 settings.digest_language,
+                reviewed=True,
             )
             digest_id: int | None = None
             destinations = []
