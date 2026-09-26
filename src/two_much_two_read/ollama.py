@@ -29,6 +29,10 @@ Do not invent facts or return URLs. """
 newsletter character for character, keeping its original language, wording, and capitalisation. It is
 what links the item back to its URL. title is that same headline translated, with any reading-time or
 section marker dropped.
+Every link in the newsletter has been replaced by a code in square brackets, such as [L7]. Set link
+to the code of the item's own article link: the one its headline points to, never a comments,
+discussion, sponsor, share, or subscription link. Use null when the item has no link of its own.
+Codes never belong in any other field.
 One newsletter lists many unrelated items in a row. Derive each item only from its own headline and
 body: a neighbouring item must never influence this item's category, importance, or confidence.
 Categories: AI_MODEL for model and AI product releases, AI_RESEARCH for papers and experimental
@@ -94,6 +98,11 @@ REVIEW_RESERVED_TOKENS_PER_SELECTION = 280
 REVIEW_RESERVED_OUTPUT_TOKENS = 256
 # A deepened item may use both 800-character fields, which is far more output than a review needs.
 DEEPEN_RESERVED_OUTPUT_TOKENS = 1600
+# Measured on twenty real ten-item extractions: at most 1911 output tokens, so 250 per item plus the
+# overview leaves margin. A repair round also carries the first answer back, and is refitted for it.
+EXTRACT_RESERVED_TOKENS_PER_ITEM = 250
+EXTRACT_RESERVED_OUTPUT_BASE = 300
+EXTRACT_REPAIR_OVERHEAD_TOKENS = 120
 
 DetectorFactory.seed = 0
 ChineseDetectorFactory.seed = 0
@@ -185,6 +194,28 @@ def fitted_review_candidates(
             len(candidates),
         )
     return fitted
+
+
+def fitted_extraction_content(content: str, overhead_tokens: int, num_ctx: int, max_items: int) -> tuple[str, bool]:
+    """Trim a newsletter from the tail until the extraction prompt fits num_ctx.
+
+    Nothing bounded this prompt, and Ollama does not refuse one that is too long: it keeps the first
+    four tokens and drops from there (runner.go: "truncating input prompt" keep=4), which removes the
+    system prompt, the schema, and the head of the newsletter, and leaves the model the tail with no
+    instructions. The live log shows it on 20 runs in September; The New Stack and AINews reached
+    21,224 and 19,254 tokens against 16,384. Cutting the tail here keeps the instructions and the
+    stories that come first.
+    """
+    output = max_items * EXTRACT_RESERVED_TOKENS_PER_ITEM + EXTRACT_RESERVED_OUTPUT_BASE
+    budget = num_ctx - overhead_tokens - output
+    if budget <= 0:
+        return "", bool(content)
+    bounded = content
+    while bounded and (used := _estimated_tokens(bounded)) > budget:
+        bounded = bounded[: max(1, len(bounded) * budget // used)]
+    if len(bounded) < len(content):
+        logger.warning("extraction prompt exceeds num_ctx=%d; reading %d of %d characters", num_ctx, len(bounded), len(content))
+    return bounded, len(bounded) < len(content)
 
 
 def fitted_deepening_content(content: str, overhead_tokens: int, num_ctx: int) -> tuple[str, bool]:
@@ -308,17 +339,18 @@ class OllamaClient:
         # Ollama's grammar parser rejects large maxLength values such as HttpUrl's 2083-character limit.
         # Pydantic still validates all original constraints after generation.
         schema = _ollama_schema(EmailExtraction.model_json_schema())
-        prompt = (
-            f"source_id={source_id}\ntruncated_input={str(truncated).lower()}\nmax_items={max_items}\n"
-            f"Schema: {json.dumps(schema)}\n<newsletter_content>\n{content}\n</newsletter_content>"
-        )
-        messages = [
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT.format(language_instruction=_language_instruction(self.digest_language)),
-            },
-            {"role": "user", "content": prompt},
-        ]
+        system = SYSTEM_PROMPT.format(language_instruction=_language_instruction(self.digest_language))
+
+        def prompt_for(text: str, cut: bool) -> str:
+            return (
+                f"source_id={source_id}\ntruncated_input={str(cut).lower()}\nmax_items={max_items}\n"
+                f"Schema: {json.dumps(schema)}\n<newsletter_content>\n{text}\n</newsletter_content>"
+            )
+
+        overhead = _estimated_tokens(system) + _estimated_tokens(prompt_for("", True))
+        sent, trimmed = fitted_extraction_content(content, overhead, self.num_ctx, max_items)
+        truncated = truncated or trimmed
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt_for(sent, truncated)}]
         for attempt in range(2):
             response = self._client.post(
                 f"{self.base_url}/api/chat",
@@ -358,6 +390,12 @@ class OllamaClient:
                         f"source={source_id!r} attempt={attempt + 1} "
                         f"error={str(error)!r} response_preview={_preview(raw)!r}"
                     ) from None
+                # The repair turn sends the first answer back, so the newsletter is refitted around it
+                # rather than letting the longer conversation overflow and lose the system prompt.
+                repair_overhead = overhead + _estimated_tokens(raw) + EXTRACT_REPAIR_OVERHEAD_TOKENS
+                sent, trimmed = fitted_extraction_content(content, repair_overhead, self.num_ctx, max_items)
+                truncated = truncated or trimmed
+                messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt_for(sent, truncated)}]
                 messages.extend(
                     [
                         {"role": "assistant", "content": raw},

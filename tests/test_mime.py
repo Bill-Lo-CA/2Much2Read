@@ -13,6 +13,7 @@ from two_much_two_read.mime import (
     extract_mime,
     html_to_text,
 )
+from two_much_two_read.schemas import ExtractedEmailContent
 
 
 @pytest.mark.parametrize(("plain", "html"), [("plain wins", None), ("plain wins", "<p>html loses</p>")])
@@ -350,3 +351,58 @@ def test_gmail_payload_skips_malformed_part_and_uses_valid_text() -> None:
     }
 
     assert extract_gmail_payload(payload).analysis_text == "valid"
+
+
+def _codes(content: ExtractedEmailContent) -> dict[str, str]:
+    return {candidate.code: str(candidate.raw_url) for candidate in content.link_candidates}
+
+
+def test_the_model_reads_link_codes_instead_of_urls() -> None:
+    # The candidate list keeps every URL; the text the model reads names each one by its code.
+    plain = (
+        "Grok 4.7 https://example.com/grok?utm_source=newsletter (comments: https://news.example/item?id=1)\n"
+        "[Claude Opus 5.5](https://example.com/opus) is out. See https://example.com/grok?utm_source=newsletter again."
+    )
+
+    content = extract_gmail_payload(_body("text/plain", plain))
+
+    codes = _codes(content)
+    assert "https://" not in content.analysis_text
+    grok = next(code for code, url in codes.items() if url.startswith("https://example.com/grok"))
+    comments = next(code for code, url in codes.items() if url.startswith("https://news.example/"))
+    opus = next(code for code, url in codes.items() if url == "https://example.com/opus")
+    assert content.analysis_text.splitlines() == [
+        f"Grok 4.7 [{grok}] (comments: [{comments}])",
+        f"Claude Opus 5.5 [{opus}] is out. See [{grok}] again.",
+    ]
+
+
+def test_an_html_newsletter_is_coded_the_same_way() -> None:
+    html = '<h2>Top story</h2><p><a href="https://example.com/story">Top story</a> and more.</p>'
+
+    content = extract_gmail_payload(_body("text/html", html))
+
+    assert content.analysis_text == "Top story\nTop story [L1]\nand more."
+    assert _codes(content) == {"L1": "https://example.com/story"}
+
+
+def test_a_link_that_is_not_a_candidate_is_dropped_from_the_text() -> None:
+    # An unsubscribe link is never a candidate, so no code may point at it; its URL goes too.
+    html = '<p><a href="https://example.com/story">Story</a> · <a href="https://example.com/unsub">Unsubscribe</a></p>'
+
+    content = extract_gmail_payload(_body("text/html", html))
+
+    assert "example.com/unsub" not in content.analysis_text
+    assert "Unsubscribe [L" not in content.analysis_text
+    assert _codes(content) == {"L1": "https://example.com/story"}
+
+
+def test_urls_no_longer_spend_the_character_budget() -> None:
+    # A tracking URL per story used to fill the 45,000-character cut before the stories did.
+    tracking = "https://click.example/" + "x" * 400
+    plain = "\n".join(f"Story {number} {tracking}{number}" for number in range(150))
+
+    content = extract_gmail_payload(_body("text/plain", plain))
+
+    assert content.original_characters is not None and content.original_characters < 3_000
+    assert content.analysis_text.endswith("Story 149 [L150]")

@@ -136,3 +136,52 @@ def test_a_headline_that_is_only_a_link_still_yields_something_to_match_on() -> 
     item = NewsletterItemAnalysis.model_validate(analysis_values(source_title="https://example.com/story"))
 
     assert item.source_title == "https://example.com/story"
+
+
+@pytest.mark.parametrize(
+    ("answer", "link"),
+    [
+        ("L7", "L7"),
+        ("[L7]", "L7"),
+        ("l 7", "L7"),
+        ("L07", "L7"),
+        ("7", None),
+        ("none", None),
+        ("", None),
+        (7, None),
+        (None, None),
+    ],
+)
+def test_a_link_code_is_read_in_any_form_a_model_writes_it(answer: object, link: str | None) -> None:
+    # Anything unreadable is no answer rather than an error: the title matcher can stand in for it,
+    # and rejecting would cost the whole email.
+    item = NewsletterItemAnalysis.model_validate(
+        {
+            "title": "Story",
+            "source_title": "Story",
+            "category": "OTHER",
+            "summary_zh_tw": "摘要",
+            "why_it_matters_zh_tw": "原因",
+            "importance": 5,
+            "confidence": 0.5,
+            "link": answer,
+        }
+    )
+
+    assert item.link == link
+
+
+def test_link_codes_copied_into_text_fields_are_removed() -> None:
+    item = NewsletterItemAnalysis.model_validate(
+        {
+            "title": "Grok 4.7 [L3]",
+            "source_title": "Grok 4.7 [L3] (comments: [L4])",
+            "category": "AI_MODEL",
+            "summary_zh_tw": "新模型發布 [L3]。",
+            "why_it_matters_zh_tw": "原因",
+            "importance": 5,
+            "confidence": 0.5,
+        }
+    )
+
+    assert (item.title, item.source_title, item.summary_zh_tw) == ("Grok 4.7", "Grok 4.7 (comments: )", "新模型發布。")

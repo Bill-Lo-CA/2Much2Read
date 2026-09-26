@@ -502,3 +502,79 @@ def test_a_chinese_field_cannot_hide_in_an_english_digest_either() -> None:
         _validate_digest_language(
             "en", ["OpenAI released a very fast model today with new hardware.", "這件事很重要因為成本下降。"]
         )
+
+
+def _extraction_route() -> respx.Route:
+    return respx.post("http://127.0.0.1:11434/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": json.dumps(valid_result())}})
+    )
+
+
+@respx.mock
+def test_an_oversized_newsletter_is_cut_from_the_tail_not_the_instructions() -> None:
+    # Ollama keeps four tokens and drops from there when a prompt overflows, which took the system
+    # prompt and the head of the newsletter and left the model the tail with no instructions.
+    route = _extraction_route()
+    content = "FIRST STORY\n" + "word " * 40_000 + "\nLAST STORY"
+
+    result = OllamaClient(num_ctx=16384).extract("alphasignal", content, max_items=10)
+
+    system, user = (message["content"] for message in json.loads(route.calls[0].request.content)["messages"])
+    assert "FIRST STORY" in user
+    assert "LAST STORY" not in user
+    assert "truncated_input=true" in user
+    assert result.truncated_input
+    reserved = 10 * ollama.EXTRACT_RESERVED_TOKENS_PER_ITEM + ollama.EXTRACT_RESERVED_OUTPUT_BASE
+    assert ollama._estimated_tokens(system) + ollama._estimated_tokens(user) + reserved <= 16384
+
+
+@respx.mock
+def test_a_repair_round_is_refitted_around_the_answer_it_sends_back() -> None:
+    # The repair turn carries the first answer, so sending the same newsletter again would overflow
+    # by exactly that much - and an overflow loses the system prompt, not the tail.
+    invalid = valid_result()
+    invalid["items"][0]["confidence"] = 9  # type: ignore[index]
+    invalid["overview_zh_tw"] = "摘要" * 1_000
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[
+            httpx.Response(200, json={"message": {"content": json.dumps(invalid, ensure_ascii=False)}}),
+            httpx.Response(200, json={"message": {"content": json.dumps(valid_result())}}),
+        ]
+    )
+
+    OllamaClient(num_ctx=16384).extract("alphasignal", "FIRST STORY\n" + "word " * 40_000, max_items=10)
+
+    first, repair = (json.loads(call.request.content)["messages"] for call in route.calls)
+    assert len(repair[1]["content"]) < len(first[1]["content"])
+    assert "FIRST STORY" in repair[1]["content"]
+    assert repair[0]["content"] == first[0]["content"]
+    reserved = 10 * ollama.EXTRACT_RESERVED_TOKENS_PER_ITEM + ollama.EXTRACT_RESERVED_OUTPUT_BASE
+    assert sum(ollama._estimated_tokens(message["content"]) for message in repair) + reserved <= 16384
+
+
+@respx.mock
+def test_a_newsletter_that_fits_is_sent_whole() -> None:
+    route = _extraction_route()
+
+    result = OllamaClient().extract("alphasignal", "Short issue [L1]")
+
+    user = json.loads(route.calls[0].request.content)["messages"][1]["content"]
+    assert "Short issue [L1]" in user
+    assert "truncated_input=false" in user
+    assert not result.truncated_input
+
+
+@respx.mock
+def test_the_extractor_is_told_what_a_link_code_is_and_answers_with_one() -> None:
+    answer = valid_result()
+    answer["items"][0]["link"] = "[L2]"  # type: ignore[index]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": json.dumps(answer)}})
+    )
+
+    result = OllamaClient().extract("alphasignal", "Model release [L2] (comments [L3])")
+
+    system = json.loads(route.calls[0].request.content)["messages"][0]["content"]
+    assert "[L7]" in system
+    assert "never a comments" in system
+    assert result.items[0].link == "L2"
