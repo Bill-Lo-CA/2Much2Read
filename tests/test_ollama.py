@@ -681,3 +681,16 @@ def test_the_extractor_is_told_not_to_embellish_a_bare_headline() -> None:
     system = json.loads(route.calls[0].request.content)["messages"][0]["content"]
     assert "nothing but its headline" in system
     assert "never add a detail" in system
+
+
+@respx.mock
+def test_the_reviewer_is_told_that_sustained_coverage_matters() -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": json.dumps({"selected": []})}})
+    )
+
+    OllamaClient().review_digest([{"candidate_id": 1, "title": "Opus 5.5", "previous_days": 2}], 5)
+
+    system, user = (message["content"] for message in json.loads(route.calls[0].request.content)["messages"])
+    assert "previous_days" in system
+    assert '"previous_days": 2' in user

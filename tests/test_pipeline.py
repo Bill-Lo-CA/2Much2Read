@@ -2728,6 +2728,30 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
 
     monkeypatch.setattr(pipeline, "ArticleFetcher", FakeFetcher)
 
+    # The day before, another newsletter linked the same Muse article.
+    earlier = Database(settings.database_path)
+    yesterday = earlier.discover_gmail_document(
+        "gmail-0", "thread-0", "alphasignal", datetime(2026, 7, 22, 12, tzinfo=UTC), "Earlier", "news@example.com", "x", False
+    )
+    assert yesterday is not None
+    earlier.store_items(
+        yesterday,
+        [
+            DigestItem.model_validate(
+                {
+                    "title": "Meta Muse 零日漏洞",
+                    "category": "SECURITY",
+                    "summary_zh_tw": "摘要",
+                    "why_it_matters_zh_tw": "原因",
+                    "importance": 8,
+                    "confidence": 0.9,
+                    "source_url": "https://example.com/muse",
+                }
+            )
+        ],
+    )
+    earlier.close()
+
     result = run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, tzinfo=UTC))
 
     database = Database(settings.database_path)
@@ -2736,6 +2760,8 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
     top, rest = content.split("🧰")
     assert "1. Muse 0-day" in top
     assert "Opus 5.5" in rest
+    # Carried the day before, so the run marks it as continuing coverage.
+    assert "🔁 前 3 天中有 1 天也有報導" in top
     # Progress messages are dropped without a terminal, so the scheduled run's JSON is the record.
     assert isinstance(result, NewsletterRunResult)
     assert result.model_dump(mode="json", exclude_none=True)["security_floor"] == {

@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import math
 import re
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import date, datetime
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 from two_read_runtime.discord import sanitize_discord_text
@@ -27,6 +29,8 @@ LABELS = {
         "article": "文章",
         "discussion": "討論",
         "source": "來源",
+        "repeat": "🔁 前 {window} 天中有 {days} 天也有報導",
+        "repeat_short": "🔁 {days}/{window} 天",
     },
     "zh-cn": {
         "summary": "摘要",
@@ -44,6 +48,8 @@ LABELS = {
         "article": "文章",
         "discussion": "讨论",
         "source": "来源",
+        "repeat": "🔁 前 {window} 天中有 {days} 天也有报道",
+        "repeat_short": "🔁 {days}/{window} 天",
     },
     "en": {
         "summary": "Summary",
@@ -61,6 +67,8 @@ LABELS = {
         "article": "Article",
         "discussion": "Discussion",
         "source": "Source",
+        "repeat": "🔁 Also covered on {days} of the previous {window} days",
+        "repeat_short": "🔁 {days}/{window} days",
     },
 }
 NEUTRAL_LABELS = {
@@ -79,6 +87,8 @@ NEUTRAL_LABELS = {
     "article": "🔗",
     "discussion": "💬",
     "source": "🔗",
+    "repeat": "🔁 {days}/{window}",
+    "repeat_short": "🔁 {days}/{window}",
 }
 
 
@@ -100,6 +110,9 @@ class DigestEntry:
     # Filled by merge_related_entries when other newsletters covered the same story.
     also_from: tuple[str, ...] = ()
     merged_summaries: tuple[str, ...] = ()
+    # How many of the previous previous_window days carried the same story, from with_previous_coverage.
+    previous_days: int = 0
+    previous_window: int = 0
 
 
 def has_source_text(entry: DigestEntry) -> bool:
@@ -212,6 +225,8 @@ def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:
         # it does not block borrowing one: keeping it would lose both the link the renderer shows
         # and the fuller text the headline rewrite reads.
         article_url=_article_url(primary) or _article_url(other) or primary.article_url,
+        previous_days=max(primary.previous_days, other.previous_days),
+        previous_window=max(primary.previous_window, other.previous_window),
     )
 
 
@@ -277,6 +292,82 @@ def share_a_candidate_token(left: DigestEntry, right: DigestEntry) -> bool:
     would raise the worst case to 108, which is why it stays.
     """
     return bool(story_tokens(left) & story_tokens(right))
+
+
+# Words that pass for identity-shaped tokens in a headline but name nothing.
+FUNCTION_WORDS = frozenset(
+    {"a", "an", "and", "are", "can", "for", "how", "in", "is", "its", "new", "of", "on", "our", "the", "their", "to"}
+    | {"what", "why", "with", "you", "your"}
+)
+# A product and its version - "Opus 5.5", "GPT-6", "Qwen-Image-2.1", "MiMo v2.6". Stories that run for
+# days are nearly always launches or incidents that carry one, and a shared one is specific enough to
+# ask about on its own. Bounded by ASCII letters and digits, since CJK counts as a word character.
+VERSIONED_NAME = re.compile(r"(?<![A-Za-z0-9])([A-Za-z][A-Za-z0-9]*)[\s-]?v?(\d+(?:\.\d+)?)(?![0-9.])")
+# How rare a shared token has to be, in log inverse frequency over the background, for a pair to be
+# asked about without a shared versioned name: one token in under ~0.3% of recent items, or two
+# moderately rare ones such as "Meta" and "Muse".
+REPEAT_SHORTLIST_WEIGHT = 6.0
+# Earlier items asked about per entry per day, best first. One was not enough: on 2026-09-23 the best
+# match for "Claude Opus 5.5" was a roundup of three launches, rightly judged a different story,
+# while three items about Opus 5.5 alone went unasked.
+REPEAT_JUDGEMENTS_PER_DAY = 3
+
+
+def versioned_names(entry: DigestEntry) -> set[str]:
+    text = f"{entry.item.title} {entry.item.summary_zh_tw}"
+    return {f"{name.casefold()} {version}" for name, version in VERSIONED_NAME.findall(text)}
+
+
+def with_previous_coverage(
+    entries: list[DigestEntry],
+    previous: list[tuple[date, DigestEntry]],
+    same_story: Callable[[DigestEntry, DigestEntry], bool],
+    window: int,
+    background: list[set[str]],
+) -> list[DigestEntry]:
+    """Mark each entry with how many of the previous days also carried its story.
+
+    A story newsletters keep returning to over several days is one that matters, so the count is
+    shown to the reader and handed to the reviewer. The same article link settles it outright;
+    otherwise the model decides, as same-day merging does, but only for a shortlisted pair.
+
+    The same-day shortlist - any shared identity-shaped token - is everything across three days: on
+    the 2026-09-25 run, 40 candidates against 202 earlier items shortlisted 1,433 pairs, mostly on
+    "AI". Rarity within the window does not fix it, because a story that repeats makes its own name
+    common - "Claude" and "Opus" were exactly what that filtered out. So rarity is measured over a
+    longer background, a shared versioned name counts on its own, and each day gets the few earlier
+    items that score highest, asked in turn until one agrees. Entries arrive in reranker order, so a
+    spent judgement budget costs the weakest candidates their mark first.
+    """
+    frequency = Counter(token for tokens in background for token in tokens)
+    size = max(1, len(background))
+
+    def weight(tokens: set[str]) -> float:
+        return sum(math.log(size / (1 + frequency[token])) for token in tokens)
+
+    earlier = [
+        (day, other, canonical_url(other.article_url), story_tokens(other) - FUNCTION_WORDS, versioned_names(other))
+        for day, other in previous
+    ]
+    marked: list[DigestEntry] = []
+    for entry in entries:
+        link = canonical_url(entry.article_url)
+        tokens = story_tokens(entry) - FUNCTION_WORDS
+        names = versioned_names(entry)
+        days = {day for day, _, other_link, _, _ in earlier if link is not None and link == other_link}
+        shortlist: dict[date, list[tuple[tuple[int, float], int, DigestEntry]]] = {}
+        for position, (day, other, _, other_tokens, other_names) in enumerate(earlier):
+            score = (len(names & other_names), weight(tokens & other_tokens))
+            if day not in days and (score[0] or score[1] >= REPEAT_SHORTLIST_WEIGHT):
+                shortlist.setdefault(day, []).append((score, -position, other))
+        for day, candidates in sorted(shortlist.items()):
+            best_first = sorted(candidates, key=lambda candidate: candidate[:2], reverse=True)
+            if any(same_story(entry, other) for _, _, other in best_first[:REPEAT_JUDGEMENTS_PER_DAY]):
+                days.add(day)
+        # An entry checked after merging may already carry a larger count from one it absorbed.
+        days_carried = max(entry.previous_days, min(len(days), window))
+        marked.append(replace(entry, previous_days=days_carried, previous_window=window) if days else entry)
+    return marked
 
 
 def merge_related_entries(
@@ -386,6 +477,8 @@ def render_digest(
         if value.source_name:
             names = ", ".join((value.source_name, *value.also_from))
             lines.append(f"   {labels['source']}：{sanitize_discord_text(names)}")
+        if value.previous_days:
+            lines.append(f"   {labels['repeat'].format(days=value.previous_days, window=value.previous_window)}")
         if value.hn_item_id:
             if value.hn_score is not None and value.hn_comments is not None:
                 lines.append(f"   {labels['hn']}：{value.hn_score} {labels['points']} · {value.hn_comments} {labels['comments']}")
@@ -406,6 +499,8 @@ def render_digest(
         parts = [f"• {sanitize_discord_text(item.title)}"]
         if value.source_name:
             parts.append(sanitize_discord_text(", ".join((value.source_name, *value.also_from))))
+        if value.previous_days:
+            parts.append(labels["repeat_short"].format(days=value.previous_days, window=value.previous_window))
         url = value.article_url or (str(item.source_url) if item.source_url else None) or value.discussion_url
         if url:
             parts.append(f"<{url}>")
