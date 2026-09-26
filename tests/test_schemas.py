@@ -185,3 +185,26 @@ def test_link_codes_copied_into_text_fields_are_removed() -> None:
     )
 
     assert (item.title, item.source_title, item.summary_zh_tw) == ("Grok 4.7", "Grok 4.7 (comments: )", "新模型發布。")
+
+
+def test_every_bracketed_spelling_of_a_link_code_is_removed_but_a_bare_one_stays() -> None:
+    # The link field reads "[l 7]" and "[L07]" as L7, so the text fields drop them too. Unbracketed,
+    # "L2" is as likely a cache level as a code, and it stays.
+    item = NewsletterItemAnalysis.model_validate(
+        {
+            "title": "Grok 4.7 [l 7]",
+            "source_title": "Grok 4.7 [ L07 ]",
+            "category": "AI_MODEL",
+            "summary_zh_tw": "L2 快取加倍 [l7]。",
+            "why_it_matters_zh_tw": "原因[L 7]",
+            "importance": 5,
+            "confidence": 0.5,
+        }
+    )
+
+    assert (item.title, item.source_title, item.summary_zh_tw, item.why_it_matters_zh_tw) == (
+        "Grok 4.7",
+        "Grok 4.7",
+        "L2 快取加倍。",
+        "原因",
+    )

@@ -13,7 +13,9 @@ SOURCE_TITLE_URL = re.compile(r"[\[(]?\s*https?://\S+\s*[\])]?", re.IGNORECASE)
 SOURCE_TITLE_MAX_CHARACTERS = 200
 # A link as the extractor sees it (see mime._coded_text). Stripped from every text field it could be
 # copied into, because it means nothing to a reader.
-LINK_CODE_TEXT = re.compile(r"\s*\[L\d{1,4}\]")
+# Every spelling LINK_CODE_ANSWER reads, but only in brackets: bare "L2" in a title is as likely a
+# cache level or an autonomy grade as a code.
+LINK_CODE_TEXT = re.compile(r"\s*\[\s*L\s*\d{1,4}\s*\]", re.IGNORECASE)
 LINK_CODE_ANSWER = re.compile(r"\[?\s*L\s*(\d{1,4})\s*\]?", re.IGNORECASE)
 
 DigestCategory = Literal[

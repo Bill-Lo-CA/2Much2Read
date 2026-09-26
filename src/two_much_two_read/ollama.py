@@ -89,21 +89,40 @@ CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 JAPANESE_KANA_PATTERN = re.compile(r"[\u3040-\u30ff]")
 HANGUL_PATTERN = re.compile(r"[\uac00-\ud7af]")
 ARTICLE_ANALYSIS_MAX_CHARACTERS = 30_000
-# No tokenizer ships with this project, so prompt budgets use deliberately high
-# characters-to-tokens ratios: overestimating shrinks the prompt, underestimating overflows it.
-# Measured against the Qwen3 tokenizer: Traditional Chinese averages 0.70 per ideograph (0.87 at
-# worst per item), Hangul 0.66, kana 0.48, emoji 1.0 to 2.0 with joiners, and hex or base64 runs
-# 0.74 to 0.92 - so those runs take the ceiling, since a byte-level tokenizer never spends more
-# than one token on an ASCII byte. At the English rate a Korean page passed for half its size.
-REVIEW_TOKENS_PER_CJK_CHARACTER = 0.8
-REVIEW_TOKENS_PER_OTHER_CHARACTER = 0.3
-TOKENS_PER_OTHER_NON_ASCII_CHARACTER = 1.0
+# No tokenizer ships with this project, so prompt budgets are estimated, deliberately high:
+# overestimating shrinks the prompt, underestimating overflows it. A byte-level BPE tokenizer first
+# splits text into pieces - a word, a single digit, a run of punctuation - and never merges across
+# them, so each costs at least one token. A per-character rate misses that: `x = y + 1` and
+# "v1.2.3 on 2026-09-26" (Qwen spells every digit alone) came to under half their real count, while
+# long identifiers charged as dense runs doubled ordinary code. Measured against the Qwen3
+# tokenizer, this lands 1.16-1.44x over nine real newsletters and 1.11x over review candidates, and
+# at or above the real count for code, numbers, JSON, Hangul, kana, emoji, and hex or base64 blobs.
+TOKEN_PIECE = re.compile(
+    r"(?P<blob>(?=[A-Za-z0-9+/=]*[0-9])[A-Za-z0-9+/=]{24,})"
+    # A word takes one punctuation mark in front of it, as `_window` or `.previous` in code - but
+    # not after a space, which the mark joins instead: ` "id` is ` "` and `id`.
+    r"|(?P<word>(?:(?<!\s)[!-/:-@\[-`{-~])?[A-Za-z]+)"
+    r"|(?P<digit>[0-9])"
+    r"|(?P<punctuation>[!-/:-@\[-`{-~]+)"
+    # One space joins the piece after it, except a digit, which Qwen keeps apart from it.
+    r"|(?P<space>[ \t]+(?=[0-9])|\s*\n\s*|[ \t]{2,})"
+    r"|(?P<joined>[ \t](?=.))"
+    r"|(?P<cjk>[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff])"
+    r"|(?P<astral>[\U00010000-\U0010ffff])"
+    r"|(?P<other>.)",
+    re.DOTALL,
+)
+# Per piece, or per character for blob and the non-ASCII classes. Traditional Chinese averages 0.70
+# a character (0.87 at worst per item), Hangul 0.66, kana 0.48, emoji up to 2 with joiners, and hex
+# or base64 up to 0.92 - the ceiling, since no ASCII byte costs more than one token.
+TOKENS_PER_WORD_CHARACTER = 0.3
+TOKENS_PER_PUNCTUATION_CHARACTER = 0.5
+TOKENS_PER_CJK_CHARACTER = 0.8
 TOKENS_PER_ASTRAL_CHARACTER = 2.0
-TOKENS_PER_DENSE_ASCII_CHARACTER = 1.0
-NON_ASCII_PATTERN = re.compile(r"[^\x00-\x7f]")
-ASTRAL_PATTERN = re.compile(r"[\U00010000-\U0010ffff]")
-# Unbroken printable ASCII this long is an identifier, hash, or encoded blob rather than prose.
-DENSE_ASCII_RUN = re.compile(r"[!-~]{24,}")
+# Fitting estimates the prompt template and the text spliced into it apart, and pieces do not add
+# up across the seam: the template's blank line splits into two newlines around the text. Measured
+# on 192 fitted prompts, the whole ran one token over the parts in 74; this covers it with room.
+ESTIMATE_SPLICE_TOKENS = 4
 REVIEW_TOKENS_PER_CANDIDATE_SEPARATOR = 4
 REVIEW_RESERVED_TOKENS_PER_SELECTION = 280
 REVIEW_RESERVED_OUTPUT_TOKENS = 256
@@ -133,18 +152,22 @@ def _preview(value: str, limit: int = 800) -> str:
 
 
 def _estimated_tokens(value: str) -> int:
-    cjk = len(CJK_PATTERN.findall(value))
-    astral = len(ASTRAL_PATTERN.findall(value))
-    other_non_ascii = len(NON_ASCII_PATTERN.findall(value)) - cjk - astral
-    dense = sum(len(run) for run in DENSE_ASCII_RUN.findall(value))
-    plain = len(value) - cjk - astral - other_non_ascii - dense
-    return math.ceil(
-        cjk * REVIEW_TOKENS_PER_CJK_CHARACTER
-        + astral * TOKENS_PER_ASTRAL_CHARACTER
-        + other_non_ascii * TOKENS_PER_OTHER_NON_ASCII_CHARACTER
-        + dense * TOKENS_PER_DENSE_ASCII_CHARACTER
-        + plain * REVIEW_TOKENS_PER_OTHER_CHARACTER
-    )
+    total = 0.0
+    for piece in TOKEN_PIECE.finditer(value):
+        kind, size = piece.lastgroup, piece.end() - piece.start()
+        if kind == "word":
+            total += max(1.0, size * TOKENS_PER_WORD_CHARACTER)
+        elif kind == "punctuation":
+            total += max(1.0, size * TOKENS_PER_PUNCTUATION_CHARACTER)
+        elif kind == "blob":
+            total += size
+        elif kind == "cjk":
+            total += TOKENS_PER_CJK_CHARACTER
+        elif kind == "astral":
+            total += TOKENS_PER_ASTRAL_CHARACTER
+        elif kind != "joined":
+            total += 1.0
+    return math.ceil(total)
 
 
 def _review_tail_guard(maximum: int) -> str:
@@ -228,7 +251,7 @@ def fitted_extraction_content(content: str, overhead_tokens: int, num_ctx: int, 
     stories that come first.
     """
     output = max_items * EXTRACT_RESERVED_TOKENS_PER_ITEM + EXTRACT_RESERVED_OUTPUT_BASE
-    budget = num_ctx - overhead_tokens - output
+    budget = num_ctx - overhead_tokens - output - ESTIMATE_SPLICE_TOKENS
     if budget <= 0:
         return "", bool(content)
     bounded = content
@@ -245,7 +268,7 @@ def fitted_deepening_content(content: str, overhead_tokens: int, num_ctx: int) -
     Ollama truncates an oversized prompt from the head without erroring, which would evict the
     system prompt and keep the untrusted article text, so the bound is applied here instead.
     """
-    budget = num_ctx - DEEPEN_RESERVED_OUTPUT_TOKENS - overhead_tokens
+    budget = num_ctx - DEEPEN_RESERVED_OUTPUT_TOKENS - overhead_tokens - ESTIMATE_SPLICE_TOKENS
     if budget <= 0:
         return "", bool(content)
     bounded = content

@@ -529,6 +529,27 @@ def test_an_oversized_newsletter_is_cut_from_the_tail_not_the_instructions() -> 
     assert ollama._estimated_tokens(system) + ollama._estimated_tokens(user) + reserved <= 16384
 
 
+@pytest.mark.parametrize(
+    "content", ["FIRST STORY\n" + "word " * 20_000, "x = y + 1\n" * 4_000, "1 " * 20_000], ids=["prose", "code", "digits"]
+)
+def test_a_fitted_prompt_stays_inside_the_window_at_every_size(content: str) -> None:
+    # The template and the newsletter are estimated apart, and the pieces do not add up across the
+    # seam; over 192 sizes the whole prompt once ran a token over the window in 74 of them.
+    over: list[int] = []
+    for num_ctx in range(8000, 8016):
+        with respx.mock:
+            route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+                return_value=httpx.Response(200, json={"message": {"content": json.dumps(valid_result())}})
+            )
+            OllamaClient(num_ctx=num_ctx).extract("alphasignal", content, max_items=10)
+        system, user = (message["content"] for message in json.loads(route.calls[0].request.content)["messages"])
+        reserved = 10 * ollama.EXTRACT_RESERVED_TOKENS_PER_ITEM + ollama.EXTRACT_RESERVED_OUTPUT_BASE
+        if ollama._estimated_tokens(system) + ollama._estimated_tokens(user) + reserved > num_ctx:
+            over.append(num_ctx)
+
+    assert over == []
+
+
 @respx.mock
 def test_a_repair_round_is_refitted_around_the_answer_it_sends_back() -> None:
     # The repair turn carries the first answer, so sending the same newsletter again would overflow
@@ -588,13 +609,32 @@ def test_a_repair_round_with_no_room_left_is_refused_not_sent() -> None:
         ("こんにちは。これはテストです。アップデートがリリースされました。" * 5, 70),
         ("🔥🚀✅🔁📌💡🧠⚠️🎉👉👨‍👩‍👧" * 5, 90),
         ("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" * 20, 1180),
+        ("x = y + 1\n" * 200, 1400),
+        ("Version 1.2.3 released on 2026-09-26, 12,345 users, 99.9% uptime. " * 20, 761),
+        ("a b c d e f g h i j " * 100, 1001),
     ],
-    ids=["hangul", "kana", "emoji", "hex"],
+    ids=["hangul", "kana", "emoji", "hex", "spaced-code", "digits", "one-letter-words"],
 )
-def test_the_estimate_stays_above_scripts_that_tokenise_densely(text: str, measured: int) -> None:
-    # Charging these at the English rate let a Korean newsletter keep twice the tokens the
-    # budget allowed, and an overflow drops the system prompt rather than the tail.
+def test_the_estimate_stays_above_text_that_tokenises_densely(text: str, measured: int) -> None:
+    # Charging these at the English rate let a Korean newsletter or a page of numbers keep twice
+    # the tokens the budget allowed, and an overflow drops the system prompt rather than the tail.
     assert ollama._estimated_tokens(text) >= measured
+
+
+def test_long_identifiers_do_not_double_the_estimate_for_ordinary_code() -> None:
+    # Charging every long unbroken run at a token a character put ordinary code near twice its size,
+    # which cuts a code-heavy newsletter far shorter than its budget needs. 390 real tokens.
+    code = (
+        """def fitted(settings, candidates):
+    window = settings.digest_repeat_window_days
+    for candidate in candidates:
+        if candidate.previous_days >= window:
+            yield replace(candidate, previous_window=window)
+"""
+        * 10
+    )
+
+    assert 390 <= ollama._estimated_tokens(code) <= 390 * 1.7
 
 
 @respx.mock
