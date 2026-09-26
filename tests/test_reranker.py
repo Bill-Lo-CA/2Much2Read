@@ -567,6 +567,26 @@ def test_the_security_floor_never_promotes_a_story_with_nothing_behind_it() -> N
     assert [value.item.title for value in alone if value.review_score is not None] == ["Opus 5.5"]
 
 
+def test_the_security_floor_never_promotes_coverage_gained_after_the_review() -> None:
+    # Two bare copies of one 0-day from different newsletters: merged, the entry has another source's
+    # coverage, but neither copy reached the reviewer, so the floor may not make it a headline. A
+    # copy with an article did reach it, and when that copy takes over the merge it stays eligible.
+    headlines = [replace(entry(1, "Opus 5.5", "TLDR"), review_score=90, reranker_score=0.9)]
+    muse = replace(_headline_only(2, "Muse 0-day", "SECURITY"), reranker_score=0.6)
+    muse_again = replace(_headline_only(3, "Meta Muse 0-day", "SECURITY"), source_name="Risky Business", reranker_score=0.5)
+    muse_written = replace(entry(4, "Meta patches Muse 0-day", "SANS", "SECURITY"), reranker_score=0.4)
+
+    def muse_is_muse(left: DigestEntry, right: DigestEntry) -> bool:
+        return "Muse" in left.item.title and "Muse" in right.item.title
+
+    bare, bare_promotion = pipeline._merged_entries([*headlines, muse, muse_again], 10, muse_is_muse, headline_limit=2)
+    backed, backed_promotion = pipeline._merged_entries([*headlines, muse, muse_written], 10, muse_is_muse, headline_limit=2)
+
+    assert bare_promotion is None
+    assert [value.item.title for value in bare if value.review_score is not None] == ["Opus 5.5"]
+    assert backed_promotion is not None and backed_promotion.promoted == "Meta patches Muse 0-day"
+
+
 def test_the_copy_with_an_article_is_kept_when_a_bare_one_repeats_it() -> None:
     # Hacker Newsletter's "Grok 4.7" ranked above AlphaSignal's write-up of the same launch; kept as
     # the primary, its one guessed line would have replaced the real summary and its article.

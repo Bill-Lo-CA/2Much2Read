@@ -295,13 +295,18 @@ def _merged_entries(
     candidates the reviewer passed over; headlines the floor demoted were the reviewer's choices and
     sit outside it, as the ones past the render cap already did before it acted.
     """
+    # Taken before merging: an entry with source text now is one the reviewer saw. Merging can give a
+    # bare entry another newsletter's coverage, but that coverage arrived after the review did.
+    reviewable = {entry.candidate_id for entry in entries if has_source_text(entry) and entry.candidate_id is not None}
     headlines = [entry for entry in entries if entry.review_score is not None]
     mentions = [entry for entry in entries if entry.review_score is None]
     headlines, mentions = merge_related_entries(headlines, mentions, same_story)
     demoted: list[DigestEntry] = []
     promotion = None
     if headline_limit is not None:
-        headlines, demoted, mentions, promotion = _with_security_floor(headlines, mentions, headline_limit, secondary_items)
+        headlines, demoted, mentions, promotion = _with_security_floor(
+            headlines, mentions, headline_limit, secondary_items, reviewable
+        )
     return headlines + demoted + mentions[:secondary_items], promotion
 
 
@@ -321,7 +326,11 @@ def _is_cve(entry: DigestEntry) -> bool:
 
 
 def _with_security_floor(
-    headlines: list[DigestEntry], mentions: list[DigestEntry], headline_limit: int, secondary_items: int
+    headlines: list[DigestEntry],
+    mentions: list[DigestEntry],
+    headline_limit: int,
+    secondary_items: int,
+    reviewable: set[int],
 ) -> tuple[list[DigestEntry], list[DigestEntry], list[DigestEntry], SecurityFloorPromotion | None]:
     """Make sure the digest shows at least one security story.
 
@@ -342,9 +351,9 @@ def _with_security_floor(
     stay outside DIGEST_SECONDARY_ITEMS rather than using up the quota meant for those. A pool with
     no security story is left alone.
 
-    So is a digest the reviewer chose nothing for. render_digest then falls back to the ranked list
-    for its headlines, and only while no entry carries a review score: promoting one would end the
-    fallback and leave that story as the only headline, with everything else pushed into mentions.
+    So is a digest the reviewer chose nothing for: the floor keeps security among the reviewer's
+    headlines, and there are none to keep it among. Only a story the reviewer saw may be promoted -
+    one of its passed-over candidates, never an entry that gained coverage by merging afterwards.
     """
     if not headlines:
         return headlines, [], mentions, None
@@ -355,7 +364,11 @@ def _with_security_floor(
     if any(entry.item.category == RESERVED_CATEGORY and _is_cve(entry) for entry in mentions[:secondary_items]):
         return headlines, [], mentions, None
     promoted = next(
-        (entry for entry in [*hidden, *mentions] if entry.item.category == RESERVED_CATEGORY and has_source_text(entry)),
+        (
+            entry
+            for entry in [*hidden, *mentions]
+            if entry.item.category == RESERVED_CATEGORY and entry.candidate_id in reviewable
+        ),
         None,
     )
     if promoted is None:
