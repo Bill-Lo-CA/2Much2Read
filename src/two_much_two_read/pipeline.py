@@ -23,6 +23,7 @@ from .command_models import (
     NewsletterRetryResult,
     NewsletterRunResult,
     SecurityFloorPromotion,
+    SourceItemCounts,
 )
 from .config import GmailSource, HackerNewsSource, Settings, SourceConfig, load_sources
 from .digest import (
@@ -30,6 +31,7 @@ from .digest import (
     _entry_rank,
     canonical_url,
     dedupe_entries,
+    has_source_text,
     merge_related_entries,
     render_digest,
 )
@@ -197,7 +199,19 @@ def _review_candidates(ranked: list[DigestEntry], limit: int, security_slots: in
 def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[DigestEntry]) -> list[DigestEntry]:
     if not ranked:
         return []
-    ranked = _review_candidates(ranked, settings.digest_review_candidate_limit, settings.digest_security_candidate_slots)
+    # An item with no article and no other coverage may be a mention but never a headline: its
+    # summary is whatever the extractor made of the newsletter's text, the rewrite has nothing
+    # fuller to work from, and on 2026-09-25 two of the first six headlines were one-line guesses
+    # from Hacker Newsletter's bare titles. So it is kept from the reviewer, whose picks become
+    # headlines, and rejoins the passed-over candidates below.
+    everything = ranked
+    ranked = _review_candidates(
+        [entry for entry in everything if has_source_text(entry)],
+        settings.digest_review_candidate_limit,
+        settings.digest_security_candidate_slots,
+    )
+    if not ranked:
+        return list(everything)
     candidates: list[dict[str, object]] = []
     for entry in ranked:
         assert entry.candidate_id is not None
@@ -223,7 +237,12 @@ def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[Di
     # extracted, ranked, and paid for. They carry no review score, so they sort below every
     # selected item and render as the digest's secondary mentions. The secondary limit is applied
     # after merging, so a mention absorbed into a headline frees its slot for the next candidate.
-    unselected = [entry for entry in ranked if entry.candidate_id not in scores]
+    reviewed = {id(entry) for entry in ranked}
+    unselected = [
+        entry
+        for entry in everything
+        if entry.candidate_id not in scores and (id(entry) in reviewed or not has_source_text(entry))
+    ]
     return selected + unselected
 
 
@@ -335,7 +354,10 @@ def _with_security_floor(
         return headlines, [], mentions, None
     if any(entry.item.category == RESERVED_CATEGORY and _is_cve(entry) for entry in mentions[:secondary_items]):
         return headlines, [], mentions, None
-    promoted = next((entry for entry in [*hidden, *mentions] if entry.item.category == RESERVED_CATEGORY), None)
+    promoted = next(
+        (entry for entry in [*hidden, *mentions] if entry.item.category == RESERVED_CATEGORY and has_source_text(entry)),
+        None,
+    )
     if promoted is None:
         return headlines, [], mentions, None
     kept = visible[: headline_limit - 1]
@@ -1025,6 +1047,11 @@ def run_pipeline(
                 delivery_failed=delivery_failed if digest_id is not None and not no_deliver else 0,
                 delivery_pending=delivery_pending if digest_id is not None and not no_deliver else len(destinations),
                 security_floor=security_floor,
+                no_article_by_source={
+                    source_id: SourceItemCounts(items=items, no_article=no_article)
+                    for source_id, (items, no_article) in database.no_article_counts(processed_document_ids).items()
+                }
+                or None,
             )
             run_status = result.status
             return result

@@ -21,6 +21,13 @@ class SecurityFloorPromotion(BaseModel):
     displaced: str | None = None
 
 
+class SourceItemCounts(BaseModel):
+    """How many of a source's items in one run came with no article behind them."""
+
+    items: int
+    no_article: int
+
+
 class NewsletterRunResult(CommandResult):
     status: Literal["ok", "partial", "no_content", "skipped"]
     discovered: int
@@ -37,6 +44,9 @@ class NewsletterRunResult(CommandResult):
     # Set only when the digest needed the floor, so an ordinary run's output is unchanged. The run's
     # progress messages are dropped without a terminal, so for a scheduled run this is the record.
     security_floor: SecurityFloorPromotion | None = None
+    # Per source, the run's items and how many had no article to read - the evidence for how much
+    # weight each source should get. The items table keeps source_url for longer windows.
+    no_article_by_source: dict[str, SourceItemCounts] | None = None
 
 
 class NewsletterRetryResult(CommandResult):

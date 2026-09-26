@@ -18,7 +18,7 @@ from pydantic import HttpUrl
 
 from two_much_two_read import mail_operations, pipeline
 from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl
-from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult
+from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult, SourceItemCounts
 from two_much_two_read.config import HackerNewsSource, Settings
 from two_much_two_read.digest import DigestEntry
 from two_much_two_read.hackernews import (
@@ -695,6 +695,7 @@ def test_empty_news_day_records_no_content_run(newsletter_settings: Settings, mo
         "delivery_pending": 0,
         "reason": None,
         "security_floor": None,
+        "no_article_by_source": None,
     }
 
     database = Database(settings.database_path)
@@ -1425,6 +1426,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(
         "delivery_pending": 0,
         "reason": None,
         "security_floor": None,
+        "no_article_by_source": {"alphasignal": {"items": 1, "no_article": 1}},
     }
     assert gmail.applied_labels == [
         ("bad", "failed"),
@@ -1529,6 +1531,7 @@ def test_mime_failure_marks_one_message_failed_and_continues(
         "delivery_pending": 0,
         "reason": None,
         "security_floor": None,
+        "no_article_by_source": {"alphasignal": {"items": 1, "no_article": 1}},
     }
     assert gmail.applied_labels == ([] if dry_run else [("bad", "failed"), ("good", "processed")])
     if dry_run:
@@ -1665,6 +1668,7 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
         "delivery_pending": 0,
         "reason": None,
         "security_floor": None,
+        "no_article_by_source": {"alphasignal": {"items": 1, "no_article": 1}},
     }
     assert gmail.applied_labels == [("transient", "processed")]
 
@@ -1702,6 +1706,7 @@ def test_existing_daily_digest_skips_before_gmail_access(tmp_path: Path, monkeyp
         "delivery_pending": 0,
         "reason": "daily_digest_exists",
         "security_floor": None,
+        "no_article_by_source": None,
     }
     database = Database(settings.database_path)
     assert database.connection.execute("SELECT status FROM runs ORDER BY id DESC").fetchone()[0] == "skipped"
@@ -2661,7 +2666,12 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
         digest_max_items=1,
         digest_top_items=1,
     )
-    body = urlsafe_b64encode(b"Two stories").decode().rstrip("=")
+    # Two stories link to their articles; the third is a bare title, as a link list prints one.
+    body = (
+        urlsafe_b64encode(b"Opus 5.5 https://example.com/opus\nMuse 0-day https://example.com/muse\nGrok 4.7")
+        .decode()
+        .rstrip("=")
+    )
     gmail = StubGmailClient(
         ["gmail-1"],
         {
@@ -2677,10 +2687,11 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
         },
     )
 
-    def story(title: str, category: DigestCategory) -> NewsletterItemAnalysis:
+    def story(title: str, category: DigestCategory, link: str | None = None) -> NewsletterItemAnalysis:
         return NewsletterItemAnalysis(
             title=title,
             source_title=title,
+            link=link,
             category=category,
             summary_zh_tw="摘要",
             why_it_matters_zh_tw="原因",
@@ -2694,7 +2705,11 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
             newsletter_title="Newsletter",
             newsletter_date=None,
             overview_zh_tw="摘要",
-            items=[story("Opus 5.5", "AI_MODEL"), story("Muse 0-day", "SECURITY")],
+            items=[
+                story("Opus 5.5", "AI_MODEL", "L1"),
+                story("Muse 0-day", "SECURITY", "L2"),
+                story("Grok 4.7", "AI_MODEL"),
+            ],
         )
     )
 
@@ -2706,6 +2721,12 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
     monkeypatch.setattr(pipeline, "_reviewed_entries", reviewer_that_skips_security)
+
+    class FakeFetcher:
+        def resolve_url(self, raw_url: str) -> ResolvedUrl:
+            return ResolvedUrl(raw_url, raw_url, None)
+
+    monkeypatch.setattr(pipeline, "ArticleFetcher", FakeFetcher)
 
     result = run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, tzinfo=UTC))
 
@@ -2722,3 +2743,5 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
         "source": "AlphaSignal",
         "displaced": "Opus 5.5",
     }
+    # The per-source share of items with no article, the evidence for weighting sources later.
+    assert result.no_article_by_source == {"alphasignal": SourceItemCounts(items=3, no_article=1)}

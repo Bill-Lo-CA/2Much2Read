@@ -102,6 +102,17 @@ class DigestEntry:
     merged_summaries: tuple[str, ...] = ()
 
 
+def has_source_text(entry: DigestEntry) -> bool:
+    """Whether anything fuller than the extractor's own summary stands behind this entry.
+
+    The article itself - read by the extractor for a Hacker News story, or linked from a newsletter
+    and there for the headline rewrite to fetch - or another newsletter's coverage of the same
+    story. Without either, the summary is whatever the extractor made of the newsletter's text,
+    and for a link list that is the headline alone.
+    """
+    return entry.content_basis in {"article", "hn_self_post"} or entry.article_url is not None or bool(entry.merged_summaries)
+
+
 def canonical_url(value: str | None) -> str | None:
     if not value:
         return None
@@ -216,7 +227,7 @@ def dedupe_entries(items: list[DigestEntry]) -> list[DigestEntry]:
         current = winners.get(key)
         if current is None:
             winners[key] = item
-        elif _entry_rank(item) > _entry_rank(current):
+        elif (has_source_text(item), _entry_rank(item)) > (has_source_text(current), _entry_rank(current)):
             winners[key] = _absorbed(item, current)
         else:
             winners[key] = _absorbed(current, item)
@@ -295,7 +306,12 @@ def merge_related_entries(
         if index is None:
             deduped.append(mention)
             continue
-        deduped[index] = _absorbed(deduped[index], mention)
+        kept = deduped[index]
+        # The one with something behind it stays primary whichever ranked higher: its summary is the
+        # one worth keeping, and its article is the one a reader can open.
+        deduped[index] = (
+            _absorbed(mention, kept) if has_source_text(mention) and not has_source_text(kept) else _absorbed(kept, mention)
+        )
     return merged, deduped
 
 

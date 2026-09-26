@@ -633,6 +633,19 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def no_article_counts(self, document_ids: list[int]) -> dict[str, tuple[int, int]]:
+        """Items, and items whose article was never linked or resolved, per source among the documents."""
+        if not document_ids:
+            return {}
+        placeholders = ",".join("?" for _ in document_ids)
+        rows = self.connection.execute(
+            f"""SELECT d.source_id, COUNT(*) AS items, SUM(i.source_url IS NULL) AS no_article
+            FROM items i JOIN documents d ON d.id=i.document_id
+            WHERE i.document_id IN ({placeholders}) GROUP BY d.source_id ORDER BY d.source_id""",
+            document_ids,
+        ).fetchall()
+        return {str(row["source_id"]): (int(row["items"]), int(row["no_article"] or 0)) for row in rows}
+
     def save_reranker_scores(
         self,
         scores: Sequence[tuple[int, float]],
