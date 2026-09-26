@@ -311,11 +311,15 @@ def merge_related_entries(
             deduped.append(mention)
             continue
         kept = deduped[index]
-        # The one with something behind it stays primary whichever ranked higher: its summary is the
-        # one worth keeping, and its article is the one a reader can open.
-        deduped[index] = (
-            _absorbed(mention, kept) if has_source_text(mention) and not has_source_text(kept) else _absorbed(kept, mention)
-        )
+        if has_source_text(mention) and not has_source_text(kept):
+            # The one with something behind it becomes primary whichever ranked higher: its summary
+            # is the one worth keeping, and its article is the one a reader can open. The story keeps
+            # the higher rank, which the list position already reflects - the mention quota cuts in
+            # this order, so a lower score here would hold a slot a higher-scoring story is denied.
+            scores = [score for score in (kept.reranker_score, mention.reranker_score) if score is not None]
+            deduped[index] = replace(_absorbed(mention, kept), reranker_score=max(scores, default=None))
+        else:
+            deduped[index] = _absorbed(kept, mention)
     return merged, deduped
 
 

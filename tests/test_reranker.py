@@ -12,7 +12,14 @@ import pytest
 from two_much_two_read import pipeline
 from two_much_two_read.command_models import SecurityFloorPromotion
 from two_much_two_read.config import Settings
-from two_much_two_read.digest import DigestEntry, dedupe_entries, has_source_text, merge_related_entries, render_digest
+from two_much_two_read.digest import (
+    DigestEntry,
+    _entry_rank,
+    dedupe_entries,
+    has_source_text,
+    merge_related_entries,
+    render_digest,
+)
 from two_much_two_read.reranker import (
     RERANK_INSTRUCTION,
     RERANK_QUERY,
@@ -570,6 +577,25 @@ def test_the_copy_with_an_article_is_kept_when_a_bare_one_repeats_it() -> None:
 
     assert len(mentions) == 1
     assert (mentions[0].item.title, mentions[0].also_from) == ("xAI releases Grok 4.7", ("Hacker Newsletter",))
+
+
+def test_a_story_keeps_its_higher_rank_when_its_backed_copy_takes_over() -> None:
+    # The bare copy ranked first and the backed one last, with an unrelated story between. The merged
+    # story holds the first slot, so it keeps the first slot's score: with the lower one, the mention
+    # quota - which cuts in list order - would keep it over the unrelated story it now sorts below.
+    listed = replace(_headline_only(1, "Grok 4.7"), reranker_score=0.9)
+    unrelated = replace(entry(2, "Rust 2.0 ships", "TLDR"), reranker_score=0.7)
+    written = replace(entry(3, "xAI releases Grok 4.7", "AlphaSignal"), reranker_score=0.3)
+
+    _, mentions = merge_related_entries(
+        [], [listed, unrelated, written], lambda left, right: {left.candidate_id, right.candidate_id} == {1, 3}
+    )
+
+    assert [(value.item.title, value.reranker_score) for value in mentions] == [
+        ("xAI releases Grok 4.7", 0.9),
+        ("Rust 2.0 ships", 0.7),
+    ]
+    assert sorted(mentions, key=_entry_rank, reverse=True) == mentions
 
 
 def test_an_identical_bare_copy_loses_to_the_one_with_coverage_behind_it() -> None:
