@@ -34,6 +34,8 @@ from .digest import (
     has_source_text,
     merge_related_entries,
     render_digest,
+    story_tokens,
+    with_previous_coverage,
 )
 from .gmail import GmailClient, credentials, message_headers
 from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
@@ -223,6 +225,7 @@ def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[Di
                 "summary": entry.item.summary_zh_tw,
                 "why_it_matters": entry.item.why_it_matters_zh_tw,
                 "source": entry.source_name,
+                **({"previous_days": entry.previous_days} if entry.previous_days else {}),
             }
         )
     # The context fitter trims from the tail, where the reserved candidates sit by design.
@@ -244,6 +247,86 @@ def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[Di
         if entry.candidate_id not in scores and (id(entry) in reviewed or not has_source_text(entry))
     ]
     return selected + unselected
+
+
+# How far back token rarity is measured for the repeat shortlist: long enough that a story's own
+# name is not common merely because the story is running this week.
+REPEAT_BACKGROUND_DAYS = 30
+
+
+def _row_entry(row: dict[str, object], source_names: dict[str, str]) -> DigestEntry:
+    """An earlier run's item, as much of an entry as story matching needs."""
+    return DigestEntry(
+        item=DigestItem.model_validate(
+            {
+                "title": row["title"],
+                "category": row["category"],
+                "summary_zh_tw": row["summary_zh_tw"],
+                "why_it_matters_zh_tw": row["why_it_matters_zh_tw"],
+                "importance": row["importance"],
+                "confidence": row["confidence"],
+            }
+        ),
+        candidate_id=int(str(row["id"])),
+        source_id=str(row["source_id"]),
+        source_name=source_names.get(str(row["source_id"]), str(row["source_id"])),
+        article_url=str(row["source_url"]) if row["source_url"] else None,
+    )
+
+
+def _with_previous_coverage(
+    settings: Settings,
+    database: Database,
+    ollama: JudgesSameStory,
+    entries: list[DigestEntry],
+    now: datetime,
+    current_documents: list[int],
+    source_names: dict[str, str],
+    status: StatusReporter,
+) -> list[DigestEntry]:
+    """Mark each candidate with how many of the previous days' newsletters also carried it.
+
+    Earlier runs' items stand for what newsletters covered on those days, counted by the day each
+    newsletter arrived in the digest's timezone. This run's own documents are left out, so a story
+    is never counted as repeating itself.
+    """
+    window = settings.digest_repeat_window_days
+    if window <= 0 or not entries:
+        return entries
+    zone = ZoneInfo(settings.digest_timezone)
+    # Only what can be shown is worth a judgement: the reviewer's candidates, and the articleless
+    # entries that can only be mentions.
+    shown = {
+        id(entry)
+        for entry in _review_candidates(
+            [entry for entry in entries if has_source_text(entry)],
+            settings.digest_review_candidate_limit,
+            settings.digest_security_candidate_slots,
+        )
+    }
+    shown.update(
+        id(entry) for entry in [entry for entry in entries if not has_source_text(entry)][: settings.digest_secondary_items]
+    )
+    # Whole calendar days in the digest's timezone, so the first of them is not cut at this hour.
+    first_day = datetime.combine(now.astimezone(zone).date() - timedelta(days=window), datetime.min.time(), zone)
+    previous = [
+        (datetime.fromisoformat(str(row["published_at"])).astimezone(zone).date(), _row_entry(row, source_names))
+        for row in database.items_since(first_day, current_documents)
+    ]
+    if not previous:
+        return entries
+    targets = [entry for entry in entries if id(entry) in shown]
+    background = [
+        story_tokens(_row_entry(row, source_names))
+        for row in database.items_since(now - timedelta(days=REPEAT_BACKGROUND_DAYS), current_documents)
+    ]
+    status(f"Checking {len(targets)} candidates against {len(previous)} items from the previous {window} days")
+    marked = iter(
+        with_previous_coverage(
+            targets, previous, _story_judge(ollama, settings.digest_repeat_judgements, status), window, background
+        )
+    )
+    return [next(marked) if id(entry) in shown else entry for entry in entries]
 
 
 def _story_judge(ollama: JudgesSameStory, budget: int, status: StatusReporter) -> Callable[[DigestEntry, DigestEntry], bool]:
@@ -986,6 +1069,9 @@ def run_pipeline(
                 reranker.close()
 
             try:
+                ranked_entries = _with_previous_coverage(
+                    settings, database, ollama, ranked_entries, now, processed_document_ids, source_names_by_id, status
+                )
                 reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
                 reviewed_entries, security_floor = _merged_entries(
                     reviewed_entries,

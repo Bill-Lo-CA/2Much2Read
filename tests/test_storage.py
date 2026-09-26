@@ -650,3 +650,29 @@ def test_items_without_an_article_are_counted_per_source(tmp_path: Path) -> None
     }
     assert database.no_article_counts([]) == {}
     database.close()
+
+
+def test_items_since_with_nothing_to_exclude_returns_everything_in_range(tmp_path: Path) -> None:
+    # An empty exclusion once rendered as NOT IN (NULL), which SQL treats as matching nothing.
+    from two_much_two_read.schemas import DigestItem
+
+    database = Database(tmp_path / "test.sqlite3")
+    document_id = discover(database, "gmail-1")
+    assert document_id is not None
+    database.store_items(
+        document_id,
+        [
+            DigestItem(
+                title="Story",
+                category="AI_MODEL",
+                summary_zh_tw="摘要",
+                why_it_matters_zh_tw="原因",
+                importance=5,
+                confidence=0.5,
+            )
+        ],
+    )
+
+    assert [row["title"] for row in database.items_since(datetime(2026, 7, 1, tzinfo=UTC), [])] == ["Story"]
+    assert database.items_since(datetime(2026, 7, 1, tzinfo=UTC), [document_id]) == []
+    database.close()

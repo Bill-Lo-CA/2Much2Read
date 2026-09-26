@@ -85,6 +85,8 @@ Select only concrete, new developments with practical impact in AI, cybersecurit
 Reject promotions, privacy or policy pages, free trials, partnerships, events, job posts, generic roundups, and duplicates.
 Keep only the strongest representation of the same story. Score selected items from 0 to 100 and explain each decision
 in Traditional Chinese.
+previous_days, when present, is how many of the previous days newsletters also covered the story. Sustained coverage
+is a sign that a story matters; weigh it as such.
 Return exactly schema-conforming JSON and no reasoning or commentary."""
 logger = logging.getLogger(__name__)
 CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")

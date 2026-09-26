@@ -633,6 +633,22 @@ class Database:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def items_since(self, since: datetime, exclude_document_ids: list[int]) -> list[dict[str, object]]:
+        """Items from documents received since a moment, except the given ones - earlier runs' coverage.
+
+        A document that failed has no items; one left discovered by an interrupted run does, and
+        its coverage counts as much as a finished one's.
+        """
+        # "NOT IN (NULL)" matches nothing, so an empty exclusion leaves the clause out.
+        excluded = f" AND d.id NOT IN ({','.join('?' for _ in exclude_document_ids)})" if exclude_document_ids else ""
+        rows = self.connection.execute(
+            f"""SELECT i.*, d.published_at, d.source_id FROM items i JOIN documents d ON d.id=i.document_id
+            WHERE d.state<>'failed' AND d.published_at>=?{excluded}
+            ORDER BY d.published_at""",
+            (since.astimezone(UTC).isoformat(), *exclude_document_ids),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def no_article_counts(self, document_ids: list[int]) -> dict[str, tuple[int, int]]:
         """Items, and items whose article was never linked or resolved, per source among the documents.
 

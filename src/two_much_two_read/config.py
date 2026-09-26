@@ -151,6 +151,10 @@ class Settings(BaseSettings):
     # front of the model per real run, so this is a bound against a pathological run rather than a
     # tuning knob; past it nothing merges, which loses an attribution rather than inventing one.
     digest_merge_judgements: int = Field(default=60, ge=0)
+    # How many previous days are searched for each candidate's story, and how many same-story
+    # judgements that search may spend. A window of 0 turns the mark off.
+    digest_repeat_window_days: int = Field(default=3, ge=0, le=14)
+    digest_repeat_judgements: int = Field(default=60, ge=0)
     digest_deepen_headlines: bool = True
     digest_review_candidate_limit: int = Field(default=20, ge=1)
     digest_rerank_candidate_limit: int = Field(default=100, ge=1)
