@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime, timedelta
+from email.utils import parseaddr
 from pathlib import Path
 from typing import Protocol
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -198,6 +201,15 @@ def _review_candidates(ranked: list[DigestEntry], limit: int, security_slots: in
     return [ranked[index] for index in sorted(security[:security_kept] + general[:general_kept])]
 
 
+# Picks past the headline limit, so a slot the per-source cap frees goes to the reviewer's next choice
+# rather than staying empty. Beyond the limit they are ordinary mentions.
+REVIEW_REFILL_PICKS = 5
+
+
+def _review_picks(settings: Settings) -> int:
+    return settings.digest_max_items + (REVIEW_REFILL_PICKS if settings.digest_headlines_per_source else 0)
+
+
 def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[DigestEntry]) -> list[DigestEntry]:
     if not ranked:
         return []
@@ -232,7 +244,7 @@ def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[Di
     # The reviewer is released by the caller, once merging and the headline rewrite have also
     # finished with it: both run on this model, and nothing else loads in between.
     review = ollama.review_digest(
-        candidates, settings.digest_max_items, RESERVED_CATEGORY, settings.digest_security_candidate_slots
+        candidates, _review_picks(settings), RESERVED_CATEGORY, settings.digest_security_candidate_slots
     )
     scores = {selection.candidate_id: selection.score for selection in review.selected}
     selected = [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]
@@ -353,6 +365,7 @@ def _selected_entries(
         settings.digest_secondary_items,
         _story_judge(ollama, settings.digest_merge_judgements, status),
         headline_limit=min(settings.digest_max_items, settings.digest_top_items),
+        per_source=settings.digest_headlines_per_source,
     )
     return mark_repeats(merged, lambda _entry: True), security_floor
 
@@ -399,8 +412,12 @@ def _merged_entries(
     same_story: Callable[[DigestEntry, DigestEntry], bool],
     *,
     headline_limit: int | None = None,
+    per_source: int = 0,
 ) -> tuple[list[DigestEntry], SecurityFloorPromotion | None]:
     """Merge repeat coverage, apply the security floor when headline_limit is given, then cap mentions.
+
+    With per_source as well, the headlines are the reviewer's best picks up to headline_limit with at
+    most per_source from any one newsletter; every other pick becomes a mention, ranked as one.
 
     Returns the entries, and what the floor promoted if it had to act. secondary_items caps the
     candidates the reviewer passed over; headlines the floor demoted were the reviewer's choices and
@@ -414,11 +431,38 @@ def _merged_entries(
     headlines, mentions = merge_related_entries(headlines, mentions, same_story)
     demoted: list[DigestEntry] = []
     promotion = None
+    if headline_limit is not None and per_source > 0:
+        headlines, overflow = _headlines_per_source(headlines, headline_limit, per_source)
+        mentions = sorted([*overflow, *mentions], key=_entry_rank, reverse=True)
     if headline_limit is not None:
         headlines, demoted, mentions, promotion = _with_security_floor(
             headlines, mentions, headline_limit, secondary_items, reviewable
         )
     return headlines + demoted + mentions[:secondary_items], promotion
+
+
+def _headlines_per_source(
+    headlines: list[DigestEntry], limit: int, per_source: int
+) -> tuple[list[DigestEntry], list[DigestEntry]]:
+    """The best picks up to limit, at most per_source from one newsletter, and the rest as mentions.
+
+    A newsletter that covers one theme in depth hands the reviewer several strong candidates at once,
+    and the reviewer rates each on its own: Console's tool list took three of ten headlines, one of
+    them the newsletter describing itself. The cap keeps its best two, and the reviewer's next picks
+    fill the slots. A pick left out stays in the digest as a mention, ranked by the reranker as every
+    mention is.
+    """
+    kept: list[DigestEntry] = []
+    overflow: list[DigestEntry] = []
+    taken: Counter[str | None] = Counter()
+    for entry in sorted(headlines, key=_entry_rank, reverse=True):
+        source = entry.source_id or entry.source_name
+        if len(kept) < limit and taken[source] < per_source:
+            kept.append(entry)
+            taken[source] += 1
+        else:
+            overflow.append(replace(entry, review_score=None))
+    return kept, overflow
 
 
 def _inert(value: str) -> str:
@@ -665,6 +709,27 @@ def _fair_share(budget: int, sources: int) -> int:
     return max(1, budget // sources)
 
 
+def _sender_domain(from_header: str) -> str | None:
+    """The domain of the address a newsletter is sent from, as the header names it."""
+    domain = parseaddr(from_header)[1].rpartition("@")[2].strip().lower().removeprefix("www.")
+    return domain or None
+
+
+def _links_front_page_of(item: DigestItem, sender: str | None) -> bool:
+    """Whether the item's article is the sending newsletter's own front page.
+
+    That is the newsletter describing itself - Console's "this week's best developer tools" linked
+    console.dev and took a headline - not a story it carries. Only the sender's own site counts: a
+    tool newsletter's items link tools' front pages, such as droprun.sh, and those are the stories.
+    """
+    if sender is None or item.source_url is None:
+        return False
+    parts = urlsplit(str(item.source_url))
+    host = (parts.hostname or "").lower().removeprefix("www.")
+    same_site = host == sender or host.endswith(f".{sender}") or sender.endswith(f".{host}")
+    return bool(host) and same_site and parts.path in {"", "/"} and not parts.query
+
+
 def _process_source(
     database: Database,
     gmail: GmailClient,
@@ -809,9 +874,13 @@ def _process_source(
                 canonical_url=resolved.canonical_url,
             )
             items.append(url_enricher.resolved_item(match, resolved))
+        sender = _sender_domain(headers.get("from", ""))
+        own_front_page = [item for item in items if _links_front_page_of(item, sender)]
+        items = [item for item in items if not _links_front_page_of(item, sender)]
         database.store_items(document_id, items, replace=True, finalize=False)
         processed += 1
-        status(f"{source.id}: processed {subject}")
+        note = f" (dropped {len(own_front_page)} item(s) linking the newsletter's own front page)" if own_front_page else ""
+        status(f"{source.id}: processed {subject}{note}")
         processed_document_ids.append(document_id)
         processed_documents.append((document_id, gmail_id))
     return discovered, discovered, processed, failed, processed_document_ids, processed_documents

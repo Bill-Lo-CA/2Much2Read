@@ -127,7 +127,18 @@ def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pipeline, "_deepened_entries", lambda _settings, _ollama, entries, _status: entries)
 
 
-def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize(
+    ("final_url", "canonical"),
+    [
+        ("https://publisher.example/article", "https://publisher.example/canonical"),
+        # The sender's own front page: the newsletter describing itself, not a story it carries.
+        ("https://www.example.com/", None),
+    ],
+    ids=["article", "own-front-page"],
+)
+def test_gmail_url_enrichment_owns_and_persists_resolved_url(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, final_url: str, canonical: str | None
+) -> None:
     sources_path = tmp_path / "sources.yaml"
     write_sources(sources_path)
     settings = Settings(
@@ -183,7 +194,7 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, mon
     class FakeFetcher:
         def resolve_url(self, raw_url: str) -> ResolvedUrl:
             assert raw_url == "https://short.example/go"
-            return ResolvedUrl(raw_url, "https://publisher.example/article", "https://publisher.example/canonical")
+            return ResolvedUrl(raw_url, final_url, canonical)
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
@@ -197,6 +208,9 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(tmp_path: Path, mon
         "SELECT source_url,raw_url,resolved_url,canonical_url,url_match_status,url_resolution_status FROM items"
     ).fetchone()
     database.close()
+    if canonical is None:
+        assert row is None
+        return
     assert result.status == "ok"
     assert tuple(row) == (
         "https://publisher.example/canonical",
@@ -2828,3 +2842,32 @@ def test_a_run_never_headlines_what_the_reviewer_did_not_pick(tmp_path: Path, mo
     database.close()
     assert "🔥" not in content
     assert "• Grok 4.7" in content
+
+
+@pytest.mark.parametrize(
+    ("source_url", "sender", "own"),
+    [
+        ("https://console.dev/", "Console <hello@console.dev>", True),
+        ("https://www.console.dev", "Console <hello@console.dev>", True),
+        ("https://sans.org/", "SANS NewsBites <newsbites@email.sans.org>", True),
+        # The newsletter's own article is a story; so is the front page of a tool it covers.
+        ("https://console.dev/articles/drop", "Console <hello@console.dev>", False),
+        ("https://droprun.sh/", "Console <hello@console.dev>", False),
+        ("https://console.dev/?ref=issue-12", "Console <hello@console.dev>", False),
+        ("https://console.dev/", "", False),
+    ],
+)
+def test_an_item_linking_the_senders_front_page_is_the_newsletter_itself(source_url: str, sender: str, own: bool) -> None:
+    item = DigestItem.model_validate(
+        {
+            "title": "開發工具週報",
+            "category": "DEV_TOOL",
+            "summary_zh_tw": "摘要",
+            "why_it_matters_zh_tw": "原因",
+            "importance": 5,
+            "confidence": 0.5,
+            "source_url": source_url,
+        }
+    )
+
+    assert pipeline._links_front_page_of(item, pipeline._sender_domain(sender)) is own

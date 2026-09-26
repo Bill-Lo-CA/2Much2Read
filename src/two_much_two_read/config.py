@@ -147,6 +147,10 @@ class Settings(BaseSettings):
     digest_max_items: int = Field(default=5, ge=1)
     digest_top_items: int = Field(default=5, ge=0)
     digest_secondary_items: int = Field(default=10, ge=0)
+    # At most this many headlines from one newsletter; 0 turns the cap off. One source took three of
+    # ten headlines on 2026-09-26 (Console) and five on another day (SANS NewsBites), which is one
+    # newsletter's view of the day rather than a digest of several.
+    digest_headlines_per_source: int = Field(default=2, ge=0)
     # How many same-story judgements one digest may spend. The token shortlist put 0-15 pairs in
     # front of the model per real run, so this is a bound against a pathological run rather than a
     # tuning knob; past it nothing merges, which loses an attribution rather than inventing one.
