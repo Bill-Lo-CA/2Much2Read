@@ -184,7 +184,7 @@ def test_cross_source_dedupe_preserves_hackernews_attribution() -> None:
     article_url = "https://article.example/story"
     result = render_digest(
         [
-            DigestEntry(item("Newsletter title", article_url, importance=9)),
+            DigestEntry(item("Newsletter title", article_url, importance=9), article_url=article_url),
             DigestEntry(
                 item("HN title", f"{article_url}?utm_source=hn"),
                 hn_score=10,

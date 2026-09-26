@@ -634,12 +634,19 @@ class Database:
         return [dict(row) for row in rows]
 
     def no_article_counts(self, document_ids: list[int]) -> dict[str, tuple[int, int]]:
-        """Items, and items whose article was never linked or resolved, per source among the documents."""
+        """Items, and items whose article was never linked or resolved, per source among the documents.
+
+        The same test as has_source_text, on what is stored: a Hacker News post whose body could not
+        be read falls back to metadata and stores its discussion page as the link, which is no
+        article; a self-post whose text was read has its text behind it.
+        """
         if not document_ids:
             return {}
         placeholders = ",".join("?" for _ in document_ids)
         rows = self.connection.execute(
-            f"""SELECT d.source_id, COUNT(*) AS items, SUM(i.source_url IS NULL) AS no_article
+            f"""SELECT d.source_id, COUNT(*) AS items,
+            SUM(d.content_basis NOT IN ('article','hn_self_post')
+                AND (i.source_url IS NULL OR i.source_url IS d.discussion_url)) AS no_article
             FROM items i JOIN documents d ON d.id=i.document_id
             WHERE i.document_id IN ({placeholders}) GROUP BY d.source_id ORDER BY d.source_id""",
             document_ids,

@@ -624,7 +624,29 @@ def test_items_without_an_article_are_counted_per_source(tmp_path: Path) -> None
     assert prose is not None
     database.store_items(links, [item("Grok 4.7", None), item("Opus 5.5", None), item("Essay", "https://example.com/essay")])
     database.store_items(prose, [item("Deep dive", "https://example.com/deep")])
+    # Hacker News stories store the discussion page as the link when there is no article: a self-post
+    # whose body was read has its text behind it, one that fell back to metadata has nothing, and an
+    # external story whose fetch failed still links its article.
+    hacker_news: list[int] = []
+    for gmail_id, basis, url in (
+        ("hn-1", "hn_self_post", "https://news.ycombinator.com/item?id=1"),
+        ("hn-2", "metadata", "https://news.ycombinator.com/item?id=2"),
+        ("hn-3", "metadata", "https://example.com/external"),
+    ):
+        document_id = discover(database, gmail_id)
+        assert document_id is not None
+        discussion = "https://news.ycombinator.com/item?id=" + gmail_id.removeprefix("hn-")
+        database.connection.execute(
+            "UPDATE documents SET source_id='hn-best', content_basis=?, discussion_url=? WHERE id=?",
+            (basis, discussion, document_id),
+        )
+        database.store_items(document_id, [item(gmail_id, url)])
+        hacker_news.append(document_id)
 
-    assert database.no_article_counts([links, prose]) == {"link-list": (3, 2), "source": (1, 0)}
+    assert database.no_article_counts([links, prose, *hacker_news]) == {
+        "hn-best": (3, 1),
+        "link-list": (3, 2),
+        "source": (1, 0),
+    }
     assert database.no_article_counts([]) == {}
     database.close()

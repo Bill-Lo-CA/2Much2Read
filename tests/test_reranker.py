@@ -577,7 +577,11 @@ def test_an_identical_bare_copy_loses_to_the_one_with_coverage_behind_it() -> No
     # newsletters also covered is kept, whatever the reranker thought of the two.
     listed = replace(_headline_only(1, "Grok 4.7"), reranker_score=0.9)
     covered = replace(
-        _headline_only(2, "Grok 4.7"), source_name="AlphaSignal", reranker_score=0.5, merged_summaries=("xAI 發布 Grok 4.7。",)
+        _headline_only(2, "Grok 4.7"),
+        source_name="AlphaSignal",
+        reranker_score=0.5,
+        also_from=("TLDR AI",),
+        merged_summaries=("xAI 發布 Grok 4.7。",),
     )
 
     kept = dedupe_entries([listed, covered])
@@ -590,11 +594,11 @@ HN_DISCUSSION = "https://news.ycombinator.com/item?id=123"
 
 
 @pytest.mark.parametrize(
-    ("article_url", "content_basis", "merged_summaries", "expected"),
+    ("article_url", "content_basis", "also_from", "expected"),
     [
         ("https://example.com/story", "newsletter", (), True),
         (None, "newsletter", (), False),
-        (None, "newsletter", ("另一份電子報的摘要",), True),
+        (None, "newsletter", ("AlphaSignal",), True),
         (None, "hn_self_post", (), True),
         (None, "article", (), True),
         (None, "metadata", (), False),
@@ -605,7 +609,7 @@ HN_DISCUSSION = "https://news.ycombinator.com/item?id=123"
     ],
 )
 def test_what_counts_as_something_behind_an_entry(
-    article_url: str | None, content_basis: str, merged_summaries: tuple[str, ...], expected: bool
+    article_url: str | None, content_basis: str, also_from: tuple[str, ...], expected: bool
 ) -> None:
     # An article to fetch, another newsletter's coverage, or a text the extractor read in full.
     story = replace(
@@ -613,7 +617,20 @@ def test_what_counts_as_something_behind_an_entry(
         article_url=article_url,
         discussion_url=HN_DISCUSSION,
         content_basis=content_basis,
-        merged_summaries=merged_summaries,
+        also_from=also_from,
+        merged_summaries=("另一份電子報的摘要",) if also_from else (),
     )
 
     assert has_source_text(story) is expected
+
+
+def test_a_second_copy_from_the_same_newsletter_is_not_coverage() -> None:
+    # Deduping folds the copy's summary into merged_summaries, but it is the same newsletter's text
+    # again; left counting, the title would reach the reviewer and could become a headline.
+    first = _headline_only(1, "Grok 4.7")
+    copy = replace(_headline_only(2, "Grok 4.7"), item=first.item.model_copy(update={"summary_zh_tw": "另一段摘要"}))
+
+    kept = dedupe_entries([first, copy])
+
+    assert len(kept) == 1 and kept[0].merged_summaries
+    assert not has_source_text(kept[0])

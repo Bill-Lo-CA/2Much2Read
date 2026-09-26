@@ -110,9 +110,11 @@ def has_source_text(entry: DigestEntry) -> bool:
     story. Without either, the summary is whatever the extractor made of the newsletter's text,
     and for a link list that is the headline alone. A Hacker News post whose body could not be read
     falls back to metadata and stores its discussion page as the article link; that page was never
-    read, so it counts for nothing.
+    read, so it counts for nothing. Nor does a second copy from the same newsletter, which merges
+    into merged_summaries as well but is the same text again: only another source's coverage counts,
+    and that is what also_from records.
     """
-    return entry.content_basis in {"article", "hn_self_post"} or _article_url(entry) is not None or bool(entry.merged_summaries)
+    return entry.content_basis in {"article", "hn_self_post"} or _article_url(entry) is not None or bool(entry.also_from)
 
 
 def canonical_url(value: str | None) -> str | None:
