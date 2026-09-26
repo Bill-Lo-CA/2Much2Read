@@ -1003,6 +1003,33 @@ def test_a_pick_the_cap_leaves_out_competes_for_the_mention_quota_like_any_menti
     assert [value.candidate_id for value in merged] == [1, 2, 4]
 
 
+def test_picks_past_the_headlines_shown_keep_their_place_outside_the_mention_quota() -> None:
+    # DIGEST_MAX_ITEMS=7 over DIGEST_TOP_ITEMS=5: the sixth and seventh picks are listed after the
+    # headlines, outside DIGEST_SECONDARY_ITEMS, as they were before the cap. Only Console's third
+    # pick and the refill picks past seven become mentions, and one mention slot shows the best.
+    sources = ["Console", "Console", "Console", "A", "B", "C", "D", "E", "F", "G"]
+    ranked = [replace(entry(index, f"Story {index}", source), reranker_score=0.5) for index, source in enumerate(sources, 1)]
+
+    class Reviewer:
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
+            selected = [
+                {"candidate_id": value["candidate_id"], "score": 100 - index, "reason_zh_tw": "具體"}
+                for index, value in enumerate(candidates)
+            ]
+            return DigestReview.model_validate({"selected": selected[:maximum]})
+
+        def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
+            return False
+
+    settings = Settings(digest_max_items=7, digest_top_items=5, digest_secondary_items=1, digest_review_candidate_limit=10)
+    shown, _ = pipeline._selected_entries(settings, Reviewer(), ranked, lambda values, _chosen: values, lambda _message: None)
+
+    assert [(value.candidate_id, value.review_score is not None) for value in shown] == [
+        *[(candidate_id, True) for candidate_id in (1, 2, 4, 5, 6, 7, 8)],
+        (3, False),
+    ]
+
+
 def test_the_reviewer_is_asked_for_picks_past_the_limit_only_while_the_cap_is_on() -> None:
     asked: list[int] = []
 

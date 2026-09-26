@@ -366,6 +366,7 @@ def _selected_entries(
         _story_judge(ollama, settings.digest_merge_judgements, status),
         headline_limit=min(settings.digest_max_items, settings.digest_top_items),
         per_source=settings.digest_headlines_per_source,
+        picks=settings.digest_max_items,
     )
     return mark_repeats(merged, lambda _entry: True), security_floor
 
@@ -413,11 +414,14 @@ def _merged_entries(
     *,
     headline_limit: int | None = None,
     per_source: int = 0,
+    picks: int | None = None,
 ) -> tuple[list[DigestEntry], SecurityFloorPromotion | None]:
     """Merge repeat coverage, apply the security floor when headline_limit is given, then cap mentions.
 
     With per_source as well, the headlines are the reviewer's best picks up to headline_limit with at
-    most per_source from any one newsletter; every other pick becomes a mention, ranked as one.
+    most per_source from any one newsletter. The picks after them, up to picks in all (the
+    reviewer's own quota, headline_limit when not given), stay picks; a pick over the cap, and one
+    past that quota, becomes a mention, ranked as one.
 
     Returns the entries, and what the floor promoted if it had to act. secondary_items caps the
     candidates the reviewer passed over; headlines the floor demoted were the reviewer's choices and
@@ -432,7 +436,7 @@ def _merged_entries(
     demoted: list[DigestEntry] = []
     promotion = None
     if headline_limit is not None and per_source > 0:
-        headlines, overflow = _headlines_per_source(headlines, headline_limit, per_source)
+        headlines, overflow = _headlines_per_source(headlines, max(headline_limit, picks or 0), per_source)
         mentions = sorted([*overflow, *mentions], key=_entry_rank, reverse=True)
     if headline_limit is not None:
         headlines, demoted, mentions, promotion = _with_security_floor(
@@ -442,22 +446,27 @@ def _merged_entries(
 
 
 def _headlines_per_source(
-    headlines: list[DigestEntry], limit: int, per_source: int
+    headlines: list[DigestEntry], picks: int, per_source: int
 ) -> tuple[list[DigestEntry], list[DigestEntry]]:
-    """The best picks up to limit, at most per_source from one newsletter, and the rest as mentions.
+    """The best picks, at most per_source from one newsletter and picks in all, and the rest as mentions.
 
     A newsletter that covers one theme in depth hands the reviewer several strong candidates at once,
     and the reviewer rates each on its own: Console's tool list took three of ten headlines, one of
     them the newsletter describing itself. The cap keeps its best two, and the reviewer's next picks
     fill the slots. A pick left out stays in the digest as a mention, ranked by the reranker as every
     mention is.
+
+    With DIGEST_MAX_ITEMS above DIGEST_TOP_ITEMS the picks after the headlines shown are listed past
+    them, outside the mention quota, and the cap leaves the ones within it where they were. It holds
+    there as well: a newsletter's weaker pick keeps no place its better one lost. The refill
+    picks past DIGEST_MAX_ITEMS were asked for only to fill freed slots, and are mentions.
     """
     kept: list[DigestEntry] = []
     overflow: list[DigestEntry] = []
     taken: Counter[str | None] = Counter()
     for entry in sorted(headlines, key=_entry_rank, reverse=True):
         source = entry.source_id or entry.source_name
-        if len(kept) < limit and taken[source] < per_source:
+        if len(kept) < picks and taken[source] < per_source:
             kept.append(entry)
             taken[source] += 1
         else:
