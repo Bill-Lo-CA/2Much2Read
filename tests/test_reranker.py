@@ -227,7 +227,9 @@ def test_final_review_selects_scored_items_and_leaves_the_reviewer_loaded() -> N
             self.unloaded.append(model)
 
     ollama = FakeOllama()
-    settings = Settings(digest_max_items=1, digest_review_candidate_limit=2, ollama_review_model="qwen3:8b")
+    settings = Settings(
+        digest_max_items=1, digest_review_candidate_limit=2, digest_headlines_per_source=0, ollama_review_model="qwen3:8b"
+    )
 
     reviewed = pipeline._reviewed_entries(settings, ollama, [entry(2, "Release", "TLDR AI"), entry(1, "Trial", "AlphaSignal")])
 
@@ -961,3 +963,56 @@ def test_repeats_are_checked_on_what_the_reviewer_and_the_reader_see(tmp_path: P
     assert [value.previous_days for value in shown] == [1, 1]
     assert asked == ["Grok 4.7 pricing", "Grok 4.7 benchmarks"]
     assert messages == ["Checking 1 candidates against 1 items from the previous 3 days"] * 2
+
+
+def _headline(candidate_id: int, source: str, score: int) -> DigestEntry:
+    return replace(entry(candidate_id, f"Story {candidate_id}", source), review_score=score, reranker_score=score / 100)
+
+
+def test_one_newsletter_holds_at_most_its_share_of_the_headlines() -> None:
+    # Console's tool list took three of ten headlines on 2026-09-26. Its best two stay; the third is a
+    # mention, and the reviewer's next pick from elsewhere takes the slot.
+    picks = [
+        _headline(1, "Console", 95),
+        _headline(2, "Console", 94),
+        _headline(3, "Console", 93),
+        _headline(4, "TLDR", 92),
+        _headline(5, "SANS", 60),
+    ]
+
+    capped, _ = pipeline._merged_entries(picks, 10, never_the_same, headline_limit=3, per_source=2)
+    uncapped, _ = pipeline._merged_entries(picks, 10, never_the_same, headline_limit=3)
+
+    assert [(value.candidate_id, value.review_score is not None) for value in capped] == [
+        (1, True),
+        (2, True),
+        (4, True),
+        (3, False),
+        (5, False),
+    ]
+    assert [value.candidate_id for value in uncapped if value.review_score is not None] == [1, 2, 3, 4, 5]
+
+
+def test_a_pick_the_cap_leaves_out_competes_for_the_mention_quota_like_any_mention() -> None:
+    picks = [_headline(1, "Console", 95), _headline(2, "Console", 94), _headline(3, "Console", 93)]
+    passed_over = [replace(entry(4, "Other story", "TLDR"), reranker_score=0.99)]
+
+    merged, _ = pipeline._merged_entries([*picks, *passed_over], 1, never_the_same, headline_limit=5, per_source=2)
+
+    # One mention slot: the passed-over candidate ranks above the capped pick, so it is the one shown.
+    assert [value.candidate_id for value in merged] == [1, 2, 4]
+
+
+def test_the_reviewer_is_asked_for_picks_past_the_limit_only_while_the_cap_is_on() -> None:
+    asked: list[int] = []
+
+    class FakeOllama:
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
+            asked.append(maximum)
+            return DigestReview.model_validate({"selected": []})
+
+    ranked = [entry(1, "Opus 5.5", "TLDR")]
+    pipeline._reviewed_entries(Settings(digest_max_items=10), FakeOllama(), ranked)
+    pipeline._reviewed_entries(Settings(digest_max_items=10, digest_headlines_per_source=0), FakeOllama(), ranked)
+
+    assert asked == [10 + pipeline.REVIEW_REFILL_PICKS, 10]

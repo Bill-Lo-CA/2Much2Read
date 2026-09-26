@@ -152,6 +152,15 @@ extracted and ranked, so listing them costs nothing beyond the message length; s
 for a headline-only digest. `DIGEST_TOP_ITEMS` controls how many entries the renderer puts in the
 headline section, so keep it equal to `DIGEST_MAX_ITEMS` unless you want mentions promoted into it.
 
+`DIGEST_HEADLINES_PER_SOURCE` (default 2; 0 turns it off) caps the headlines one newsletter may hold.
+A newsletter that covers one theme in depth hands the reviewer several strong candidates at once -
+Console's tool list took three of ten headlines on one day, SANS NewsBites five on another - and the
+reviewer rates each on its own. With the cap on, the reviewer is asked for five picks past the
+headline limit; the headlines are its best picks with at most the cap from any one newsletter, and
+every other pick becomes an ordinary mention. The security floor applies after the cap, and may take
+a newsletter past it to keep a security story on top. An item whose article is the sending
+newsletter's own front page - the newsletter describing its issue - is dropped at extraction.
+
 A headline needs something behind it: an article to read, another newsletter's coverage of the same
 story, or a text the extractor read in full (a Hacker News story or self-post). An item with none of
 these may still be a mention, but it never reaches the reviewer, whose picks become headlines. Its
