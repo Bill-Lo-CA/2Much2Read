@@ -11,6 +11,12 @@ MODEL_TEXT_INJECTION = re.compile(r"https?://|\[[^\]\r\n]*\]\([^)]*\)", re.IGNOR
 # Plain-text newsletters render a link as "Headline [ https://... ]" or "( https://... )".
 SOURCE_TITLE_URL = re.compile(r"[\[(]?\s*https?://\S+\s*[\])]?", re.IGNORECASE)
 SOURCE_TITLE_MAX_CHARACTERS = 200
+# A link as the extractor sees it (see mime._coded_text). Stripped from every text field it could be
+# copied into, because it means nothing to a reader.
+# Every spelling LINK_CODE_ANSWER reads, but only in brackets: bare "L2" in a title is as likely a
+# cache level or an autonomy grade as a code.
+LINK_CODE_TEXT = re.compile(r"\s*\[\s*L\s*\d{1,4}\s*\]", re.IGNORECASE)
+LINK_CODE_ANSWER = re.compile(r"\[?\s*L\s*(\d{1,4})\s*\]?", re.IGNORECASE)
 
 DigestCategory = Literal[
     "AI_MODEL",
@@ -50,6 +56,11 @@ class LinkCandidate(BaseModel):
     nearby_text: str = ""
     position: int = Field(ge=0)
     kind: Literal["article", "non_article", "unknown"] = "unknown"
+
+    @property
+    def code(self) -> str:
+        """What stands in for this link in the text the extractor reads, and what it answers with."""
+        return f"L{self.position + 1}"
 
 
 class ExtractedEmailContent(BaseModel):
@@ -102,6 +113,31 @@ class NewsletterItemAnalysis(ItemAnalysis):
     # and never reaches DigestItem, storage, or the rendered digest. It is copied out of untrusted
     # newsletter text, so it carries no anti-link validator; nothing renders it.
     source_title: str = Field(min_length=1, description="Headline copied verbatim from the newsletter, never translated")
+    # The code of the item's own article link, as it appears in the text the extractor read. It is
+    # the extractor's answer to which link belongs to which item, which the title matcher cannot
+    # give for a newsletter that puts an article link and a comments link beside every headline.
+    link: str | None = Field(
+        default=None, description="Code of this item's own article link, such as L7, or null when it has none"
+    )
+
+    @field_validator("title", "summary_zh_tw", "why_it_matters_zh_tw", mode="before")
+    @classmethod
+    def drop_link_codes(cls, value: object) -> object:
+        """Remove codes the model copied into its text. Only newsletter text carries codes: in an
+        article analysis or a stored item, "[L2]" is the author's own words and stays."""
+        return LINK_CODE_TEXT.sub("", value).strip() if isinstance(value, str) else value
+
+    @field_validator("link", mode="before")
+    @classmethod
+    def normalise_link(cls, value: object) -> str | None:
+        """Accept the forms a model writes a code in, and treat anything else as no answer.
+
+        Rejecting would cost the whole email for a field the title matcher can stand in for.
+        """
+        if not isinstance(value, str):
+            return None
+        match = LINK_CODE_ANSWER.fullmatch(value.strip())
+        return f"L{int(match.group(1))}" if match else None
 
     @field_validator("source_title")
     @classmethod
@@ -116,7 +152,7 @@ class NewsletterItemAnalysis(ItemAnalysis):
         which tolerates extra words - so the length is bounded here instead. URLs are dropped first:
         they never appear in anchor text and only add tokens that produce false matches.
         """
-        without_urls = SOURCE_TITLE_URL.sub(" ", value)
+        without_urls = SOURCE_TITLE_URL.sub(" ", LINK_CODE_TEXT.sub(" ", value))
         collapsed = " ".join(without_urls.split())
         return collapsed[:SOURCE_TITLE_MAX_CHARACTERS] or value[:SOURCE_TITLE_MAX_CHARACTERS]
 
@@ -129,7 +165,7 @@ class DigestItem(ItemAnalysis):
     resolved_url: HttpUrl | None = None
     canonical_url: HttpUrl | None = None
     url_match_status: Literal["not_applicable", "pending", "matched", "unmatched", "ambiguous"] = "not_applicable"
-    url_match_method: Literal["exact_anchor", "heading_context", "fuzzy_anchor", "url_slug"] | None = None
+    url_match_method: Literal["model_link", "exact_anchor", "heading_context", "fuzzy_anchor", "url_slug"] | None = None
     url_match_confidence: float | None = Field(default=None, ge=0, le=1)
     url_resolution_status: Literal["not_applicable", "not_requested", "resolved", "failed", "blocked"] = "not_applicable"
     url_error_code: str | None = None

@@ -271,6 +271,20 @@ oversized prompt from the head without erroring, which would silently drop the s
 keeping the untrusted candidate text, so excess candidates are trimmed from the tail instead and
 the injection guard is repeated after the candidate block.
 
+The extraction prompt is bounded the same way, and it was the one that overflowed: Ollama keeps the
+first four tokens of an oversized prompt and drops from there, and link-heavy newsletters reached
+21,000 tokens against 16,384. The newsletter is cut from the tail instead, leaving room for a
+ten-item answer, and a repair round is refitted around the first answer it sends back.
+
+Most of those tokens were URLs, which the extractor never needs: it may not write one, and an item's
+link comes from the candidate list, not from the text. So every URL in the text it reads is replaced
+by its candidate's code, such as `[L7]`, and a URL that is not a candidate - an unsubscribe link, or
+one past the candidate cap - is removed. On real issues that cut The New Stack from 21,354 tokens to
+2,707 and AINews from 19,383 to 9,172. The extractor answers with the code of each item's own
+article link, and that code is used first; the verbatim-headline matcher only covers an item with
+no usable code. Link-list newsletters that put an article and a comments link beside every headline
+matched none of their items by title alone, since both links score alike.
+
 On an 8 GB GPU the reviewer is the binding constraint: `qwen3:8b` at `OLLAMA_NUM_CTX=16384`
 needs roughly 8 GB for Q4 weights plus an f16 KV cache, so Ollama offloads layers to the
 CPU. Quantizing the KV cache on the Ollama server halves the cache cost:

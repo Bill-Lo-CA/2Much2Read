@@ -29,6 +29,10 @@ Do not invent facts or return URLs. """
 newsletter character for character, keeping its original language, wording, and capitalisation. It is
 what links the item back to its URL. title is that same headline translated, with any reading-time or
 section marker dropped.
+Every link in the newsletter has been replaced by a code in square brackets, such as [L7]. Set link
+to the code of the item's own article link: the one its headline points to, never a comments,
+discussion, sponsor, share, or subscription link. Use null when the item has no link of its own.
+Codes never belong in any other field.
 One newsletter lists many unrelated items in a row. Derive each item only from its own headline and
 body: a neighbouring item must never influence this item's category, importance, or confidence.
 Categories: AI_MODEL for model and AI product releases, AI_RESEARCH for papers and experimental
@@ -85,15 +89,58 @@ CJK_PATTERN = re.compile(r"[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]")
 JAPANESE_KANA_PATTERN = re.compile(r"[\u3040-\u30ff]")
 HANGUL_PATTERN = re.compile(r"[\uac00-\ud7af]")
 ARTICLE_ANALYSIS_MAX_CHARACTERS = 30_000
-# No tokenizer ships with this project, so the review budget uses deliberately high
-# characters-to-tokens ratios: overestimating shrinks the prompt, underestimating overflows it.
-REVIEW_TOKENS_PER_CJK_CHARACTER = 0.8
-REVIEW_TOKENS_PER_OTHER_CHARACTER = 0.3
+# No tokenizer ships with this project, so prompt budgets are estimated, deliberately high:
+# overestimating shrinks the prompt, underestimating overflows it. A byte-level BPE tokenizer first
+# splits text into pieces - a word, a single digit, a run of punctuation - and never merges across
+# them, so each costs at least one token. A per-character rate misses that: `x = y + 1` and
+# "v1.2.3 on 2026-09-26" (Qwen spells every digit alone) came to under half their real count, while
+# long identifiers charged as dense runs doubled ordinary code. Measured against the Qwen3
+# tokenizer, this lands 1.21-1.61x over nine real newsletters and 1.22x over review candidates, and
+# at or above the real count for code, numbers, JSON, Hangul, kana, emoji, rare symbols, and hex or
+# base64 blobs.
+TOKEN_PIECE = re.compile(
+    r"(?P<blob>(?=[A-Za-z0-9+/=]*[0-9])[A-Za-z0-9+/=]{24,})"
+    # A word takes one punctuation mark in front of it, as `_window` or `.previous` in code - but
+    # not after a space, which the mark joins instead: ` "id` is ` "` and `id`.
+    r"|(?P<word>(?:(?<!\s)[!-/:-@\[-`{-~])?[A-Za-z]+)"
+    r"|(?P<digit>[0-9])"
+    r"|(?P<punctuation>[!-/:-@\[-`{-~]+)"
+    # One space joins the piece after it, except a digit, which Qwen keeps apart from it.
+    r"|(?P<space>[ \t]+(?=[0-9])|\s*\n\s*|[ \t]{2,})"
+    r"|(?P<joined>[ \t](?=.))"
+    r"|(?P<cjk>[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff])"
+    r"|(?P<other>.)",
+    re.DOTALL,
+)
+# Per piece, or per character for blob, CJK, and the rest. A blob takes the ceiling, since no ASCII
+# byte costs more than one token (hex or base64 reach 0.92). Any other character takes its UTF-8
+# length, which is what a byte-level tokenizer spends on one missing from its vocabulary: a rare
+# symbol at one token a character came to 0.62 of its real count, while byte-length charging costs
+# real newsletters 1-5% (12% for tldr sec) and review candidates 12%. CJK is the one class charged
+# by measurement instead - Traditional Chinese averages 0.70 a character, 0.87 at worst per item -
+# because its byte length would read Chinese at nearly four times its size. Hangul and kana, read
+# here at three to seven times their size, would earn the same if a Korean or Japanese source joins.
+TOKENS_PER_WORD_CHARACTER = 0.3
+TOKENS_PER_PUNCTUATION_CHARACTER = 0.5
+TOKENS_PER_CJK_CHARACTER = 0.8
+# Fitting estimates the prompt template and the text spliced into it apart, and pieces do not add
+# up across the seam: the template's blank line splits into two newlines around the text. Measured
+# on 192 fitted prompts, the whole ran one token over the parts in 74; this covers it with room.
+ESTIMATE_SPLICE_TOKENS = 4
+# Ollama wraps the messages in the model's chat template, which no message content shows: qwen3 adds
+# 17 tokens around a system and a user turn with thinking off, and 10 more for a repair round's two
+# turns; llama3.2's also opens with a knowledge-date system header, about 30.
+CHAT_TEMPLATE_TOKENS = 48
 REVIEW_TOKENS_PER_CANDIDATE_SEPARATOR = 4
 REVIEW_RESERVED_TOKENS_PER_SELECTION = 280
 REVIEW_RESERVED_OUTPUT_TOKENS = 256
 # A deepened item may use both 800-character fields, which is far more output than a review needs.
 DEEPEN_RESERVED_OUTPUT_TOKENS = 1600
+# Measured on twenty real ten-item extractions: at most 1911 output tokens, so 250 per item plus the
+# overview leaves margin. A repair round also carries the first answer back, and is refitted for it.
+EXTRACT_RESERVED_TOKENS_PER_ITEM = 250
+EXTRACT_RESERVED_OUTPUT_BASE = 300
+EXTRACT_REPAIR_OVERHEAD_TOKENS = 120
 
 DetectorFactory.seed = 0
 ChineseDetectorFactory.seed = 0
@@ -113,8 +160,22 @@ def _preview(value: str, limit: int = 800) -> str:
 
 
 def _estimated_tokens(value: str) -> int:
-    cjk = len(CJK_PATTERN.findall(value))
-    return math.ceil(cjk * REVIEW_TOKENS_PER_CJK_CHARACTER + (len(value) - cjk) * REVIEW_TOKENS_PER_OTHER_CHARACTER)
+    total = 0.0
+    for piece in TOKEN_PIECE.finditer(value):
+        kind, size = piece.lastgroup, piece.end() - piece.start()
+        if kind == "word":
+            total += max(1.0, size * TOKENS_PER_WORD_CHARACTER)
+        elif kind == "punctuation":
+            total += max(1.0, size * TOKENS_PER_PUNCTUATION_CHARACTER)
+        elif kind == "blob":
+            total += size
+        elif kind == "cjk":
+            total += TOKENS_PER_CJK_CHARACTER
+        elif kind == "other":
+            total += len(piece.group().encode())
+        elif kind != "joined":
+            total += 1.0
+    return math.ceil(total)
 
 
 def _review_tail_guard(maximum: int) -> str:
@@ -158,7 +219,7 @@ def fitted_review_candidates(
     their slots precisely because they rank late, so trimming the tail alone would delete the
     reservation first and defeat the quota on exactly the prompts large enough to need trimming.
     """
-    budget = num_ctx - maximum * REVIEW_RESERVED_TOKENS_PER_SELECTION - REVIEW_RESERVED_OUTPUT_TOKENS
+    budget = num_ctx - maximum * REVIEW_RESERVED_TOKENS_PER_SELECTION - REVIEW_RESERVED_OUTPUT_TOKENS - CHAT_TEMPLATE_TOKENS
     used = _estimated_tokens(REVIEW_SYSTEM_PROMPT) + _estimated_tokens(_review_prompt([], schema, maximum))
     costs = [
         _estimated_tokens(json.dumps(candidate, ensure_ascii=False)) + REVIEW_TOKENS_PER_CANDIDATE_SEPARATOR
@@ -187,13 +248,35 @@ def fitted_review_candidates(
     return fitted
 
 
+def fitted_extraction_content(content: str, overhead_tokens: int, num_ctx: int, max_items: int) -> tuple[str, bool]:
+    """Trim a newsletter from the tail until the extraction prompt fits num_ctx.
+
+    Nothing bounded this prompt, and Ollama does not refuse one that is too long: it keeps the first
+    four tokens and drops from there (runner.go: "truncating input prompt" keep=4), which removes the
+    system prompt, the schema, and the head of the newsletter, and leaves the model the tail with no
+    instructions. The live log shows it on 20 runs in September; The New Stack and AINews reached
+    21,224 and 19,254 tokens against 16,384. Cutting the tail here keeps the instructions and the
+    stories that come first.
+    """
+    output = max_items * EXTRACT_RESERVED_TOKENS_PER_ITEM + EXTRACT_RESERVED_OUTPUT_BASE
+    budget = num_ctx - overhead_tokens - output - ESTIMATE_SPLICE_TOKENS - CHAT_TEMPLATE_TOKENS
+    if budget <= 0:
+        return "", bool(content)
+    bounded = content
+    while bounded and (used := _estimated_tokens(bounded)) > budget:
+        bounded = bounded[: max(1, len(bounded) * budget // used)]
+    if len(bounded) < len(content):
+        logger.warning("extraction prompt exceeds num_ctx=%d; reading %d of %d characters", num_ctx, len(bounded), len(content))
+    return bounded, len(bounded) < len(content)
+
+
 def fitted_deepening_content(content: str, overhead_tokens: int, num_ctx: int) -> tuple[str, bool]:
     """Trim source text until the prompt fits num_ctx, reporting whether anything was dropped.
 
     Ollama truncates an oversized prompt from the head without erroring, which would evict the
     system prompt and keep the untrusted article text, so the bound is applied here instead.
     """
-    budget = num_ctx - DEEPEN_RESERVED_OUTPUT_TOKENS - overhead_tokens
+    budget = num_ctx - DEEPEN_RESERVED_OUTPUT_TOKENS - overhead_tokens - ESTIMATE_SPLICE_TOKENS - CHAT_TEMPLATE_TOKENS
     if budget <= 0:
         return "", bool(content)
     bounded = content
@@ -308,17 +391,22 @@ class OllamaClient:
         # Ollama's grammar parser rejects large maxLength values such as HttpUrl's 2083-character limit.
         # Pydantic still validates all original constraints after generation.
         schema = _ollama_schema(EmailExtraction.model_json_schema())
-        prompt = (
-            f"source_id={source_id}\ntruncated_input={str(truncated).lower()}\nmax_items={max_items}\n"
-            f"Schema: {json.dumps(schema)}\n<newsletter_content>\n{content}\n</newsletter_content>"
-        )
-        messages = [
-            {
-                "role": "system",
-                "content": SYSTEM_PROMPT.format(language_instruction=_language_instruction(self.digest_language)),
-            },
-            {"role": "user", "content": prompt},
-        ]
+        system = SYSTEM_PROMPT.format(language_instruction=_language_instruction(self.digest_language))
+
+        def prompt_for(text: str, cut: bool) -> str:
+            return (
+                f"source_id={source_id}\ntruncated_input={str(cut).lower()}\nmax_items={max_items}\n"
+                f"Schema: {json.dumps(schema)}\n<newsletter_content>\n{text}\n</newsletter_content>"
+            )
+
+        overhead = _estimated_tokens(system) + _estimated_tokens(prompt_for("", True))
+        sent, trimmed = fitted_extraction_content(content, overhead, self.num_ctx, max_items)
+        if content and not sent:
+            # A small OLLAMA_NUM_CTX can leave the instructions and the output reservation filling the
+            # whole window. The request would still return schema-valid JSON, read from nothing.
+            raise OllamaContextError(f"OLLAMA_EXTRACT_NO_ROOM num_ctx={self.num_ctx} source={source_id!r}")
+        truncated = truncated or trimmed
+        messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt_for(sent, truncated)}]
         for attempt in range(2):
             response = self._client.post(
                 f"{self.base_url}/api/chat",
@@ -358,6 +446,16 @@ class OllamaClient:
                         f"source={source_id!r} attempt={attempt + 1} "
                         f"error={str(error)!r} response_preview={_preview(raw)!r}"
                     ) from None
+                # The repair turn sends the first answer back, so the newsletter is refitted around it
+                # rather than letting the longer conversation overflow and lose the system prompt.
+                repair_overhead = overhead + _estimated_tokens(raw) + EXTRACT_REPAIR_OVERHEAD_TOKENS
+                sent, trimmed = fitted_extraction_content(content, repair_overhead, self.num_ctx, max_items)
+                if content and not sent:
+                    raise OllamaContextError(
+                        f"OLLAMA_EXTRACT_NO_ROOM num_ctx={self.num_ctx} source={source_id!r} attempt=2"
+                    ) from None
+                truncated = truncated or trimmed
+                messages = [{"role": "system", "content": system}, {"role": "user", "content": prompt_for(sent, truncated)}]
                 messages.extend(
                     [
                         {"role": "assistant", "content": raw},

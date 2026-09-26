@@ -10,6 +10,7 @@ from two_much_two_read.config import Settings
 from two_much_two_read.digest import digest_language_code
 from two_much_two_read.ollama import (
     OllamaClient,
+    OllamaContextError,
     OllamaSchemaError,
     _language_instruction,
     _ollama_schema,
@@ -502,3 +503,167 @@ def test_a_chinese_field_cannot_hide_in_an_english_digest_either() -> None:
         _validate_digest_language(
             "en", ["OpenAI released a very fast model today with new hardware.", "這件事很重要因為成本下降。"]
         )
+
+
+def _extraction_route() -> respx.Route:
+    return respx.post("http://127.0.0.1:11434/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": json.dumps(valid_result())}})
+    )
+
+
+@respx.mock
+def test_an_oversized_newsletter_is_cut_from_the_tail_not_the_instructions() -> None:
+    # Ollama keeps four tokens and drops from there when a prompt overflows, which took the system
+    # prompt and the head of the newsletter and left the model the tail with no instructions.
+    route = _extraction_route()
+    content = "FIRST STORY\n" + "word " * 40_000 + "\nLAST STORY"
+
+    result = OllamaClient(num_ctx=16384).extract("alphasignal", content, max_items=10)
+
+    system, user = (message["content"] for message in json.loads(route.calls[0].request.content)["messages"])
+    assert "FIRST STORY" in user
+    assert "LAST STORY" not in user
+    assert "truncated_input=true" in user
+    assert result.truncated_input
+    reserved = 10 * ollama.EXTRACT_RESERVED_TOKENS_PER_ITEM + ollama.EXTRACT_RESERVED_OUTPUT_BASE
+    assert ollama._estimated_tokens(system) + ollama._estimated_tokens(user) + reserved <= 16384
+
+
+@pytest.mark.parametrize(
+    "content", ["FIRST STORY\n" + "word " * 20_000, "x = y + 1\n" * 4_000, "1 " * 20_000], ids=["prose", "code", "digits"]
+)
+def test_a_fitted_prompt_stays_inside_the_window_at_every_size(content: str) -> None:
+    # The template and the newsletter are estimated apart, and the pieces do not add up across the
+    # seam; over 192 sizes the whole prompt once ran a token over the window in 74 of them. The chat
+    # template Ollama wraps around the messages takes its share of the window too.
+    over: list[int] = []
+    for num_ctx in range(8000, 8016):
+        with respx.mock:
+            route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+                return_value=httpx.Response(200, json={"message": {"content": json.dumps(valid_result())}})
+            )
+            OllamaClient(num_ctx=num_ctx).extract("alphasignal", content, max_items=10)
+        system, user = (message["content"] for message in json.loads(route.calls[0].request.content)["messages"])
+        reserved = 10 * ollama.EXTRACT_RESERVED_TOKENS_PER_ITEM + ollama.EXTRACT_RESERVED_OUTPUT_BASE
+        framing = ollama.CHAT_TEMPLATE_TOKENS
+        if ollama._estimated_tokens(system) + ollama._estimated_tokens(user) + reserved + framing > num_ctx:
+            over.append(num_ctx)
+
+    assert over == []
+
+
+@respx.mock
+def test_a_repair_round_is_refitted_around_the_answer_it_sends_back() -> None:
+    # The repair turn carries the first answer, so sending the same newsletter again would overflow
+    # by exactly that much - and an overflow loses the system prompt, not the tail.
+    invalid = valid_result()
+    invalid["items"][0]["confidence"] = 9  # type: ignore[index]
+    invalid["overview_zh_tw"] = "摘要" * 1_000
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[
+            httpx.Response(200, json={"message": {"content": json.dumps(invalid, ensure_ascii=False)}}),
+            httpx.Response(200, json={"message": {"content": json.dumps(valid_result())}}),
+        ]
+    )
+
+    OllamaClient(num_ctx=16384).extract("alphasignal", "FIRST STORY\n" + "word " * 40_000, max_items=10)
+
+    first, repair = (json.loads(call.request.content)["messages"] for call in route.calls)
+    assert len(repair[1]["content"]) < len(first[1]["content"])
+    assert "FIRST STORY" in repair[1]["content"]
+    assert repair[0]["content"] == first[0]["content"]
+    reserved = 10 * ollama.EXTRACT_RESERVED_TOKENS_PER_ITEM + ollama.EXTRACT_RESERVED_OUTPUT_BASE
+    assert sum(ollama._estimated_tokens(message["content"]) for message in repair) + reserved <= 16384
+
+
+@respx.mock
+def test_an_extraction_with_no_room_for_the_newsletter_is_refused_not_sent() -> None:
+    # At the smallest supported num_ctx the output reservation alone fills the window; sending the
+    # instructions without the newsletter would come back schema-valid and describe nothing.
+    route = _extraction_route()
+
+    with pytest.raises(OllamaContextError, match="OLLAMA_EXTRACT_NO_ROOM num_ctx=2048"):
+        OllamaClient(num_ctx=2048).extract("alphasignal", "One story", max_items=10)
+
+    assert not route.called
+
+
+@respx.mock
+def test_a_repair_round_with_no_room_left_is_refused_not_sent() -> None:
+    invalid = valid_result()
+    invalid["items"][0]["confidence"] = 9  # type: ignore[index]
+    invalid["overview_zh_tw"] = "摘要" * 8_000
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": json.dumps(invalid, ensure_ascii=False)}})
+    )
+
+    with pytest.raises(OllamaContextError, match="OLLAMA_EXTRACT_NO_ROOM .*attempt=2"):
+        OllamaClient(num_ctx=16384).extract("alphasignal", "One story", max_items=10)
+
+    assert route.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("text", "measured"),
+    [
+        # Token counts from the Qwen3 tokenizer, which these rates have to stay above.
+        ("오픈AI는 새로운 모델을 발표했으며 이는 코드 생성과 추론 능력을 크게 향상시켰다고 밝혔다. " * 5, 177),
+        ("こんにちは。これはテストです。アップデートがリリースされました。" * 5, 70),
+        ("🔥🚀✅🔁📌💡🧠⚠️🎉👉👨‍👩‍👧" * 5, 90),
+        ("9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08" * 20, 1180),
+        ("x = y + 1\n" * 200, 1400),
+        ("Version 1.2.3 released on 2026-09-26, 12,345 users, 99.9% uptime. " * 20, 761),
+        ("a b c d e f g h i j " * 100, 1001),
+        # Symbols missing from the vocabulary fall back to one token a byte.
+        ("⟦⟧⨀⨁⨂⩽⩾⪕⫷⫸ꙮꚙꛘ𓀀𓀁𓂀𐎀𐎁" * 20, 740),
+    ],
+    ids=["hangul", "kana", "emoji", "hex", "spaced-code", "digits", "one-letter-words", "rare-symbols"],
+)
+def test_the_estimate_stays_above_text_that_tokenises_densely(text: str, measured: int) -> None:
+    # Charging these at the English rate let a Korean newsletter or a page of numbers keep twice
+    # the tokens the budget allowed, and an overflow drops the system prompt rather than the tail.
+    assert ollama._estimated_tokens(text) >= measured
+
+
+def test_long_identifiers_do_not_double_the_estimate_for_ordinary_code() -> None:
+    # Charging every long unbroken run at a token a character put ordinary code near twice its size,
+    # which cuts a code-heavy newsletter far shorter than its budget needs. 390 real tokens.
+    code = (
+        """def fitted(settings, candidates):
+    window = settings.digest_repeat_window_days
+    for candidate in candidates:
+        if candidate.previous_days >= window:
+            yield replace(candidate, previous_window=window)
+"""
+        * 10
+    )
+
+    assert 390 <= ollama._estimated_tokens(code) <= 390 * 1.7
+
+
+@respx.mock
+def test_a_newsletter_that_fits_is_sent_whole() -> None:
+    route = _extraction_route()
+
+    result = OllamaClient().extract("alphasignal", "Short issue [L1]")
+
+    user = json.loads(route.calls[0].request.content)["messages"][1]["content"]
+    assert "Short issue [L1]" in user
+    assert "truncated_input=false" in user
+    assert not result.truncated_input
+
+
+@respx.mock
+def test_the_extractor_is_told_what_a_link_code_is_and_answers_with_one() -> None:
+    answer = valid_result()
+    answer["items"][0]["link"] = "[L2]"  # type: ignore[index]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": json.dumps(answer)}})
+    )
+
+    result = OllamaClient().extract("alphasignal", "Model release [L2] (comments [L3])")
+
+    system = json.loads(route.calls[0].request.content)["messages"][0]["content"]
+    assert "[L7]" in system
+    assert "never a comments" in system
+    assert result.items[0].link == "L2"

@@ -37,6 +37,9 @@ CONTROL_LABEL_PATTERN = re.compile(
     re.I,
 )
 MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+# Text the newsletter itself wrote in the shape of a link code, such as a "[L2]" cache level. A
+# Markdown link label is left to the link pass, which takes the brackets off.
+LITERAL_LINK_CODE = re.compile(r"\[(\s*L\s*\d{1,4}\s*)\](?!\()", re.IGNORECASE)
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'\]]+")
 
 
@@ -182,9 +185,7 @@ def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
         if full():
             return candidates
         matched_url = match.group()
-        raw_url = matched_url.rstrip(".,;:!?]}")
-        while raw_url.endswith(")") and raw_url.count("(") < raw_url.count(")"):
-            raw_url = raw_url[:-1]
+        raw_url = _trimmed_url(matched_url)
         context = _plain_context(plain, match.start(), matched_url)
         add(raw_url, context, context, "unknown")
     return candidates
@@ -207,12 +208,61 @@ def html_to_text(html: str) -> str:
     return "\n".join(kept).strip()
 
 
+def _trimmed_url(matched_url: str) -> str:
+    """A bare URL without the punctuation that ends the sentence around it."""
+    raw_url = matched_url.rstrip(".,;:!?]}")
+    while raw_url.endswith(")") and raw_url.count("(") < raw_url.count(")"):
+        raw_url = raw_url[:-1]
+    return raw_url
+
+
+def _coded_text(text: str, candidates: list[LinkCandidate]) -> str:
+    """The analysis text with every URL replaced by its link code, or removed.
+
+    The model never needs a URL: it may not write one, and an item's link comes from the candidate
+    list, not from the text. What it can use is which link belongs to which item, and a code such as
+    [L7] carries that in three tokens where a tracking URL costs fifty or more. Measured on real
+    issues, URLs were 93% of The New Stack's tokens, 63% of AINews's and 54% of Risky Business's,
+    and pushed two of them past num_ctx. A URL that is not a candidate - an unsubscribe or share
+    link, or one past the candidate cap - is dropped rather than coded, so no code points at it.
+    """
+    codes = {str(candidate.raw_url): candidate.code for candidate in candidates}
+
+    def code_for(raw_url: str) -> str | None:
+        safe_url = _safe_url(raw_url)
+        if safe_url is None:
+            return None
+        try:
+            return codes.get(str(HTTP_URL.validate_python(safe_url)))
+        except ValueError:
+            return None
+
+    def markdown(match: re.Match[str]) -> str:
+        code = code_for(match.group(2))
+        return f"{match.group(1)} [{code}]" if code else match.group(1)
+
+    def bare(match: re.Match[str]) -> str:
+        raw_url = _trimmed_url(match.group())
+        code = code_for(raw_url)
+        return (f"[{code}]" if code else "") + match.group()[len(raw_url) :]
+
+    # Bracketed code-shaped text the newsletter wrote itself would read as a code: the model could
+    # take it for a link, and the text fields would drop it. Parentheses keep the words and lose the
+    # shape - unlike full-width brackets, which a model may write back as ASCII when it copies them.
+    text = LITERAL_LINK_CODE.sub(r"(\1)", text)
+    return URL_PATTERN.sub(bare, MARKDOWN_LINK_PATTERN.sub(markdown, text))
+
+
 def _content(plain: list[str], html: list[str]) -> ExtractedEmailContent:
     plain_content = "\n".join(value.strip() for value in plain if value.strip())
     analysis_text = plain_content
     html_content = "\n".join(value for value in html if value.strip())
     if not analysis_text:
         analysis_text = html_to_text(html_content)
+    candidates = _link_candidates(plain_content, html_content)
+    # Coded before the length is measured and cut, so the cut is spent on text rather than URLs.
+    analysis_text = _coded_text(analysis_text, candidates)
+    analysis_text = re.sub(r"[ \t]+\n", "\n", analysis_text)
     analysis_text = re.sub(r"\n{3,}", "\n\n", analysis_text).strip()
     if not analysis_text:
         raise EmptyEmailError("email contains no usable text")
@@ -221,7 +271,7 @@ def _content(plain: list[str], html: list[str]) -> ExtractedEmailContent:
     return ExtractedEmailContent(
         analysis_text=analysis_text,
         original_characters=original_characters,
-        link_candidates=_link_candidates(plain_content, html_content),
+        link_candidates=candidates,
     )
 
 

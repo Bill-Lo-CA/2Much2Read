@@ -104,3 +104,44 @@ def test_does_not_display_an_unresolved_tracking_url() -> None:
     item = enricher.resolved_item(match, ResolvedUrl("https://info.example/e3t/token", "https://info.example/e3t/token", None))
 
     assert item.source_url is None
+
+
+def coded(title: str, link: str | None) -> NewsletterItemAnalysis:
+    return NewsletterItemAnalysis.model_validate({**analysis(title).model_dump(), "source_title": title, "link": link})
+
+
+def test_the_extractors_link_code_settles_an_article_and_its_comments() -> None:
+    # A link-list newsletter puts the story and its comments beside the same headline, so the title
+    # scores both alike and the match was abandoned as ambiguous: 10 of 10 on Hacker Newsletter.
+    article = candidate("link-0001", "", "https://example.com/grok", 0).model_copy(update={"nearby_text": "Grok 4.7"})
+    comments = candidate("link-0002", "", "https://news.example/item?id=1", 1).model_copy(update={"nearby_text": "Grok 4.7"})
+
+    assert UrlEnricher().match([analysis("Grok 4.7")], [article, comments])[0].method == "ambiguous"
+    match = UrlEnricher().match([coded("Grok 4.7", "L1")], [article, comments])[0]
+
+    assert match.method == "model_link"
+    assert match.candidate is article
+
+
+def test_a_code_that_names_no_usable_link_falls_back_to_the_title() -> None:
+    story = candidate("link-0001", "Useful article", "https://example.com/story", 0)
+    footer = LinkCandidate(
+        candidate_id="link-0002",
+        anchor_text="About us",
+        raw_url=HttpUrl("https://example.com/about"),
+        position=1,
+        kind="non_article",
+    )
+
+    for link in ("L9", "L2", None):
+        match = UrlEnricher().match([coded("Useful article", link)], [story, footer])[0]
+        assert (match.method, match.candidate) == ("exact_anchor", story)
+
+
+def test_a_code_already_taken_falls_back_to_the_title() -> None:
+    first = candidate("link-0001", "First story", "https://example.com/first", 0)
+    second = candidate("link-0002", "Second story", "https://example.com/second", 1)
+
+    matches = UrlEnricher().match([coded("First story", "L1"), coded("Second story", "L1")], [first, second])
+
+    assert [(match.method, match.candidate) for match in matches] == [("model_link", first), ("exact_anchor", second)]

@@ -11,7 +11,10 @@ from .article_fetcher import ArticleFetcher, ResolvedUrl, UrlResolutionError
 from .digest import canonical_url
 from .schemas import HTTP_URL, DigestItem, ItemAnalysis, LinkCandidate, NewsletterItemAnalysis
 
-MatchMethod: TypeAlias = Literal["exact_anchor", "heading_context", "fuzzy_anchor", "url_slug", "unmatched", "ambiguous"]
+MatchedBy: TypeAlias = Literal["model_link", "exact_anchor", "heading_context", "fuzzy_anchor", "url_slug"]
+MatchMethod: TypeAlias = Literal[
+    "model_link", "exact_anchor", "heading_context", "fuzzy_anchor", "url_slug", "unmatched", "ambiguous"
+]
 TRACKING_PARAMETERS = {"mc_cid", "mc_eid", "mkt_tok"}
 
 
@@ -71,9 +74,19 @@ class UrlEnricher:
 
     def match(self, items: Sequence[NewsletterItemAnalysis], candidates: Sequence[LinkCandidate]) -> list[UrlMatch]:
         available = [candidate for candidate in candidates if candidate.kind != "non_article"]
+        by_code = {candidate.code: candidate for candidate in available}
         used: set[str] = set()
         matches: list[UrlMatch] = []
         for item in items:
+            # The extractor's own answer comes first: it read the item beside its links, and so can
+            # tell an article link from the comments link next to it, where the title scores both
+            # alike and the match is abandoned as ambiguous. A code that names no candidate, or one
+            # another item already took, falls through to the title.
+            coded = by_code.get(item.link) if item.link else None
+            if coded is not None and coded.candidate_id not in used:
+                used.add(coded.candidate_id)
+                matches.append(UrlMatch(item, coded, "model_link", 1.0))
+                continue
             # Score against the newsletter's own wording, not the translated display title.
             scored = [
                 (_score(item.source_title, candidate), candidate) for candidate in available if candidate.candidate_id not in used
@@ -119,7 +132,7 @@ class UrlEnricher:
                 resolved_url=HTTP_URL.validate_python(resolved.final_url),
                 canonical_url=HTTP_URL.validate_python(resolved.canonical_url) if resolved.canonical_url else None,
                 url_match_status="matched",
-                url_match_method=cast(Literal["exact_anchor", "heading_context", "fuzzy_anchor", "url_slug"], match.method),
+                url_match_method=cast(MatchedBy, match.method),
                 url_match_confidence=match.confidence,
                 url_resolution_status="resolved",
                 url_checked_at=datetime.now(UTC),
@@ -129,7 +142,7 @@ class UrlEnricher:
             **values,
             raw_url=HTTP_URL.validate_python(raw_url),
             url_match_status="matched",
-            url_match_method=cast(Literal["exact_anchor", "heading_context", "fuzzy_anchor", "url_slug"], match.method),
+            url_match_method=cast(MatchedBy, match.method),
             url_match_confidence=match.confidence,
             url_resolution_status="blocked" if blocked else "failed",
             url_error_code=error_code,

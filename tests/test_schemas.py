@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from two_much_two_read.schemas import DigestItem, EmailExtraction, NewsletterItemAnalysis
+from two_much_two_read.schemas import ArticleAnalysis, DigestItem, EmailExtraction, ItemAnalysis, NewsletterItemAnalysis
 
 
 def item_values(**updates: object) -> dict[str, object]:
@@ -136,3 +136,93 @@ def test_a_headline_that_is_only_a_link_still_yields_something_to_match_on() -> 
     item = NewsletterItemAnalysis.model_validate(analysis_values(source_title="https://example.com/story"))
 
     assert item.source_title == "https://example.com/story"
+
+
+@pytest.mark.parametrize(
+    ("answer", "link"),
+    [
+        ("L7", "L7"),
+        ("[L7]", "L7"),
+        ("l 7", "L7"),
+        ("L07", "L7"),
+        ("7", None),
+        ("none", None),
+        ("", None),
+        (7, None),
+        (None, None),
+    ],
+)
+def test_a_link_code_is_read_in_any_form_a_model_writes_it(answer: object, link: str | None) -> None:
+    # Anything unreadable is no answer rather than an error: the title matcher can stand in for it,
+    # and rejecting would cost the whole email.
+    item = NewsletterItemAnalysis.model_validate(
+        {
+            "title": "Story",
+            "source_title": "Story",
+            "category": "OTHER",
+            "summary_zh_tw": "摘要",
+            "why_it_matters_zh_tw": "原因",
+            "importance": 5,
+            "confidence": 0.5,
+            "link": answer,
+        }
+    )
+
+    assert item.link == link
+
+
+def test_link_codes_copied_into_text_fields_are_removed() -> None:
+    item = NewsletterItemAnalysis.model_validate(
+        {
+            "title": "Grok 4.7 [L3]",
+            "source_title": "Grok 4.7 [L3] (comments: [L4])",
+            "category": "AI_MODEL",
+            "summary_zh_tw": "新模型發布 [L3]。",
+            "why_it_matters_zh_tw": "原因",
+            "importance": 5,
+            "confidence": 0.5,
+        }
+    )
+
+    assert (item.title, item.source_title, item.summary_zh_tw) == ("Grok 4.7", "Grok 4.7 (comments: )", "新模型發布。")
+
+
+def test_every_bracketed_spelling_of_a_link_code_is_removed_but_a_bare_one_stays() -> None:
+    # The link field reads "[l 7]" and "[L07]" as L7, so the text fields drop them too. Unbracketed,
+    # "L2" is as likely a cache level as a code, and it stays.
+    item = NewsletterItemAnalysis.model_validate(
+        {
+            "title": "Grok 4.7 [l 7]",
+            "source_title": "Grok 4.7 [ L07 ]",
+            "category": "AI_MODEL",
+            "summary_zh_tw": "L2 快取加倍 [l7]。",
+            "why_it_matters_zh_tw": "原因[L 7]",
+            "importance": 5,
+            "confidence": 0.5,
+        }
+    )
+
+    assert (item.title, item.source_title, item.summary_zh_tw, item.why_it_matters_zh_tw) == (
+        "Grok 4.7",
+        "Grok 4.7",
+        "L2 快取加倍。",
+        "原因",
+    )
+
+
+@pytest.mark.parametrize("model", [DigestItem, ArticleAnalysis])
+def test_bracketed_terms_outside_a_newsletter_extraction_are_left_alone(model: type[ItemAnalysis]) -> None:
+    # Codes exist only in the text the newsletter extractor reads. An article or a stored item that
+    # says "[L2]" means a cache level, and reloading it must not rewrite it.
+    item = model.model_validate(
+        {
+            "title": "Understanding cache levels [L2]",
+            "category": "DEV_TOOL",
+            "summary_zh_tw": "說明 [L2] 快取。",
+            "why_it_matters_zh_tw": "原因",
+            "importance": 5,
+            "confidence": 0.5,
+        }
+    )
+
+    assert (item.title, item.summary_zh_tw) == ("Understanding cache levels [L2]", "說明 [L2] 快取。")
