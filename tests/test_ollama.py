@@ -534,7 +534,8 @@ def test_an_oversized_newsletter_is_cut_from_the_tail_not_the_instructions() -> 
 )
 def test_a_fitted_prompt_stays_inside_the_window_at_every_size(content: str) -> None:
     # The template and the newsletter are estimated apart, and the pieces do not add up across the
-    # seam; over 192 sizes the whole prompt once ran a token over the window in 74 of them.
+    # seam; over 192 sizes the whole prompt once ran a token over the window in 74 of them. The chat
+    # template Ollama wraps around the messages takes its share of the window too.
     over: list[int] = []
     for num_ctx in range(8000, 8016):
         with respx.mock:
@@ -544,7 +545,8 @@ def test_a_fitted_prompt_stays_inside_the_window_at_every_size(content: str) -> 
             OllamaClient(num_ctx=num_ctx).extract("alphasignal", content, max_items=10)
         system, user = (message["content"] for message in json.loads(route.calls[0].request.content)["messages"])
         reserved = 10 * ollama.EXTRACT_RESERVED_TOKENS_PER_ITEM + ollama.EXTRACT_RESERVED_OUTPUT_BASE
-        if ollama._estimated_tokens(system) + ollama._estimated_tokens(user) + reserved > num_ctx:
+        framing = ollama.CHAT_TEMPLATE_TOKENS
+        if ollama._estimated_tokens(system) + ollama._estimated_tokens(user) + reserved + framing > num_ctx:
             over.append(num_ctx)
 
     assert over == []
@@ -612,8 +614,10 @@ def test_a_repair_round_with_no_room_left_is_refused_not_sent() -> None:
         ("x = y + 1\n" * 200, 1400),
         ("Version 1.2.3 released on 2026-09-26, 12,345 users, 99.9% uptime. " * 20, 761),
         ("a b c d e f g h i j " * 100, 1001),
+        # Symbols missing from the vocabulary fall back to one token a byte.
+        ("⟦⟧⨀⨁⨂⩽⩾⪕⫷⫸ꙮꚙꛘ𓀀𓀁𓂀𐎀𐎁" * 20, 740),
     ],
-    ids=["hangul", "kana", "emoji", "hex", "spaced-code", "digits", "one-letter-words"],
+    ids=["hangul", "kana", "emoji", "hex", "spaced-code", "digits", "one-letter-words", "rare-symbols"],
 )
 def test_the_estimate_stays_above_text_that_tokenises_densely(text: str, measured: int) -> None:
     # Charging these at the English rate let a Korean newsletter or a page of numbers keep twice

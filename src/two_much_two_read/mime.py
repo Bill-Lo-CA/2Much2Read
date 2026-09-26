@@ -37,6 +37,9 @@ CONTROL_LABEL_PATTERN = re.compile(
     re.I,
 )
 MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+# Text the newsletter itself wrote in the shape of a link code, such as a "[L2]" cache level. A
+# Markdown link label is left to the link pass, which takes the brackets off.
+LITERAL_LINK_CODE = re.compile(r"\[(\s*L\s*\d{1,4}\s*)\](?!\()", re.IGNORECASE)
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'\]]+")
 
 
@@ -243,6 +246,10 @@ def _coded_text(text: str, candidates: list[LinkCandidate]) -> str:
         code = code_for(raw_url)
         return (f"[{code}]" if code else "") + match.group()[len(raw_url) :]
 
+    # Bracketed code-shaped text the newsletter wrote itself would read as a code: the model could
+    # take it for a link, and the text fields would drop it. Parentheses keep the words and lose the
+    # shape - unlike full-width brackets, which a model may write back as ASCII when it copies them.
+    text = LITERAL_LINK_CODE.sub(r"(\1)", text)
     return URL_PATTERN.sub(bare, MARKDOWN_LINK_PATTERN.sub(markdown, text))
 
 

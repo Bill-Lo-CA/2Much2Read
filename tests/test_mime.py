@@ -377,6 +377,20 @@ def test_the_model_reads_link_codes_instead_of_urls() -> None:
     ]
 
 
+def test_code_shaped_text_the_newsletter_wrote_cannot_pass_for_a_code() -> None:
+    # "[L2]" here is a cache level. Left as it is, the model could take it for the second link and
+    # the text fields would delete it; in parentheses it keeps its words and loses the shape.
+    plain = "Cache levels [L2] and [l 3] explained https://example.com/cache\n[L4](https://example.com/l4) roadmap"
+
+    content = extract_gmail_payload(_body("text/plain", plain))
+
+    codes = {url: code for code, url in _codes(content).items()}
+    assert content.analysis_text.splitlines() == [
+        f"Cache levels (L2) and (l 3) explained [{codes['https://example.com/cache']}]",
+        f"L4 [{codes['https://example.com/l4']}] roadmap",
+    ]
+
+
 def test_an_html_newsletter_is_coded_the_same_way() -> None:
     html = '<h2>Top story</h2><p><a href="https://example.com/story">Top story</a> and more.</p>'
 

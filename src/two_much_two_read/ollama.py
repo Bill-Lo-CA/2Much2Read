@@ -95,8 +95,9 @@ ARTICLE_ANALYSIS_MAX_CHARACTERS = 30_000
 # them, so each costs at least one token. A per-character rate misses that: `x = y + 1` and
 # "v1.2.3 on 2026-09-26" (Qwen spells every digit alone) came to under half their real count, while
 # long identifiers charged as dense runs doubled ordinary code. Measured against the Qwen3
-# tokenizer, this lands 1.16-1.44x over nine real newsletters and 1.11x over review candidates, and
-# at or above the real count for code, numbers, JSON, Hangul, kana, emoji, and hex or base64 blobs.
+# tokenizer, this lands 1.21-1.61x over nine real newsletters and 1.22x over review candidates, and
+# at or above the real count for code, numbers, JSON, Hangul, kana, emoji, rare symbols, and hex or
+# base64 blobs.
 TOKEN_PIECE = re.compile(
     r"(?P<blob>(?=[A-Za-z0-9+/=]*[0-9])[A-Za-z0-9+/=]{24,})"
     # A word takes one punctuation mark in front of it, as `_window` or `.previous` in code - but
@@ -108,21 +109,28 @@ TOKEN_PIECE = re.compile(
     r"|(?P<space>[ \t]+(?=[0-9])|\s*\n\s*|[ \t]{2,})"
     r"|(?P<joined>[ \t](?=.))"
     r"|(?P<cjk>[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff])"
-    r"|(?P<astral>[\U00010000-\U0010ffff])"
     r"|(?P<other>.)",
     re.DOTALL,
 )
-# Per piece, or per character for blob and the non-ASCII classes. Traditional Chinese averages 0.70
-# a character (0.87 at worst per item), Hangul 0.66, kana 0.48, emoji up to 2 with joiners, and hex
-# or base64 up to 0.92 - the ceiling, since no ASCII byte costs more than one token.
+# Per piece, or per character for blob, CJK, and the rest. A blob takes the ceiling, since no ASCII
+# byte costs more than one token (hex or base64 reach 0.92). Any other character takes its UTF-8
+# length, which is what a byte-level tokenizer spends on one missing from its vocabulary: a rare
+# symbol at one token a character came to 0.62 of its real count, while byte-length charging costs
+# real newsletters 1-5% (12% for tldr sec) and review candidates 12%. CJK is the one class charged
+# by measurement instead - Traditional Chinese averages 0.70 a character, 0.87 at worst per item -
+# because its byte length would read Chinese at nearly four times its size. Hangul and kana, read
+# here at three to seven times their size, would earn the same if a Korean or Japanese source joins.
 TOKENS_PER_WORD_CHARACTER = 0.3
 TOKENS_PER_PUNCTUATION_CHARACTER = 0.5
 TOKENS_PER_CJK_CHARACTER = 0.8
-TOKENS_PER_ASTRAL_CHARACTER = 2.0
 # Fitting estimates the prompt template and the text spliced into it apart, and pieces do not add
 # up across the seam: the template's blank line splits into two newlines around the text. Measured
 # on 192 fitted prompts, the whole ran one token over the parts in 74; this covers it with room.
 ESTIMATE_SPLICE_TOKENS = 4
+# Ollama wraps the messages in the model's chat template, which no message content shows: qwen3 adds
+# 17 tokens around a system and a user turn with thinking off, and 10 more for a repair round's two
+# turns; llama3.2's also opens with a knowledge-date system header, about 30.
+CHAT_TEMPLATE_TOKENS = 48
 REVIEW_TOKENS_PER_CANDIDATE_SEPARATOR = 4
 REVIEW_RESERVED_TOKENS_PER_SELECTION = 280
 REVIEW_RESERVED_OUTPUT_TOKENS = 256
@@ -163,8 +171,8 @@ def _estimated_tokens(value: str) -> int:
             total += size
         elif kind == "cjk":
             total += TOKENS_PER_CJK_CHARACTER
-        elif kind == "astral":
-            total += TOKENS_PER_ASTRAL_CHARACTER
+        elif kind == "other":
+            total += len(piece.group().encode())
         elif kind != "joined":
             total += 1.0
     return math.ceil(total)
@@ -211,7 +219,7 @@ def fitted_review_candidates(
     their slots precisely because they rank late, so trimming the tail alone would delete the
     reservation first and defeat the quota on exactly the prompts large enough to need trimming.
     """
-    budget = num_ctx - maximum * REVIEW_RESERVED_TOKENS_PER_SELECTION - REVIEW_RESERVED_OUTPUT_TOKENS
+    budget = num_ctx - maximum * REVIEW_RESERVED_TOKENS_PER_SELECTION - REVIEW_RESERVED_OUTPUT_TOKENS - CHAT_TEMPLATE_TOKENS
     used = _estimated_tokens(REVIEW_SYSTEM_PROMPT) + _estimated_tokens(_review_prompt([], schema, maximum))
     costs = [
         _estimated_tokens(json.dumps(candidate, ensure_ascii=False)) + REVIEW_TOKENS_PER_CANDIDATE_SEPARATOR
@@ -251,7 +259,7 @@ def fitted_extraction_content(content: str, overhead_tokens: int, num_ctx: int, 
     stories that come first.
     """
     output = max_items * EXTRACT_RESERVED_TOKENS_PER_ITEM + EXTRACT_RESERVED_OUTPUT_BASE
-    budget = num_ctx - overhead_tokens - output - ESTIMATE_SPLICE_TOKENS
+    budget = num_ctx - overhead_tokens - output - ESTIMATE_SPLICE_TOKENS - CHAT_TEMPLATE_TOKENS
     if budget <= 0:
         return "", bool(content)
     bounded = content
@@ -268,7 +276,7 @@ def fitted_deepening_content(content: str, overhead_tokens: int, num_ctx: int) -
     Ollama truncates an oversized prompt from the head without erroring, which would evict the
     system prompt and keep the untrusted article text, so the bound is applied here instead.
     """
-    budget = num_ctx - DEEPEN_RESERVED_OUTPUT_TOKENS - overhead_tokens - ESTIMATE_SPLICE_TOKENS
+    budget = num_ctx - DEEPEN_RESERVED_OUTPUT_TOKENS - overhead_tokens - ESTIMATE_SPLICE_TOKENS - CHAT_TEMPLATE_TOKENS
     if budget <= 0:
         return "", bool(content)
     bounded = content
