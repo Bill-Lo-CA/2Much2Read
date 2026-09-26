@@ -1,7 +1,7 @@
 import pytest
 from pydantic import ValidationError
 
-from two_much_two_read.schemas import DigestItem, EmailExtraction, NewsletterItemAnalysis
+from two_much_two_read.schemas import ArticleAnalysis, DigestItem, EmailExtraction, ItemAnalysis, NewsletterItemAnalysis
 
 
 def item_values(**updates: object) -> dict[str, object]:
@@ -208,3 +208,21 @@ def test_every_bracketed_spelling_of_a_link_code_is_removed_but_a_bare_one_stays
         "L2 快取加倍。",
         "原因",
     )
+
+
+@pytest.mark.parametrize("model", [DigestItem, ArticleAnalysis])
+def test_bracketed_terms_outside_a_newsletter_extraction_are_left_alone(model: type[ItemAnalysis]) -> None:
+    # Codes exist only in the text the newsletter extractor reads. An article or a stored item that
+    # says "[L2]" means a cache level, and reloading it must not rewrite it.
+    item = model.model_validate(
+        {
+            "title": "Understanding cache levels [L2]",
+            "category": "DEV_TOOL",
+            "summary_zh_tw": "說明 [L2] 快取。",
+            "why_it_matters_zh_tw": "原因",
+            "importance": 5,
+            "confidence": 0.5,
+        }
+    )
+
+    assert (item.title, item.summary_zh_tw) == ("Understanding cache levels [L2]", "說明 [L2] 快取。")

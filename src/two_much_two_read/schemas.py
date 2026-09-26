@@ -81,11 +81,6 @@ class ItemAnalysis(BaseModel):
     confidence: float = Field(ge=0, le=1)
     tags: list[str] = Field(default_factory=list, max_length=8)
 
-    @field_validator("title", "summary_zh_tw", "why_it_matters_zh_tw", mode="before")
-    @classmethod
-    def drop_link_codes(cls, value: object) -> object:
-        return LINK_CODE_TEXT.sub("", value).strip() if isinstance(value, str) else value
-
     @field_validator("title", "summary_zh_tw", "why_it_matters_zh_tw")
     @classmethod
     def reject_model_links(cls, value: str) -> str:
@@ -124,6 +119,13 @@ class NewsletterItemAnalysis(ItemAnalysis):
     link: str | None = Field(
         default=None, description="Code of this item's own article link, such as L7, or null when it has none"
     )
+
+    @field_validator("title", "summary_zh_tw", "why_it_matters_zh_tw", mode="before")
+    @classmethod
+    def drop_link_codes(cls, value: object) -> object:
+        """Remove codes the model copied into its text. Only newsletter text carries codes: in an
+        article analysis or a stored item, "[L2]" is the author's own words and stays."""
+        return LINK_CODE_TEXT.sub("", value).strip() if isinstance(value, str) else value
 
     @field_validator("link", mode="before")
     @classmethod
