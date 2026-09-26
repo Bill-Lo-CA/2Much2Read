@@ -776,9 +776,10 @@ def test_the_reviewer_is_told_how_many_previous_days_carried_a_story() -> None:
 
 
 def test_previous_coverage_comes_from_earlier_runs_within_the_window(tmp_path: Path) -> None:
-    # Received early three days ago, two days ago, yesterday and ten days ago, plus this run's own
-    # document and a failed one earlier today. Only the first three may count, and the story is
-    # never taken as repeating itself.
+    # Received early three days ago, yesterday and ten days ago, plus a failed one two days ago,
+    # another run's document earlier today, and this run's own. Only the first two may count: the
+    # failed one has nothing to show, earlier today is not a previous day however many runs it
+    # took, and the story is never taken as repeating itself.
     from two_much_two_read.schemas import DigestItem as StoredItem
     from two_much_two_read.storage import Database
 
@@ -787,11 +788,12 @@ def test_previous_coverage_comes_from_earlier_runs_within_the_window(tmp_path: P
     for name, received in (
         # 06:00 in Montreal, before this run's hour: inside whole calendar days, outside 72 hours.
         ("three-days-early", datetime(2026, 9, 22, 10, tzinfo=UTC)),
-        ("two-days", datetime(2026, 9, 23, 14, tzinfo=UTC)),
+        ("failed", datetime(2026, 9, 23, 14, tzinfo=UTC)),
         ("yesterday", datetime(2026, 9, 24, 14, tzinfo=UTC)),
         ("ten-days", datetime(2026, 9, 15, 14, tzinfo=UTC)),
+        # 01:00 in Montreal, stored by a source-specific run before this one.
+        ("earlier-today", datetime(2026, 9, 25, 5, tzinfo=UTC)),
         ("this-run", datetime(2026, 9, 25, 11, tzinfo=UTC)),
-        ("failed", datetime(2026, 9, 25, 5, tzinfo=UTC)),
     ):
         document_id = database.discover_gmail_document(name, name, "tldr-ai", received, "subject", "sender", "body", False)
         assert document_id is not None
@@ -817,20 +819,20 @@ def test_previous_coverage_comes_from_earlier_runs_within_the_window(tmp_path: P
             judged.append(right["title"])
             return True
 
-    marked = pipeline._with_previous_coverage(
+    mark = pipeline._repeat_marker(
         Settings(digest_timezone="America/Montreal"),
         database,
         Judge(),
-        [entry(documents["this-run"] * 1000, "GPT-6 Sol and Luna", "TLDR AI")],
         datetime(2026, 9, 25, 8, tzinfo=ZoneInfo("America/Montreal")),
         [documents["this-run"]],
         {"tldr-ai": "TLDR AI"},
         lambda _message: None,
     )
+    marked = mark([entry(documents["this-run"] * 1000, "GPT-6 Sol and Luna", "TLDR AI")], lambda _entry: True)
     database.close()
 
-    assert (marked[0].previous_days, marked[0].previous_window) == (3, 3)
-    assert len(judged) == 3
+    assert (marked[0].previous_days, marked[0].previous_window) == (2, 3)
+    assert len(judged) == 2
 
 
 def test_a_zero_window_turns_the_mark_off(tmp_path: Path) -> None:
@@ -843,9 +845,10 @@ def test_a_zero_window_turns_the_mark_off(tmp_path: Path) -> None:
     ranked = [entry(1, "Opus 5.5", "TLDR")]
     database = Database(tmp_path / "digest.sqlite3")
     try:
-        marked = pipeline._with_previous_coverage(
-            Settings(digest_repeat_window_days=0), database, Unused(), ranked, datetime.now(UTC), [], {}, lambda _message: None
+        mark = pipeline._repeat_marker(
+            Settings(digest_repeat_window_days=0), database, Unused(), datetime.now(UTC), [], {}, lambda _message: None
         )
+        marked = mark(ranked, lambda _entry: True)
     finally:
         database.close()
 
@@ -871,6 +874,15 @@ def test_without_a_versioned_name_only_rare_shared_tokens_shortlist_a_pair() -> 
     assert marked[0].previous_days == 1
 
 
+def test_a_count_absorbed_in_merging_is_not_lowered_by_a_later_check() -> None:
+    # Checked after merging, a mention may already carry three days from the copy it absorbed.
+    today = replace(entry(1, "Claude Opus 5.5", "TLDR"), previous_days=3, previous_window=3)
+
+    marked = with_previous_coverage([today], [_earlier(24, 100, "Anthropic releases Opus 5.5")], lambda *_: True, 3, [])
+
+    assert marked[0].previous_days == 3
+
+
 def test_a_day_is_asked_about_in_turn_until_one_earlier_item_agrees() -> None:
     # The best-scoring match on a day can be a roundup of several stories, rightly judged different.
     today = entry(1, "Claude Opus 5.5", "TLDR")
@@ -888,9 +900,11 @@ def test_a_day_is_asked_about_in_turn_until_one_earlier_item_agrees() -> None:
     assert marked[0].previous_days == 1
 
 
-def test_only_entries_that_can_be_shown_are_checked_for_repeats(tmp_path: Path) -> None:
-    # One reviewer slot and no mentions: the second candidate can never be shown, so it costs no
-    # judgement and gets no mark, even though it repeats yesterday's story.
+def test_repeats_are_checked_on_what_the_reviewer_and_the_reader_see(tmp_path: Path) -> None:
+    # One reviewer slot and one mention slot. Before the review only the reviewer's candidate is
+    # checked. The first bare mention folds into that headline, which frees its slot for the second -
+    # a mention that could not be known before merging, and still repeats yesterday's story. The
+    # headline is not judged twice, and the mention folded away is never judged at all.
     from two_much_two_read.schemas import DigestItem as StoredItem
     from two_much_two_read.storage import Database
 
@@ -912,23 +926,38 @@ def test_only_entries_that_can_be_shown_are_checked_for_repeats(tmp_path: Path) 
     )
     asked: list[str] = []
 
-    class Judge:
+    class RepeatJudge:
         def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
             asked.append(left["title"])
             return True
 
-    ranked = [entry(1, "Grok 4.7 pricing", "TLDR AI"), entry(2, "Grok 4.7 benchmarks", "TLDR AI")]
-    marked = pipeline._with_previous_coverage(
-        Settings(digest_review_candidate_limit=1, digest_secondary_items=0),
+    class Reviewer:
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
+            return DigestReview.model_validate({"selected": [{"candidate_id": 1, "score": 90, "reason_zh_tw": "具體"}]})
+
+        def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
+            return left["title"] == right["title"]
+
+    settings = Settings(digest_review_candidate_limit=1, digest_secondary_items=1, digest_timezone="America/Montreal")
+    messages: list[str] = []
+    mark = pipeline._repeat_marker(
+        settings,
         database,
-        Judge(),
-        ranked,
+        RepeatJudge(),
         datetime(2026, 9, 25, 8, tzinfo=ZoneInfo("America/Montreal")),
         [],
         {},
-        lambda _message: None,
+        messages.append,
     )
+    ranked = [
+        entry(1, "Grok 4.7 pricing", "TLDR AI"),
+        _headline_only(2, "Grok 4.7 pricing"),
+        _headline_only(3, "Grok 4.7 benchmarks"),
+    ]
+    shown, _ = pipeline._selected_entries(settings, Reviewer(), ranked, mark, lambda _message: None)
     database.close()
 
-    assert asked == ["Grok 4.7 pricing"]
-    assert [value.previous_days for value in marked] == [1, 0]
+    assert [value.item.title for value in shown] == ["Grok 4.7 pricing", "Grok 4.7 benchmarks"]
+    assert [value.previous_days for value in shown] == [1, 1]
+    assert asked == ["Grok 4.7 pricing", "Grok 4.7 benchmarks"]
+    assert messages == ["Checking 1 candidates against 1 items from the previous 3 days"] * 2

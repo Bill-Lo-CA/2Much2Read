@@ -652,7 +652,7 @@ def test_items_without_an_article_are_counted_per_source(tmp_path: Path) -> None
     database.close()
 
 
-def test_items_since_with_nothing_to_exclude_returns_everything_in_range(tmp_path: Path) -> None:
+def test_items_between_with_nothing_to_exclude_returns_everything_in_range(tmp_path: Path) -> None:
     # An empty exclusion once rendered as NOT IN (NULL), which SQL treats as matching nothing.
     from two_much_two_read.schemas import DigestItem
 
@@ -673,6 +673,9 @@ def test_items_since_with_nothing_to_exclude_returns_everything_in_range(tmp_pat
         ],
     )
 
-    assert [row["title"] for row in database.items_since(datetime(2026, 7, 1, tzinfo=UTC), [])] == ["Story"]
-    assert database.items_since(datetime(2026, 7, 1, tzinfo=UTC), [document_id]) == []
+    # Received 2026-07-23; the upper bound is exclusive.
+    july, received, after = datetime(2026, 7, 1, tzinfo=UTC), datetime(2026, 7, 23, tzinfo=UTC), datetime(2026, 7, 24, tzinfo=UTC)
+    assert [row["title"] for row in database.items_between(july, after, [])] == ["Story"]
+    assert database.items_between(july, after, [document_id]) == []
+    assert database.items_between(july, received, []) == []
     database.close()

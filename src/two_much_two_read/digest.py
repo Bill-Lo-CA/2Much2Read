@@ -364,7 +364,9 @@ def with_previous_coverage(
             best_first = sorted(candidates, key=lambda candidate: candidate[:2], reverse=True)
             if any(same_story(entry, other) for _, _, other in best_first[:REPEAT_JUDGEMENTS_PER_DAY]):
                 days.add(day)
-        marked.append(replace(entry, previous_days=min(len(days), window), previous_window=window) if days else entry)
+        # An entry checked after merging may already carry a larger count from one it absorbed.
+        days_carried = max(entry.previous_days, min(len(days), window))
+        marked.append(replace(entry, previous_days=days_carried, previous_window=window) if days else entry)
     return marked
 
 

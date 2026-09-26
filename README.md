@@ -163,7 +163,8 @@ ranked higher. Each run's JSON reports `no_article_by_source`, the items and art
 source, which is the evidence for how much weight each source should get.
 
 A story newsletters keep returning to over several days is one that matters, so each candidate is
-checked against the items of the previous `DIGEST_REPEAT_WINDOW_DAYS` (default 3) calendar days, and
+checked against the items of the previous `DIGEST_REPEAT_WINDOW_DAYS` (default 3) calendar days - not
+today, even when another run already stored some of today's newsletters - and
 one found there is marked in the digest - "🔁 前 3 天中有 2 天也有報導" on a headline, "🔁 2/3 天" on a
 mention - and handed to the reviewer as `previous_days`, which it is told to weigh as a sign of
 importance. The same article link settles a match outright. Otherwise the review model decides, as it
@@ -171,8 +172,9 @@ does for same-day merging, but only for a shortlisted pair: one sharing a versio
 ("Opus 5.5", "GPT-6", "Qwen-Image-2.1"), or tokens rare across the last 30 days of items. Rarity has
 to be measured over the longer period, because a story that repeats makes its own name common - within
 the three days, "Claude" and "Opus" were exactly what a rarity filter removed. Each day gets up to three
-of its best matches, asked in turn, and only entries that can be shown are checked, under a budget of
-`DIGEST_REPEAT_JUDGEMENTS` (default 60). On the 2026-09-25 candidates that took 26 judgements and 14
+of its best matches, asked in turn, and only entries that can be shown are checked: the reviewer's
+candidates before the review, and the mentions after merging, which frees slots for ones further down.
+Each is judged once, under a shared budget of `DIGEST_REPEAT_JUDGEMENTS` (default 60). On the 2026-09-25 candidates that took 26 judgements and 14
 seconds and marked Claude Opus 5.5, GPT-6 Sol and Luna, and Grok 4.7, with no false matches.
 
 Several newsletters cover the same story, and the reviewer drops the copies from its own selection,

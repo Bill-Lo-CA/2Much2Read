@@ -2731,7 +2731,7 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
     # The day before, another newsletter linked the same Muse article.
     earlier = Database(settings.database_path)
     yesterday = earlier.discover_gmail_document(
-        "gmail-0", "thread-0", "alphasignal", datetime(2026, 7, 23, 12, tzinfo=UTC), "Earlier", "news@example.com", "x", False
+        "gmail-0", "thread-0", "alphasignal", datetime(2026, 7, 22, 12, tzinfo=UTC), "Earlier", "news@example.com", "x", False
     )
     assert yesterday is not None
     earlier.store_items(

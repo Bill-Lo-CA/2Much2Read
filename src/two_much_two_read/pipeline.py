@@ -4,7 +4,7 @@ import json
 import re
 from collections.abc import Callable, Sequence
 from dataclasses import replace
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 from zoneinfo import ZoneInfo
@@ -274,59 +274,87 @@ def _row_entry(row: dict[str, object], source_names: dict[str, str]) -> DigestEn
     )
 
 
-def _with_previous_coverage(
+RepeatMarker = Callable[[list[DigestEntry], Callable[[DigestEntry], bool]], list[DigestEntry]]
+
+
+def _repeat_marker(
     settings: Settings,
     database: Database,
     ollama: JudgesSameStory,
-    entries: list[DigestEntry],
     now: datetime,
     current_documents: list[int],
     source_names: dict[str, str],
     status: StatusReporter,
-) -> list[DigestEntry]:
-    """Mark each candidate with how many of the previous days' newsletters also carried it.
+) -> RepeatMarker:
+    """Mark entries with how many of the previous days' newsletters also carried their story.
 
     Earlier runs' items stand for what newsletters covered on those days, counted by the day each
-    newsletter arrived in the digest's timezone. This run's own documents are left out, so a story
-    is never counted as repeating itself.
+    newsletter arrived in the digest's timezone. Only whole days before today count: this run's
+    own documents are left out so a story never repeats itself, and so is anything another run
+    stored earlier today, which is the same day however many runs it took.
+
+    The marker is applied twice - to the reviewer's candidates before the review, which it is told
+    about, and to everything shown once merging is done, since merging frees mention slots and
+    which mentions fill them is not known before. An entry is judged once, and both passes share
+    one judgement budget.
     """
     window = settings.digest_repeat_window_days
-    if window <= 0 or not entries:
-        return entries
     zone = ZoneInfo(settings.digest_timezone)
-    # Only what can be shown is worth a judgement: the reviewer's candidates, and the articleless
-    # entries that can only be mentions.
-    shown = {
+    today = datetime.combine(now.astimezone(zone).date(), datetime.min.time(), zone)
+    previous: list[tuple[date, DigestEntry]] = []
+    background: list[set[str]] = []
+    if window > 0:
+        previous = [
+            (datetime.fromisoformat(str(row["published_at"])).astimezone(zone).date(), _row_entry(row, source_names))
+            for row in database.items_between(today - timedelta(days=window), today, current_documents)
+        ]
+    if previous:
+        background = [
+            story_tokens(_row_entry(row, source_names))
+            for row in database.items_between(today - timedelta(days=REPEAT_BACKGROUND_DAYS), today, current_documents)
+        ]
+    judge = _story_judge(ollama, settings.digest_repeat_judgements, status)
+    checked: set[int] = set()
+
+    def mark(entries: list[DigestEntry], wanted: Callable[[DigestEntry], bool]) -> list[DigestEntry]:
+        targets = [entry for entry in entries if wanted(entry) and entry.candidate_id not in checked]
+        if not previous or not targets:
+            return entries
+        checked.update(entry.candidate_id for entry in targets if entry.candidate_id is not None)
+        status(f"Checking {len(targets)} candidates against {len(previous)} items from the previous {window} days")
+        marked = {
+            id(entry): value
+            for entry, value in zip(targets, with_previous_coverage(targets, previous, judge, window, background), strict=True)
+        }
+        return [marked.get(id(entry), entry) for entry in entries]
+
+    return mark
+
+
+class ReviewsAndJudges(ReviewsDigest, JudgesSameStory, Protocol):
+    pass
+
+
+def _selected_entries(
+    settings: Settings, ollama: ReviewsAndJudges, ranked: list[DigestEntry], mark_repeats: RepeatMarker, status: StatusReporter
+) -> tuple[list[DigestEntry], SecurityFloorPromotion | None]:
+    """Review, merge, and apply the security floor, marking repeats on what the reviewer and reader see."""
+    reviewing = {
         id(entry)
         for entry in _review_candidates(
-            [entry for entry in entries if has_source_text(entry)],
+            [entry for entry in ranked if has_source_text(entry)],
             settings.digest_review_candidate_limit,
             settings.digest_security_candidate_slots,
         )
     }
-    shown.update(
-        id(entry) for entry in [entry for entry in entries if not has_source_text(entry)][: settings.digest_secondary_items]
+    ranked = mark_repeats(ranked, lambda entry: id(entry) in reviewing)
+    merged, security_floor = _merged_entries(
+        _reviewed_entries(settings, ollama, ranked),
+        settings.digest_secondary_items,
+        _story_judge(ollama, settings.digest_merge_judgements, status),
+        headline_limit=min(settings.digest_max_items, settings.digest_top_items),
     )
-    # Whole calendar days in the digest's timezone, so the first of them is not cut at this hour.
-    first_day = datetime.combine(now.astimezone(zone).date() - timedelta(days=window), datetime.min.time(), zone)
-    previous = [
-        (datetime.fromisoformat(str(row["published_at"])).astimezone(zone).date(), _row_entry(row, source_names))
-        for row in database.items_since(first_day, current_documents)
-    ]
-    if not previous:
-        return entries
-    targets = [entry for entry in entries if id(entry) in shown]
-    background = [
-        story_tokens(_row_entry(row, source_names))
-        for row in database.items_since(now - timedelta(days=REPEAT_BACKGROUND_DAYS), current_documents)
-    ]
-    status(f"Checking {len(targets)} candidates against {len(previous)} items from the previous {window} days")
-    marked = iter(
-        with_previous_coverage(
-            targets, previous, _story_judge(ollama, settings.digest_repeat_judgements, status), window, background
-        )
-    )
-    return [next(marked) if id(entry) in shown else entry for entry in entries]
+    return mark_repeats(merged, lambda _entry: True), security_floor
 
 
 def _story_judge(ollama: JudgesSameStory, budget: int, status: StatusReporter) -> Callable[[DigestEntry, DigestEntry], bool]:
@@ -1069,16 +1097,8 @@ def run_pipeline(
                 reranker.close()
 
             try:
-                ranked_entries = _with_previous_coverage(
-                    settings, database, ollama, ranked_entries, now, processed_document_ids, source_names_by_id, status
-                )
-                reviewed_entries = _reviewed_entries(settings, ollama, ranked_entries)
-                reviewed_entries, security_floor = _merged_entries(
-                    reviewed_entries,
-                    settings.digest_secondary_items,
-                    _story_judge(ollama, settings.digest_merge_judgements, status),
-                    headline_limit=min(settings.digest_max_items, settings.digest_top_items),
-                )
+                mark_repeats = _repeat_marker(settings, database, ollama, now, processed_document_ids, source_names_by_id, status)
+                reviewed_entries, security_floor = _selected_entries(settings, ollama, ranked_entries, mark_repeats, status)
                 if security_floor is not None:
                     status(f"Security floor: promoted {security_floor.promoted}")
                 reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status)
