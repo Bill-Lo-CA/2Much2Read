@@ -227,7 +227,9 @@ def test_final_review_selects_scored_items_and_leaves_the_reviewer_loaded() -> N
             self.unloaded.append(model)
 
     ollama = FakeOllama()
-    settings = Settings(digest_max_items=1, digest_review_candidate_limit=2, ollama_review_model="qwen3:8b")
+    settings = Settings(
+        digest_max_items=1, digest_review_candidate_limit=2, digest_headlines_per_source=0, ollama_review_model="qwen3:8b"
+    )
 
     reviewed = pipeline._reviewed_entries(settings, ollama, [entry(2, "Release", "TLDR AI"), entry(1, "Trial", "AlphaSignal")])
 
@@ -961,3 +963,147 @@ def test_repeats_are_checked_on_what_the_reviewer_and_the_reader_see(tmp_path: P
     assert [value.previous_days for value in shown] == [1, 1]
     assert asked == ["Grok 4.7 pricing", "Grok 4.7 benchmarks"]
     assert messages == ["Checking 1 candidates against 1 items from the previous 3 days"] * 2
+
+
+def _headline(candidate_id: int, source: str, score: int) -> DigestEntry:
+    return replace(entry(candidate_id, f"Story {candidate_id}", source), review_score=score, reranker_score=score / 100)
+
+
+def test_one_newsletter_holds_at_most_its_share_of_the_headlines() -> None:
+    # Console's tool list took three of ten headlines on 2026-09-26. Its best two stay; the third is a
+    # mention, and the reviewer's next pick from elsewhere takes the slot.
+    picks = [
+        _headline(1, "Console", 95),
+        _headline(2, "Console", 94),
+        _headline(3, "Console", 93),
+        _headline(4, "TLDR", 92),
+        _headline(5, "SANS", 60),
+    ]
+
+    capped, _ = pipeline._merged_entries(picks, 10, never_the_same, headline_limit=3, per_source=2)
+    uncapped, _ = pipeline._merged_entries(picks, 10, never_the_same, headline_limit=3)
+
+    assert [(value.candidate_id, value.review_score is not None) for value in capped] == [
+        (1, True),
+        (2, True),
+        (4, True),
+        (3, False),
+        (5, False),
+    ]
+    assert [value.candidate_id for value in uncapped if value.review_score is not None] == [1, 2, 3, 4, 5]
+
+
+def test_hacker_news_stories_count_against_the_site_they_link_not_the_feed() -> None:
+    # Every hn-best story shares one source ID; held to two as one newsletter, the feed would lose
+    # its third and fourth picks though they come from unrelated publishers.
+    def story(candidate_id: int, article: str | None, score: int) -> DigestEntry:
+        return replace(
+            _headline(candidate_id, "Hacker News", score),
+            source_type="hackernews",
+            hn_item_id=str(candidate_id),
+            article_url=article or f"https://news.ycombinator.com/item?id={candidate_id}",
+            discussion_url=f"https://news.ycombinator.com/item?id={candidate_id}",
+        )
+
+    picks = [
+        story(1, "https://github.com/a/one", 95),
+        story(2, "https://www.github.com/b/two", 94),
+        story(3, "https://github.com/c/three", 93),
+        story(4, "https://example.com/post", 92),
+        story(5, None, 91),
+        story(6, None, 90),
+    ]
+
+    capped, _ = pipeline._merged_entries(picks, 10, never_the_same, headline_limit=6, per_source=2)
+
+    # GitHub's third story is the only one over the cap; self posts count alone.
+    assert [value.candidate_id for value in capped if value.review_score is not None] == [1, 2, 4, 5, 6]
+
+
+def test_newsletter_cap_survives_hn_attribution_from_dedupe_and_merge() -> None:
+    picks = [
+        replace(_headline(index, "Console", 96 - index), article_url=f"https://site{index}.example/story")
+        for index in range(1, 4)
+    ]
+
+    def hn_copy(original: DigestEntry) -> DigestEntry:
+        assert original.candidate_id is not None
+        return replace(
+            original,
+            candidate_id=original.candidate_id + 10,
+            source_type="hackernews",
+            source_id="hn-best",
+            source_name="Hacker News",
+            review_score=None,
+            reranker_score=0.1,
+            hn_item_id=str(original.candidate_id),
+            discussion_url=f"https://news.ycombinator.com/item?id={original.candidate_id}",
+        )
+
+    first = dedupe_entries([picks[0], hn_copy(picks[0])])[0]
+    capped, _ = pipeline._merged_entries(
+        [first, *picks[1:], hn_copy(picks[1]), hn_copy(picks[2])],
+        10,
+        lambda left, right: left.article_url == right.article_url,
+        headline_limit=3,
+        per_source=2,
+    )
+
+    assert first.hn_item_id == "1"
+    assert [value.candidate_id for value in capped if value.review_score is not None] == [1, 2]
+
+
+def test_a_pick_the_cap_leaves_out_competes_for_the_mention_quota_like_any_mention() -> None:
+    picks = [_headline(1, "Console", 95), _headline(2, "Console", 94), _headline(3, "Console", 93)]
+    passed_over = [replace(entry(4, "Other story", "TLDR"), reranker_score=0.99)]
+
+    merged, _ = pipeline._merged_entries([*picks, *passed_over], 1, never_the_same, headline_limit=5, per_source=2)
+
+    # One mention slot: the passed-over candidate ranks above the capped pick, so it is the one shown.
+    assert [value.candidate_id for value in merged] == [1, 2, 4]
+
+
+def test_picks_past_the_headlines_shown_keep_their_place_outside_the_mention_quota() -> None:
+    # DIGEST_MAX_ITEMS=7 over DIGEST_TOP_ITEMS=5: the sixth and seventh picks are listed after the
+    # headlines, outside DIGEST_SECONDARY_ITEMS, as they were before the cap. Only Console's third
+    # pick and the refill picks past seven become mentions, and one mention slot shows the best.
+    sources = ["Console", "Console", "Console", "A", "B", "C", "D", "E", "F", "G"]
+    ranked = [replace(entry(index, f"Story {index}", source), reranker_score=0.5) for index, source in enumerate(sources, 1)]
+
+    class Reviewer:
+        def review_digest(
+            self, candidates: list[dict[str, object]], maximum: int, _category: str = "", _reserved: int = 0, refill: int = 0
+        ) -> DigestReview:
+            selected = [
+                {"candidate_id": value["candidate_id"], "score": 100 - index, "reason_zh_tw": "具體"}
+                for index, value in enumerate(candidates)
+            ]
+            return DigestReview.model_validate({"selected": selected[: maximum + refill]})
+
+        def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
+            return False
+
+    settings = Settings(digest_max_items=7, digest_top_items=5, digest_secondary_items=1, digest_review_candidate_limit=10)
+    shown, _ = pipeline._selected_entries(settings, Reviewer(), ranked, lambda values, _chosen: values, lambda _message: None)
+
+    assert [(value.candidate_id, value.review_score is not None) for value in shown] == [
+        *[(candidate_id, True) for candidate_id in (1, 2, 4, 5, 6, 7, 8)],
+        (3, False),
+    ]
+
+
+def test_the_reviewer_is_asked_for_picks_past_the_limit_only_while_the_cap_is_on() -> None:
+    asked: list[tuple[int, int]] = []
+
+    class FakeOllama:
+        def review_digest(
+            self, candidates: list[dict[str, object]], maximum: int, _category: str = "", _reserved: int = 0, refill: int = 0
+        ) -> DigestReview:
+            asked.append((maximum, refill))
+            return DigestReview.model_validate({"selected": []})
+
+    ranked = [entry(1, "Opus 5.5", "TLDR")]
+    pipeline._reviewed_entries(Settings(digest_max_items=10), FakeOllama(), ranked)
+    pipeline._reviewed_entries(Settings(digest_max_items=10, digest_headlines_per_source=0), FakeOllama(), ranked)
+
+    assert asked == [(10, pipeline.REVIEW_REFILL_PICKS), (10, 0)]
