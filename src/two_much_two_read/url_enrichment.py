@@ -102,9 +102,18 @@ def shown_url(resolved: ResolvedUrl) -> str | None:
 class UrlEnricher:
     """Matches application-supplied links and turns safe resolutions into digest items."""
 
-    def match(self, items: Sequence[NewsletterItemAnalysis], candidates: Sequence[LinkCandidate]) -> list[UrlMatch]:
+    def match(
+        self, items: Sequence[NewsletterItemAnalysis], candidates: Sequence[LinkCandidate], offered: str | None = None
+    ) -> list[UrlMatch]:
+        """Pair each item with its link. offered is the text the extractor read, when known.
+
+        A code that text never showed was made up, however well it names a candidate: given a plain
+        part with no links in it, the extractor still answered L1 and L2, and those were the HTML's
+        first links - advertisements. Such a code falls through to the title like any other.
+        """
         available = [candidate for candidate in candidates if candidate.kind != "non_article"]
-        by_code = {candidate.code: candidate for candidate in available}
+        shown = None if offered is None else set(re.findall(r"\[(L\d+)\]", offered))
+        by_code = {candidate.code: candidate for candidate in available if shown is None or candidate.code in shown}
         used: set[str] = set()
         matches: list[UrlMatch] = []
         for item in items:

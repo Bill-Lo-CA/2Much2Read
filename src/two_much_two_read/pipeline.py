@@ -867,7 +867,7 @@ def _process_source(
                 _sync_processing_label(database, gmail, gmail_id, document_id, "failed")
             continue
         items: list[DigestItem] = []
-        for match in url_enricher.match(extraction.items, content.link_candidates):
+        for match in url_enricher.match(extraction.items, content.link_candidates, body):
             if match.candidate is None:
                 items.append(url_enricher.failed_item(match, "URL_MATCH_UNRESOLVED"))
                 continue

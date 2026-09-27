@@ -24,6 +24,11 @@ MAX_HTML_BYTES = 2 * 1024 * 1024
 MAX_ANALYSIS_CHARS = 45_000
 MAX_LINK_CANDIDATES = 200
 MAX_LINK_OCCURRENCES = 2_000
+# A plain part this many times shorter than the HTML's text is a stand-in, not the newsletter: The
+# Hacker News sends 580 characters asking to be read "with an HTML friendly email client", and the
+# extractor, reading only that, made two items out of the subject line and gave them the HTML's
+# first links - both advertisements.
+PLAIN_PART_STAND_IN_RATIO = 4
 
 FOOTER_LINE_PATTERN = re.compile(
     r"^(?:unsubscribe|manage preferences|privacy policy|取消訂閱)(?:\s*[|·/]\s*"
@@ -36,11 +41,28 @@ CONTROL_LABEL_PATTERN = re.compile(
     r"follow us(?: on \w+)?|linkedin|twitter|facebook|instagram)",
     re.I,
 )
-MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\]]+)\]\((https?://[^\s)]+)\)")
+# The label may hold no bracket and the URL no parenthesis. Each stops an attempt at the next link's
+# start, so a body of brackets costs one pass instead of a scan to the end from every one of them:
+# 20,000 "[" took 0.76 s, and a 2 MB part would take half an hour. The URL keeps its brackets, as
+# ?filters[]=news or an IPv6 host has them.
+MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)")
 # Text the newsletter itself wrote in the shape of a link code, such as a "[L2]" cache level. A
 # Markdown link label is left to the link pass, which takes the brackets off.
 LITERAL_LINK_CODE = re.compile(r"\[(\s*L\s*\d{1,4}\s*)\](?!\()", re.IGNORECASE)
-URL_PATTERN = re.compile(r"https?://[^\s<>\"'\]]+")
+URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
+# Characters that print as nothing. Senders pad the preview text with them, alternating with no-break
+# spaces, so that a mail client shows no more of the body in the inbox: TLDR's four editions each
+# send 52 such pairs, 264 tokens of nothing. Only runs go: one such character alone is part of the
+# text - a zero-width non-joiner inside a Persian word, a zero-width space between Thai words - and
+# a zero-width joiner, which holds emoji such as 🧑‍💻 together, is not counted at all.
+INVISIBLE = "\u200b\u200c\u2060\ufeff\u034f\u00ad"
+# A run starts at an invisible character, so a long stretch of spaces is not rescanned from each one.
+INVISIBLE_RUN = re.compile(rf"[{INVISIBLE}](?:[ \t\u00a0\u2007\u202f]*[{INVISIBLE}])+[ \t\u00a0\u2007\u202f]*")
+# A plain part that lists its links as numbered notes at the end ("Links:", a rule, then "[8] URL"),
+# as TLDR's does, with only "[8]" in the text.
+FOOTNOTE_TABLE = re.compile(r"\n[ \t]*Links:[ \t]*\n[ \t]*-{3,}[ \t]*\n((?:[ \t]*\[\d{1,4}\][ \t]+\S+[ \t]*(?:\n|\Z))+)\s*\Z")
+FOOTNOTE_ENTRY = re.compile(r"\[(\d{1,4})\][ \t]+(\S+)")
+FOOTNOTE_REFERENCE = re.compile(r"(?<!\[)\[(\d{1,4})\](?![\](])")
 
 
 class EmailExtractionError(ValueError):
@@ -181,12 +203,15 @@ def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
             return candidates
         raw_url = match.group(2)
         add(raw_url, match.group(1), _plain_context(plain, match.start(), raw_url))
-    for match in URL_PATTERN.finditer(plain):
+    # Bare URLs only: a Markdown link's URL was taken whole above, and read again here it would stop
+    # at the first "]" of ?filters[]= and add its own truncated copy.
+    bare = MARKDOWN_LINK_PATTERN.sub(lambda match: match.group(1), plain)
+    for match in URL_PATTERN.finditer(bare):
         if full():
             return candidates
         matched_url = match.group()
         raw_url = _trimmed_url(matched_url)
-        context = _plain_context(plain, match.start(), matched_url)
+        context = _plain_context(bare, match.start(), matched_url)
         add(raw_url, context, context, "unknown")
     return candidates
 
@@ -253,16 +278,44 @@ def _coded_text(text: str, candidates: list[LinkCandidate]) -> str:
     return URL_PATTERN.sub(bare, MARKDOWN_LINK_PATTERN.sub(markdown, text))
 
 
+def _readable(text: str) -> str:
+    """The text with Windows line ends made plain and runs of characters that print as nothing gone."""
+    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    return INVISIBLE_RUN.sub(" ", text)
+
+
+def _inlined_footnotes(text: str) -> str:
+    """The text with each numbered note's URL where its number stood, and the list of notes gone.
+
+    The model reads "[8]" in the story and "[8] [L44]" some 3,000 tokens later, and has to connect
+    the two to know which link an item has. With the URL in place, the link pass codes it where the
+    story is, and the list - 290 to 360 tokens in each TLDR issue - is left with nothing to say. Only
+    a list closing the text is read, and only its numbers are replaced: a "[1]" in an essay without
+    one is a citation, and stays as it is.
+    """
+    table = FOOTNOTE_TABLE.search(text)
+    if table is None:
+        return text
+    # A note that is no web address (a mailto:) has no code to become, so its number goes with it.
+    notes = {number: target if URL_PATTERN.fullmatch(target) else "" for number, target in FOOTNOTE_ENTRY.findall(table.group(1))}
+    return FOOTNOTE_REFERENCE.sub(lambda match: notes.get(match.group(1), match.group()), text[: table.start()])
+
+
 def _content(plain: list[str], html: list[str]) -> ExtractedEmailContent:
-    plain_content = "\n".join(value.strip() for value in plain if value.strip())
+    # Stripped after cleaning: a plain part that was only padding is empty, not a space that outweighs
+    # nothing and then trims to nothing.
+    plain_content = _inlined_footnotes(_readable("\n".join(value.strip() for value in plain if value.strip())).strip())
     analysis_text = plain_content
     html_content = "\n".join(value for value in html if value.strip())
-    if not analysis_text:
-        analysis_text = html_to_text(html_content)
+    html_text = _readable(html_to_text(html_content)) if html_content else ""
+    # Words against words: the HTML's text still carries every link's URL, which the plain part may not.
+    if len(URL_PATTERN.sub("", analysis_text)) * PLAIN_PART_STAND_IN_RATIO < len(URL_PATTERN.sub("", html_text)):
+        analysis_text = html_text
     candidates = _link_candidates(plain_content, html_content)
     # Coded before the length is measured and cut, so the cut is spent on text rather than URLs.
     analysis_text = _coded_text(analysis_text, candidates)
-    analysis_text = re.sub(r"[ \t]+\n", "\n", analysis_text)
+    # Line by line rather than with [ \t]+\n, which rescans a long run of spaces from each of them.
+    analysis_text = "\n".join(line.rstrip(" \t\u00a0") for line in analysis_text.split("\n"))
     analysis_text = re.sub(r"\n{3,}", "\n\n", analysis_text).strip()
     if not analysis_text:
         raise EmptyEmailError("email contains no usable text")
