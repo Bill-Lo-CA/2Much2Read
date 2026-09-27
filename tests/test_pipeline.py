@@ -17,7 +17,7 @@ from conftest import directory_digest, recorded
 from pydantic import HttpUrl
 
 from two_much_two_read import mail_operations, pipeline
-from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl
+from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl, UrlResolutionError
 from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult, SourceItemCounts
 from two_much_two_read.config import HackerNewsSource, Settings
 from two_much_two_read.digest import DigestEntry
@@ -36,11 +36,13 @@ from two_much_two_read.schemas import (
     DigestItem,
     EmailExtraction,
     ExtractedEmailContent,
+    LinkCandidate,
     NewsletterItemAnalysis,
     ResolvedContent,
     SourceDocument,
 )
 from two_much_two_read.storage import Database
+from two_much_two_read.url_enrichment import UrlEnricher
 from two_read_runtime.discord import DiscordDeliveryError, DiscordDestination
 from two_read_runtime.locking import ProcessLock
 
@@ -128,34 +130,47 @@ def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 TRACKER = "https://info.example.io/e3t/Ctc/L2+113/abc"
+ARTICLE = ("https://publisher.example/article", "https://publisher.example/canonical")
 RESOLVED = ("https://publisher.example/canonical", "https://publisher.example/article", "https://publisher.example/canonical")
 TAGGED = "https://publisher.example/post?mc_cid=1&utm_source=news"
 
 
 @pytest.mark.parametrize(
-    ("link", "cached", "shown"),
+    ("link", "cached", "fetched", "shown"),
     [
-        ("https://short.example/go", None, RESOLVED),
+        ("https://short.example/go", None, ARTICLE, RESOLVED),
         # Cached before the resolver could pass HubSpot's click page: it stopped on the page itself,
         # and 30 days of that answer would keep the story's article out of the digest - with or
         # without the click page naming itself as its canonical.
-        (TRACKER, (TRACKER, None), RESOLVED),
-        (TRACKER, (TRACKER, TRACKER), RESOLVED),
+        (TRACKER, (TRACKER, None), ARTICLE, RESOLVED),
+        (TRACKER, (TRACKER, TRACKER), ARTICLE, RESOLVED),
         # An article Mailchimp tagged is shown without the tags, and is not resolved again.
         (
             "https://short.example/go",
             (TAGGED, None),
+            ARTICLE,
             ("https://publisher.example/post", TAGGED, "https://publisher.example/post"),
         ),
+        # The sender's own front page: the newsletter describing itself, not a story it carries.
+        ("https://short.example/go", None, ("https://www.example.com/", None), None),
+        ("https://www.example.com/?ref=newsletter", None, None, None),
     ],
-    ids=["fresh", "stale-tracker-cache", "stale-tracker-canonical", "tagged-article-cache"],
+    ids=[
+        "fresh",
+        "stale-tracker-cache",
+        "stale-tracker-canonical",
+        "tagged-article-cache",
+        "own-front-page",
+        "failed-own-front-page",
+    ],
 )
 def test_gmail_url_enrichment_owns_and_persists_resolved_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     link: str,
     cached: tuple[str, str | None] | None,
-    shown: tuple[str, str, str | None],
+    fetched: tuple[str, str | None] | None,
+    shown: tuple[str, str, str | None] | None,
 ) -> None:
     sources_path = tmp_path / "sources.yaml"
     write_sources(sources_path)
@@ -214,7 +229,9 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(
     class FakeFetcher:
         def resolve_url(self, raw_url: str) -> ResolvedUrl:
             assert raw_url == link
-            return ResolvedUrl(raw_url, "https://publisher.example/article", "https://publisher.example/canonical")
+            if fetched is None:
+                raise UrlResolutionError("URL_POLICY_BLOCKED")
+            return ResolvedUrl(raw_url, *fetched)
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
@@ -228,6 +245,10 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(
         "SELECT source_url,raw_url,resolved_url,canonical_url,url_match_status,url_resolution_status FROM items"
     ).fetchone()
     database.close()
+    if shown is None:
+        # Its only item dropped, the email has nothing to digest.
+        assert (row, result.status) == (None, "no_content")
+        return
     assert result.status == "ok"
     assert tuple(row) == (shown[0], link, shown[1], shown[2], "matched", "resolved")
 
@@ -2852,3 +2873,57 @@ def test_a_run_never_headlines_what_the_reviewer_did_not_pick(tmp_path: Path, mo
     database.close()
     assert "🔥" not in content
     assert "• Grok 4.7" in content
+
+
+@pytest.mark.parametrize(
+    ("source_url", "sender", "own"),
+    [
+        ("https://console.dev/", "Console <hello@console.dev>", True),
+        ("https://www.console.dev", "Console <hello@console.dev>", True),
+        ("https://sans.org/", "SANS NewsBites <newsbites@email.sans.org>", True),
+        # The newsletter's own article is a story; so is the front page of a tool it covers.
+        ("https://console.dev/articles/drop", "Console <hello@console.dev>", False),
+        ("https://droprun.sh/", "Console <hello@console.dev>", False),
+        ("https://console.dev/?issue=12", "Console <hello@console.dev>", False),
+        ("https://console.dev/", "", False),
+    ],
+)
+def test_an_item_linking_the_senders_front_page_is_the_newsletter_itself(source_url: str, sender: str, own: bool) -> None:
+    item = DigestItem.model_validate(
+        {
+            "title": "開發工具週報",
+            "category": "DEV_TOOL",
+            "summary_zh_tw": "摘要",
+            "why_it_matters_zh_tw": "原因",
+            "importance": 5,
+            "confidence": 0.5,
+            "source_url": source_url,
+        }
+    )
+
+    assert pipeline._links_front_page_of(item, pipeline._sender_domain(sender)) is own
+
+
+@pytest.mark.parametrize(
+    ("destination", "own"), [("https://console.dev/?ref=newsletter#top", True), ("https://console.dev/?issue=12", False)]
+)
+def test_the_front_page_is_judged_on_the_link_the_reader_is_given(destination: str, own: bool) -> None:
+    # The shown link drops referral tags and the fragment, so a front page reached with ?ref= is the
+    # front page to whoever clicks it; a parameter that names content stays, and so does the item.
+    enricher = UrlEnricher()
+    analysis = NewsletterItemAnalysis.model_validate(
+        {
+            "title": "開發工具週報",
+            "source_title": "This week",
+            "category": "DEV_TOOL",
+            "summary_zh_tw": "摘要",
+            "why_it_matters_zh_tw": "原因",
+            "importance": 5,
+            "confidence": 0.5,
+        }
+    )
+    raw = "https://links.example/c"
+    link = LinkCandidate(candidate_id="link-0001", anchor_text="This week", raw_url=HttpUrl(raw), position=0)
+    item = enricher.resolved_item(enricher.match([analysis], [link])[0], ResolvedUrl(raw, destination, None))
+
+    assert pipeline._links_front_page_of(item, pipeline._sender_domain("Console <hello@console.dev>")) is own

@@ -103,6 +103,7 @@ class DigestEntry:
     hn_item_id: str | None = None
     content_basis: str | None = None
     candidate_id: int | None = None
+    source_type: str | None = None
     source_id: str | None = None
     source_name: str | None = None
     reranker_score: float | None = None
