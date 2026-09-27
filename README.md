@@ -264,6 +264,11 @@ left alone, so correct text is never rewritten: over 1,896 stored items this cha
 for a Simplified character left in Traditional text. Detection had needed volume it did not have -
 11% of real Traditional titles read as Simplified, some with no character that differs at all.
 
+A title still outside the digest language after translation - echoed back, or failed twice - is
+replaced by the summary's lead, up to the last clause mark within 40 characters. No rule tells a
+title that is only names from an untranslated sentence (ALL-CAPS and Title Case sentences look like
+names), and a name-only title reads better as "Anthropic 發布 Claude Opus 5.5" anyway.
+
 A headline
 with no article and no merged coverage is skipped outright rather than rewritten: the fallback would
 be its own summary, and a prompt asking for four to six sentences naming versions and numbers could

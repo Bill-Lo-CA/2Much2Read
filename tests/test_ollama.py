@@ -14,6 +14,7 @@ from two_much_two_read.ollama import (
     OllamaSchemaError,
     _language_instruction,
     _ollama_schema,
+    _title_from_summary,
     _validate_digest_language,
     create_ollama_client,
     fitted_review_candidates,
@@ -773,7 +774,9 @@ def test_an_item_that_stays_outside_the_language_is_dropped_alone(answer: httpx.
 
 
 @respx.mock
-def test_a_title_is_translated_and_one_that_is_only_names_is_kept() -> None:
+def test_a_title_is_translated_and_one_left_untranslated_takes_the_summarys_lead() -> None:
+    # "Claude Opus 5.5" is only names, but no rule tells that from an ALL-CAPS sentence; the lead of
+    # the summary, which is in the digest language, stands in for both.
     respx.post("http://127.0.0.1:11434/api/chat").mock(
         side_effect=[
             _chat(_items_result(("Viggle ships turbo image model", *GOOD[1:]), ("Claude Opus 5.5", *GOOD[1:]))),
@@ -786,8 +789,58 @@ def test_a_title_is_translated_and_one_that_is_only_names_is_kept() -> None:
 
     result = OllamaClient().extract("alphasignal", "News")
 
-    assert [item.title for item in result.items] == ["Viggle 推出 Turbo 影像模型", "Claude Opus 5.5"]
+    assert [item.title for item in result.items] == ["Viggle 推出 Turbo 影像模型", "發布新模型"]
     assert result.dropped_for_language == 0
+
+
+@respx.mock
+def test_a_title_whose_translation_fails_twice_never_reaches_the_digest() -> None:
+    # The summary and significance are Chinese, so the item stays; its English sentence of a title
+    # used to stay with it.
+    english_title = (
+        "Google Kubernetes Engine adds Pod snapshots",
+        "GKE 新增 Pod 快照，可在需要時還原工作負載。",
+        "縮短啟動時間。",
+    )
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[_chat(_items_result(GOOD, english_title)), httpx.Response(500), _chat("not the schema")]
+    )
+
+    result = OllamaClient().extract("tldr-devops", "News")
+
+    assert [item.title for item in result.items] == ["模型發布", "GKE 新增 Pod 快照，可在需要時還原工作負載"]
+    assert result.items[1].source_title == "Google Kubernetes Engine adds Pod snapshots"
+    assert route.call_count == 3
+
+
+@pytest.mark.parametrize(
+    ("summary", "title"),
+    [
+        ("GKE 新增 Pod 快照，可在需要時還原。", "GKE 新增 Pod 快照，可在需要時還原"),
+        (
+            "據報導，OpenAI 推出 GPT-6 Sol，定價每百萬 token 兩美元，並開放企業試用。",
+            "據報導，OpenAI 推出 GPT-6 Sol，定價每百萬 token 兩美元",
+        ),
+        ("發布新模型。", "發布新模型"),
+        ("短摘要", "短摘要"),
+        ("無標點" * 20, "無標點" * 13 + "無…"),
+        ("Datadog 的 Julie Agnes Sparks 和 Juvenal Alves 發表威脅獵捕指南", "Datadog 的 Julie Agnes Sparks 和 Juvenal…"),
+    ],
+)
+def test_the_fallback_title_is_the_summarys_lead_up_to_a_clause_mark(summary: str, title: str) -> None:
+    assert _title_from_summary(summary) == title
+
+
+@respx.mock
+def test_an_article_analysis_title_outside_the_language_takes_the_summarys_lead() -> None:
+    answer = {**valid_article_result(), "title": "Pod snapshots arrive in GKE", "summary_zh_tw": "GKE 新增 Pod 快照，可還原。"}
+    respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_chat(answer))
+
+    result = OllamaClient().analyze_article(
+        "hn-best", 1, "Pod snapshots arrive in GKE", 1, 1, "2026-07-24T00:00:00+00:00", "article", "x"
+    )
+
+    assert result.title == "GKE 新增 Pod 快照，可還原"
 
 
 @respx.mock
