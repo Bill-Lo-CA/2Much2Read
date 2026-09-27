@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from two_much_two_read import pipeline
+from two_much_two_read import ollama, pipeline
 from two_much_two_read.command_models import SecurityFloorPromotion
 from two_much_two_read.config import Settings
 from two_much_two_read.digest import (
@@ -1028,6 +1028,21 @@ def test_picks_past_the_headlines_shown_keep_their_place_outside_the_mention_quo
         *[(candidate_id, True) for candidate_id in (1, 2, 4, 5, 6, 7, 8)],
         (3, False),
     ]
+
+
+@pytest.mark.parametrize(("num_ctx", "picks"), [(16384, 10), (4096, 6), (3072, 5), (2048, 5)])
+def test_refill_picks_never_crowd_the_candidates_out_of_a_small_window(num_ctx: int, picks: int) -> None:
+    # Ten picks reserve 2,800 answer tokens: at 3072 the fitted prompt kept no candidate at all, and
+    # the reviewer chose nothing. The refill may never cost a candidate the headline quota would keep.
+    settings = Settings(ollama_num_ctx=num_ctx)
+    schema = ollama._ollama_schema(DigestReview.model_json_schema())
+    candidates = [{"candidate_id": index, "title": "Opus 5.5", "summary": "摘要"} for index in range(1, 4)]
+
+    def fitted(maximum: int) -> list[dict[str, object]]:
+        return ollama.fitted_review_candidates(candidates, schema, maximum, num_ctx)
+
+    assert pipeline._review_picks(settings) == picks
+    assert fitted(picks) == fitted(settings.digest_max_items)
 
 
 def test_the_reviewer_is_asked_for_picks_past_the_limit_only_while_the_cap_is_on() -> None:

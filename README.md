@@ -156,7 +156,8 @@ headline section, so keep it equal to `DIGEST_MAX_ITEMS` unless you want mention
 A newsletter that covers one theme in depth hands the reviewer several strong candidates at once -
 Console's tool list took three of ten headlines on one day, SANS NewsBites five on another - and the
 reviewer rates each on its own. With the cap on, the reviewer is asked for five picks past the
-headline limit; the headlines are its best picks with at most the cap from any one newsletter. A
+headline limit (fewer on a small `OLLAMA_NUM_CTX`, where their answers would crowd out the
+candidates); the headlines are its best picks with at most the cap from any one newsletter. A
 pick over the cap, and a refill pick left unused, becomes an ordinary mention; with
 `DIGEST_MAX_ITEMS` above `DIGEST_TOP_ITEMS`, the other picks past the headlines stay where they
 were. The security floor applies after the cap, and may take

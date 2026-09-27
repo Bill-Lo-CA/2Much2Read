@@ -36,11 +36,13 @@ from two_much_two_read.schemas import (
     DigestItem,
     EmailExtraction,
     ExtractedEmailContent,
+    LinkCandidate,
     NewsletterItemAnalysis,
     ResolvedContent,
     SourceDocument,
 )
 from two_much_two_read.storage import Database
+from two_much_two_read.url_enrichment import UrlEnricher
 from two_read_runtime.discord import DiscordDeliveryError, DiscordDestination
 from two_read_runtime.locking import ProcessLock
 
@@ -2853,7 +2855,7 @@ def test_a_run_never_headlines_what_the_reviewer_did_not_pick(tmp_path: Path, mo
         # The newsletter's own article is a story; so is the front page of a tool it covers.
         ("https://console.dev/articles/drop", "Console <hello@console.dev>", False),
         ("https://droprun.sh/", "Console <hello@console.dev>", False),
-        ("https://console.dev/?ref=issue-12", "Console <hello@console.dev>", False),
+        ("https://console.dev/?issue=12", "Console <hello@console.dev>", False),
         ("https://console.dev/", "", False),
     ],
 )
@@ -2871,3 +2873,28 @@ def test_an_item_linking_the_senders_front_page_is_the_newsletter_itself(source_
     )
 
     assert pipeline._links_front_page_of(item, pipeline._sender_domain(sender)) is own
+
+
+@pytest.mark.parametrize(
+    ("destination", "own"), [("https://console.dev/?ref=newsletter#top", True), ("https://console.dev/?issue=12", False)]
+)
+def test_the_front_page_is_judged_on_the_link_the_reader_is_given(destination: str, own: bool) -> None:
+    # The shown link drops referral tags and the fragment, so a front page reached with ?ref= is the
+    # front page to whoever clicks it; a parameter that names content stays, and so does the item.
+    enricher = UrlEnricher()
+    analysis = NewsletterItemAnalysis.model_validate(
+        {
+            "title": "開發工具週報",
+            "source_title": "This week",
+            "category": "DEV_TOOL",
+            "summary_zh_tw": "摘要",
+            "why_it_matters_zh_tw": "原因",
+            "importance": 5,
+            "confidence": 0.5,
+        }
+    )
+    raw = "https://links.example/c"
+    link = LinkCandidate(candidate_id="link-0001", anchor_text="This week", raw_url=HttpUrl(raw), position=0)
+    item = enricher.resolved_item(enricher.match([analysis], [link])[0], ResolvedUrl(raw, destination, None))
+
+    assert pipeline._links_front_page_of(item, pipeline._sender_domain("Console <hello@console.dev>")) is own
