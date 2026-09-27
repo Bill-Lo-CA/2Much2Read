@@ -344,6 +344,10 @@ A plain part that lists its links as numbered notes at the end, as TLDR's does, 
 put back where its number stood, so the code sits beside its story rather than in a list 3,000
 tokens later, and the list is dropped. The zero-width padding senders put after the preview text is
 removed, and Windows line ends are made plain. Together that took 15-20% off each TLDR issue.
+A plain part four times shorter than the HTML's text (URLs left out of both) is a stand-in - The
+Hacker News sends one asking to be read in an HTML email client - and the HTML is read instead.
+And a link code the extractor answers that never appeared in the text it read is ignored: given no
+links, it once answered L1 and L2 anyway, which named the HTML's first two links, both adverts.
 
 A matched link is then followed to its destination, and the destination is what is stored and shown.
 Besides HTTP redirects this passes HubSpot's click page, which redirects by script - its next hop is
