@@ -41,22 +41,23 @@ CONTROL_LABEL_PATTERN = re.compile(
     r"follow us(?: on \w+)?|linkedin|twitter|facebook|instagram)",
     re.I,
 )
-# Neither part may hold a bracket or a parenthesis. They stop each attempt at the next "[", so a
-# body of brackets costs one pass instead of a scan to the end from every one of them: 20,000 "["
-# took 0.76 s, and a 2 MB part would take half an hour.
-MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\[\]]+)\]\((https?://[^\s()\[\]]+)\)")
+# The label may hold no bracket and the URL no parenthesis. Each stops an attempt at the next link's
+# start, so a body of brackets costs one pass instead of a scan to the end from every one of them:
+# 20,000 "[" took 0.76 s, and a 2 MB part would take half an hour. The URL keeps its brackets, as
+# ?filters[]=news or an IPv6 host has them.
+MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)")
 # Text the newsletter itself wrote in the shape of a link code, such as a "[L2]" cache level. A
 # Markdown link label is left to the link pass, which takes the brackets off.
 LITERAL_LINK_CODE = re.compile(r"\[(\s*L\s*\d{1,4}\s*)\](?!\()", re.IGNORECASE)
 URL_PATTERN = re.compile(r"https?://[^\s<>\"'\]]+")
 # Characters that print as nothing. Senders pad the preview text with them, alternating with no-break
 # spaces, so that a mail client shows no more of the body in the inbox: TLDR's four editions each
-# send 52 such pairs, 264 tokens of nothing. A zero-width joiner is left alone - it holds emoji such
-# as 🧑‍💻 together.
+# send 52 such pairs, 264 tokens of nothing. Only runs go: one such character alone is part of the
+# text - a zero-width non-joiner inside a Persian word, a zero-width space between Thai words - and
+# a zero-width joiner, which holds emoji such as 🧑‍💻 together, is not counted at all.
 INVISIBLE = "\u200b\u200c\u2060\ufeff\u034f\u00ad"
 # A run starts at an invisible character, so a long stretch of spaces is not rescanned from each one.
 INVISIBLE_RUN = re.compile(rf"[{INVISIBLE}](?:[ \t\u00a0\u2007\u202f]*[{INVISIBLE}])+[ \t\u00a0\u2007\u202f]*")
-INVISIBLE_CHARACTER = re.compile(f"[{INVISIBLE}]")
 # A plain part that lists its links as numbered notes at the end ("Links:", a rule, then "[8] URL"),
 # as TLDR's does, with only "[8]" in the text.
 FOOTNOTE_TABLE = re.compile(r"\n[ \t]*Links:[ \t]*\n[ \t]*-{3,}[ \t]*\n((?:[ \t]*\[\d{1,4}\][ \t]+\S+[ \t]*(?:\n|\Z))+)\s*\Z")
@@ -202,12 +203,15 @@ def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
             return candidates
         raw_url = match.group(2)
         add(raw_url, match.group(1), _plain_context(plain, match.start(), raw_url))
-    for match in URL_PATTERN.finditer(plain):
+    # Bare URLs only: a Markdown link's URL was taken whole above, and read again here it would stop
+    # at the first "]" of ?filters[]= and add its own truncated copy.
+    bare = MARKDOWN_LINK_PATTERN.sub(lambda match: match.group(1), plain)
+    for match in URL_PATTERN.finditer(bare):
         if full():
             return candidates
         matched_url = match.group()
         raw_url = _trimmed_url(matched_url)
-        context = _plain_context(plain, match.start(), matched_url)
+        context = _plain_context(bare, match.start(), matched_url)
         add(raw_url, context, context, "unknown")
     return candidates
 
@@ -275,9 +279,9 @@ def _coded_text(text: str, candidates: list[LinkCandidate]) -> str:
 
 
 def _readable(text: str) -> str:
-    """The text with Windows line ends made plain and the characters that print as nothing gone."""
+    """The text with Windows line ends made plain and runs of characters that print as nothing gone."""
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    return INVISIBLE_CHARACTER.sub("", INVISIBLE_RUN.sub(" ", text))
+    return INVISIBLE_RUN.sub(" ", text)
 
 
 def _inlined_footnotes(text: str) -> str:
@@ -298,7 +302,9 @@ def _inlined_footnotes(text: str) -> str:
 
 
 def _content(plain: list[str], html: list[str]) -> ExtractedEmailContent:
-    plain_content = _inlined_footnotes(_readable("\n".join(value.strip() for value in plain if value.strip())))
+    # Stripped after cleaning: a plain part that was only padding is empty, not a space that outweighs
+    # nothing and then trims to nothing.
+    plain_content = _inlined_footnotes(_readable("\n".join(value.strip() for value in plain if value.strip())).strip())
     analysis_text = plain_content
     html_content = "\n".join(value for value in html if value.strip())
     html_text = _readable(html_to_text(html_content)) if html_content else ""

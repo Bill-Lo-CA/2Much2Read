@@ -424,12 +424,15 @@ def test_urls_no_longer_spend_the_character_budget() -> None:
 
 
 def test_the_padding_after_the_preview_text_is_dropped() -> None:
-    # TLDR follows its preview text with 52 no-break-space and zero-width-non-joiner pairs.
-    plain = "GitLab tokens leak via email " + "‌ " * 52 + "\n\nSign up\nBuilt by 🧑‍💻 and so­ft hyphens"
+    # TLDR follows its preview text with 52 no-break-space and zero-width-non-joiner pairs. One such
+    # character alone is text: the non-joiner in the Persian \u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645, a soft hyphen.
+    persian = "\u0645\u06cc\u200c\u062e\u0648\u0627\u0647\u0645"
+    tail = f"\n\nSign up\nBuilt by \U0001f9d1\u200d\U0001f4bb, {persian}, so\u00adft"
+    plain = "GitLab tokens leak via email\u00a0" + "\u200c\u00a0" * 52 + tail
 
     text = extract_gmail_payload(_body("text/plain", plain)).analysis_text
 
-    assert text == "GitLab tokens leak via email\n\nSign up\nBuilt by 🧑‍💻 and soft hyphens"
+    assert text == "GitLab tokens leak via email" + tail
 
 
 def test_windows_line_ends_no_longer_hide_a_control_link() -> None:
@@ -504,3 +507,20 @@ def test_a_plain_part_that_only_asks_for_html_gives_way_to_the_html() -> None:
     assert "HTML friendly" not in content.analysis_text
     assert "A long paragraph about story 5" in content.analysis_text
     assert "[L6]" in content.analysis_text
+
+
+def test_a_plain_part_of_padding_alone_gives_way_to_the_html() -> None:
+    message = EmailMessage()
+    message.set_content("\u200c\u00a0\u200c\u00a0\u200c")
+    message.add_alternative('<p>Story</p><a href="https://example.com/story">Story</a>', subtype="html")
+
+    assert extract_mime(message.as_bytes()).analysis_text == "Story\nStory [L1]"
+
+
+def test_a_markdown_link_keeps_the_brackets_in_its_url() -> None:
+    plain = "[Search](https://example.com/?filters[]=news) and [Local](http://[2001:db8::1]/page)"
+
+    content = extract_gmail_payload(_body("text/plain", plain))
+
+    assert content.analysis_text == "Search [L1] and Local [L2]"
+    assert _codes(content) == {"L1": "https://example.com/?filters[]=news", "L2": "http://[2001:db8::1]/page"}
