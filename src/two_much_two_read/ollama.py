@@ -7,12 +7,13 @@ import re
 from typing import Any, Literal, TypeVar, cast
 
 import httpx
+import zhconv_rs
 from langdetect import DetectorFactory, LangDetectException, detect  # type: ignore[import-untyped]
 from pydantic import BaseModel, ValidationError
 
 from two_read_runtime.endpoint_policy import validate_ollama_endpoint
 
-from .chinese_script_table import TO_SIMPLIFIED, TO_TRADITIONAL
+from .chinese_script_table import SIMPLIFIED_ONLY, TRADITIONAL_ONLY
 from .config import Settings
 from .digest import digest_language_code
 from .schemas import (
@@ -328,16 +329,23 @@ def _language_instruction(language: str) -> str:
     return f"Use {language} {field}"
 
 
-# Model text in a Chinese digest has each character written only in the other script replaced by
-# its form in this one. Which script a text is in used to be guessed, and a guess needs volume: 11%
-# of 1,470 real Traditional titles read as Simplified, some ("OpenAI 推出 GPT-5.6 Sol 超速版本")
-# with no character that differs at all. A replacement needs none, costs no model call, and leaves a
-# character both scripts write, such as 台 or 了, as it is. Over 1,896 stored items it changed 46
-# fields, every one for a Simplified character left in Traditional text: 网络, 扩, 审.
-CHINESE_SCRIPTS = {
-    "zh-tw": str.maketrans(dict(zip(TO_TRADITIONAL[0::2], TO_TRADITIONAL[1::2], strict=True))),
-    "zh-cn": str.maketrans(dict(zip(TO_SIMPLIFIED[0::2], TO_SIMPLIFIED[1::2], strict=True))),
+# Model text in a Chinese digest is written in the digest's script. Which script a text is in used
+# to be guessed, and a guess needs volume: 11% of 1,470 real Traditional titles read as Simplified,
+# some ("OpenAI 推出 GPT-5.6 Sol 超速版本") with no character that differs at all. Conversion needs
+# none, and costs no model call.
+#
+# Only a clause holding a character the other script alone writes is converted. The model writes
+# the digest's script and slips into the other for a clause at a time, and every converter assumes
+# its input is wholly the other script: run over correct Traditional text, zhconv-rs turned 機制作為
+# into 機製作為 and OpenCC 干預 into 幹預. The clause is converted by phrase, not by character,
+# because one Simplified character can stand for several Traditional ones: 复杂 is 複雜 but 恢复 is
+# 恢復, and 头发 is 頭髮 but 发布 is 發布. Over 1,923 stored items this changed 46 fields, every one a
+# Simplified clause left in Traditional text, and nothing else.
+CHINESE_SCRIPTS: dict[str, tuple[frozenset[str], zhconv_rs.ZhVariant]] = {
+    "zh-tw": (frozenset(SIMPLIFIED_ONLY), "zh-tw"),
+    "zh-cn": (frozenset(TRADITIONAL_ONLY), "zh-cn"),
 }
+CLAUSE = re.compile(r"[^。！？；，：、\n,;:!?]+|[。！？；，：、\n,;:!?]+")
 
 
 ScriptedModel = TypeVar("ScriptedModel", bound=BaseModel)
@@ -345,8 +353,14 @@ ScriptedModel = TypeVar("ScriptedModel", bound=BaseModel)
 
 def _in_script(value: str, language: str) -> str:
     """The text in the digest's Chinese script, or as it is for any other language."""
-    table = CHINESE_SCRIPTS.get(digest_language_code(language))
-    return value.translate(table) if table else value
+    script = CHINESE_SCRIPTS.get(digest_language_code(language))
+    if script is None:
+        return value
+    other_script_only, target = script
+    return "".join(
+        zhconv_rs.zhconv(clause, target) if not other_script_only.isdisjoint(clause) else clause
+        for clause in CLAUSE.findall(value)
+    )
 
 
 def _detected_language(text: str, expected: str) -> str:

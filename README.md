@@ -256,13 +256,16 @@ field sit unnoticed beside a long Chinese summary. Script needs no volume, so it
 field — `降低延遲。` is far too short to detect and still unmistakably CJK. All 476 items in the
 live database carry CJK in both fields, so this rejects nothing that was already working.
 
-Traditional against Simplified is not detected at all. Model-written text in a Chinese digest has
-every character that only the other script writes replaced by its form in the digest's (Taiwan's
-form for Traditional), from a table generated out of OpenCC's dictionaries by
-`scripts/generate_chinese_script_table.py`. A character both scripts write, such as 台 or 了, is
-left alone, so correct text is never rewritten: over 1,896 stored items this changed 46 fields, each
-for a Simplified character left in Traditional text. Detection had needed volume it did not have -
-11% of real Traditional titles read as Simplified, some with no character that differs at all.
+Traditional against Simplified is not detected at all. Model-written text in a Chinese digest is
+converted to the digest's script with [zhconv-rs](https://github.com/Gowee/zhconv-rs) (GPL-2.0-or-later),
+which reads phrases: one Simplified character can stand for several Traditional ones, so 复杂 is
+複雜 while 恢复 is 恢復. Only a clause holding a character the other script alone writes is
+converted - a set generated from OpenCC's dictionaries by `scripts/generate_chinese_script_table.py`.
+The model slips into the other script a clause at a time, and every converter assumes its input is
+wholly that script: run over correct Traditional text, they turn 機制作為 into 機製作為 or 干預 into
+幹預. Over 1,923 stored items this changed 46 fields, each a Simplified clause left in Traditional
+text, and nothing else. Detection had needed volume it did not have - 11% of real Traditional
+titles read as Simplified, some with no character that differs at all.
 
 A title still outside the digest language after translation - echoed back, or failed twice - is
 replaced by the summary's lead, up to the last clause mark within 40 characters. No rule tells a

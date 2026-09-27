@@ -12,6 +12,7 @@ from two_much_two_read.ollama import (
     OllamaClient,
     OllamaContextError,
     OllamaSchemaError,
+    _in_script,
     _language_instruction,
     _ollama_schema,
     _title_from_summary,
@@ -936,3 +937,17 @@ def test_chinese_in_the_other_script_is_written_in_the_digests_without_a_model_c
     if digest_language == "zh-TW":
         assert (items[1].summary_zh_tw, items[1].why_it_matters_zh_tw) == ("平台了解適合的峰值。", "台灣與後端合作。")
     assert route.call_count == 1
+
+
+@pytest.mark.parametrize(
+    ("written", "expected"),
+    [
+        # One Simplified character can stand for several Traditional ones; only the phrase tells.
+        ("系统复杂，恢复需要重新发布，头发也白了", "系統複雜，恢復需要重新發布，頭髮也白了"),
+        # A Traditional clause is left alone, since converters read it as Simplified: 機制作為 would
+        # become 機製作為, 干預 幹預, 佛羅里達 佛羅裡達.
+        ("全機制作為核心，人工干預的机制很复杂，位於佛羅里達州", "全機制作為核心，人工干預的機制很複雜，位於佛羅里達州"),
+    ],
+)
+def test_only_a_clause_in_the_other_script_is_converted_and_by_phrase(written: str, expected: str) -> None:
+    assert _in_script(written, "zh-TW") == expected
