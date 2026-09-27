@@ -56,7 +56,7 @@ def main() -> None:
     args = parser.parse_args()
     dictionary = args.dictionary
     if dictionary is None:
-        import opencc  # type: ignore[import-untyped]
+        import opencc  # type: ignore[import-not-found]
 
         dictionary = Path(opencc.__file__).parent / "dictionary"
     taiwan = _table(dictionary / "TWVariants.txt")
