@@ -65,7 +65,7 @@ def _valid_link(raw_url: str) -> tuple[str, str] | None:
 def _event_links(event: CalendarEvent) -> list[tuple[str, str, str]]:
     """Every link this event carries, from the displayed fields and from the event itself.
 
-    The adapter already collects the Meet, Zoom, htmlLink and description URLs into
+    The adapter already collects the Meet, Zoom and description URLs into
     CalendarEvent.links, and nothing read that tuple: a meeting's join link only reached the reader
     if someone had also typed it into the title. The displayed fields come first so a link the
     reader can see in the table above keeps the label naming where it came from.

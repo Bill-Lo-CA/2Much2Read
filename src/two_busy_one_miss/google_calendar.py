@@ -5,6 +5,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, time
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
 
 from google.oauth2.credentials import Credentials
@@ -71,11 +72,27 @@ def in_zone(event: CalendarEvent, timezone: ZoneInfo) -> CalendarEvent:
     return replace(event, start=event.start.astimezone(timezone), end=event.end.astimezone(timezone))
 
 
+def _calendar_page(url: str) -> bool:
+    """Whether the URL opens the event in Google Calendar, rather than being where it takes place."""
+    parts = urlsplit(url)
+    hostname = (parts.hostname or "").casefold()
+    return hostname == "calendar.google.com" or (
+        hostname in {"google.com", "www.google.com"} and parts.path.startswith("/calendar")
+    )
+
+
 def _event_links(item: dict[str, Any]) -> tuple[str, ...]:
+    """The links to where the event happens: its meeting, and what its description points to.
+
+    Not its page in Google Calendar - the event's own htmlLink, or the "view your event" link an
+    invitation writes into the description. The reader is already looking at the event; 93 of the
+    155 links sent before this were that page, crowding out the map, Zoom and event pages.
+    """
     conference = item.get("conferenceData") or {}
-    values = [item.get("htmlLink"), item.get("hangoutLink"), item.get("description")]
+    values = [item.get("hangoutLink"), item.get("description")]
     values.extend(entry.get("uri") for entry in conference.get("entryPoints", []))
-    return tuple(dict.fromkeys(url.rstrip(".,;:!?") for value in values for url in URL.findall(str(value or ""))))
+    urls = (url.rstrip(".,;:!?") for value in values for url in URL.findall(str(value or "")))
+    return tuple(dict.fromkeys(url for url in urls if not _calendar_page(url)))
 
 
 class CalendarClient:

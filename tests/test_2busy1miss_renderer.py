@@ -92,18 +92,24 @@ def test_urls_move_below_the_table_without_metadata_links() -> None:
     assert render_reminder(ReminderCandidate(event, "default-5m", "5m", start), MONTREAL).endswith(f"```\n{links}")
 
 
-def test_calendar_event_links_include_event_meeting_and_description_urls() -> None:
+def test_calendar_event_links_include_meeting_and_description_urls_but_not_the_calendar_page() -> None:
+    # The event's own page in Google Calendar, and the invitation's "view your event" links, open
+    # what the reader is already looking at.
     assert _event_links(
         {
-            "htmlLink": "https://calendar.example/event",
+            "htmlLink": "https://www.google.com/calendar/event?eid=abc",
             "hangoutLink": "https://meet.google.com/abc-defg-hij",
-            "description": "Notes: https://docs.example/brief.",
+            "description": (
+                "Notes: https://docs.example/brief.\n"
+                "View your event at https://calendar.google.com/calendar/event?action=VIEW&eid=abc\n"
+                "Or https://www.google.com/calendar/event?eid=abc and https://parkrun.example/kanata"
+            ),
             "conferenceData": {"entryPoints": [{"uri": "https://zoom.example/join"}]},
         }
     ) == (
-        "https://calendar.example/event",
         "https://meet.google.com/abc-defg-hij",
         "https://docs.example/brief",
+        "https://parkrun.example/kanata",
         "https://zoom.example/join",
     )
 
@@ -276,7 +282,7 @@ def test_render_agenda_chunks_at_discord_limit() -> None:
 def test_the_meet_link_the_adapter_collected_reaches_the_reminder() -> None:
     """CalendarEvent.links was populated and never read.
 
-    google_calendar._event_links already gathers the Meet, Zoom, htmlLink and description URLs, but
+    google_calendar._event_links already gathers the Meet, Zoom and description URLs, but
     the renderer's own link scan looked only at the title, calendar name, and location - so a
     meeting's join link reached the reader only if someone had also typed it into a displayed field.
     """
