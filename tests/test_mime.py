@@ -1,4 +1,5 @@
 import base64
+import time
 from email.message import EmailMessage
 
 import pytest
@@ -420,3 +421,66 @@ def test_urls_no_longer_spend_the_character_budget() -> None:
 
     assert content.original_characters is not None and content.original_characters < 3_000
     assert content.analysis_text.endswith("Story 149 [L150]")
+
+
+def test_the_padding_after_the_preview_text_is_dropped() -> None:
+    # TLDR follows its preview text with 52 no-break-space and zero-width-non-joiner pairs.
+    plain = "GitLab tokens leak via email " + "‌ " * 52 + "\n\nSign up\nBuilt by 🧑‍💻 and so­ft hyphens"
+
+    text = extract_gmail_payload(_body("text/plain", plain)).analysis_text
+
+    assert text == "GitLab tokens leak via email\n\nSign up\nBuilt by 🧑‍💻 and soft hyphens"
+
+
+def test_windows_line_ends_no_longer_hide_a_control_link() -> None:
+    # "View in browser (URL)\r" left a carriage return on the line, so the label was no control label
+    # and the link became a candidate.
+    plain = "View in browser (https://example.com/web)\r\nStory https://example.com/story \r\n"
+
+    content = extract_gmail_payload(_body("text/plain", plain))
+
+    assert "\r" not in content.analysis_text
+    assert _codes(content) == {"L1": "https://example.com/story"}
+    assert content.analysis_text == "View in browser ()\nStory [L1]"
+
+
+def test_numbered_notes_are_coded_where_the_story_is_and_the_list_goes() -> None:
+    plain = (
+        "GRAPHALGO SPREADS TO TERRAFORM (5 MINUTE READ) [8]\n\n"
+        "Graphalgo malware appeared in two providers. Mail us [9]; see the study [1] and [99].\n\n"
+        "Links:\n------\n[1] https://example.com/study\n[8] https://example.com/graphalgo\n[9] mailto:tips@example.com\n"
+    )
+
+    content = extract_gmail_payload(_body("text/plain", plain))
+
+    codes = {url: code for code, url in _codes(content).items()}
+    assert content.analysis_text == (
+        f"GRAPHALGO SPREADS TO TERRAFORM (5 MINUTE READ) [{codes['https://example.com/graphalgo']}]\n\n"
+        f"Graphalgo malware appeared in two providers. Mail us ; see the study [{codes['https://example.com/study']}] "
+        "and [99]."
+    )
+    graphalgo = next(value for value in content.link_candidates if str(value.raw_url) == "https://example.com/graphalgo")
+    assert graphalgo.nearby_text.startswith("GRAPHALGO SPREADS TO TERRAFORM")
+
+
+def test_a_citation_without_a_closing_list_of_notes_is_left_alone() -> None:
+    plain = "As shown before [1], the node shrinks.\n\nLinks:\n------\n[1] https://example.com/a\n\nMore text after the list."
+
+    text = extract_gmail_payload(_body("text/plain", plain)).analysis_text
+
+    assert text.startswith("As shown before [1], the node shrinks.")
+
+
+@pytest.mark.parametrize(
+    "plain",
+    ["x" + " " * 200_000 + "y", "[" * 200_000, "x" + ("‌" + " " * 50) * 4_000],
+    ids=["spaces", "brackets", "padding"],
+)
+def test_a_hostile_body_costs_one_pass_not_a_scan_from_every_character(plain: str) -> None:
+    # Each of these took over a minute before: a pattern that rescans the rest of a run from every
+    # character in it is quadratic, and a plain part may hold 2 MB.
+    started = time.monotonic()
+
+    extract_gmail_payload(_body("text/plain", plain))
+
+    assert time.monotonic() - started < 2

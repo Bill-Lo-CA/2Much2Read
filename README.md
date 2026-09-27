@@ -310,6 +310,11 @@ article link, and that code is used first; the verbatim-headline matcher only co
 no usable code. Link-list newsletters that put an article and a comments link beside every headline
 matched none of their items by title alone, since both links score alike.
 
+A plain part that lists its links as numbered notes at the end, as TLDR's does, has each note's URL
+put back where its number stood, so the code sits beside its story rather than in a list 3,000
+tokens later, and the list is dropped. The zero-width padding senders put after the preview text is
+removed, and Windows line ends are made plain. Together that took 15-20% off each TLDR issue.
+
 On an 8 GB GPU the reviewer is the binding constraint: `qwen3:8b` at `OLLAMA_NUM_CTX=16384`
 needs roughly 8 GB for Q4 weights plus an f16 KV cache, so Ollama offloads layers to the
 CPU. Quantizing the KV cache on the Ollama server halves the cache cost:
