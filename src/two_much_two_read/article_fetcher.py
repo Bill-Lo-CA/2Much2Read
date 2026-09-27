@@ -34,6 +34,9 @@ PAGE_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
 # shown where the link leads, and it opens in a reader's browser. A missing page (404) or a failing
 # server does not qualify.
 LINK_WITHOUT_PAGE_STATUSES = {401, 403, 429}
+# A PDF is named as a link, so a server that negotiates strictly must be told one is welcome, or it
+# answers 406. It ranks last: an article offered as a page and a PDF is still read as the page.
+ACCEPT = "text/html,application/xhtml+xml,text/plain;q=0.9,application/pdf;q=0.8"
 # What a refusal is written in. A server that turns a crawler away with anything else - a zip or an
 # executable - may hand a browser the same download, so that refusal is no link.
 REFUSAL_CONTENT_TYPES = {"", *PAGE_CONTENT_TYPES, "text/plain", "application/json"}
@@ -360,7 +363,7 @@ class ArticleFetcher:
                     "GET",
                     url.target,
                     headers={
-                        "Accept": "text/html,application/xhtml+xml,text/plain;q=0.9",
+                        "Accept": ACCEPT,
                         "Accept-Encoding": "identity",
                         "Host": url.host_header,
                         "User-Agent": USER_AGENT,

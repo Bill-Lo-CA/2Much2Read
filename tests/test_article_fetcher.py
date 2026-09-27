@@ -410,6 +410,13 @@ def test_only_a_page_or_a_pdf_may_be_the_link(content_type: str, linked: bool) -
             fetcher.resolve_url("https://files.example/setup")
 
 
+def test_a_pdf_is_asked_for_after_a_page() -> None:
+    # A PDF is accepted as the link, so a server negotiating strictly must not answer 406.
+    accepted = [value.split(";")[0] for value in article_fetcher.ACCEPT.split(",")]
+
+    assert accepted[0] == "text/html" and accepted[-1] == "application/pdf"
+
+
 def test_an_overlong_url_is_refused_before_any_request() -> None:
     fetcher = ArticleFetcher(public_dns, lambda _: pytest.fail("request should not be sent"))
 
