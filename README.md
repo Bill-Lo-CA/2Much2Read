@@ -262,12 +262,29 @@ and the output reservation consume the window, and asking for four to six senten
 from a headline alone can only be answered by inventing.
 
 The wrong-language check runs per field as well as over the joined text, because the two catch
-different things. Telling Traditional from Simplified needs volume, so that runs on the join; but an
+different things. Telling French from English needs volume, so that runs on the join; but an
 aggregate reports only the dominant language, which lets a short English practical-significance
 field sit unnoticed beside a long Chinese summary. Script needs no volume, so it is checked per
-field — `降低延遲。` is far too short to classify as Traditional and still unmistakably CJK. All 476
-items in the live database carry CJK in both fields, so this rejects nothing that was already
-working. A headline
+field — `降低延遲。` is far too short to detect and still unmistakably CJK. All 476 items in the
+live database carry CJK in both fields, so this rejects nothing that was already working.
+
+Traditional against Simplified is not detected at all. Model-written text in a Chinese digest is
+converted to the digest's script with [zhconv-rs](https://github.com/Gowee/zhconv-rs) (GPL-2.0-or-later),
+which reads phrases: one Simplified character can stand for several Traditional ones, so 复杂 is
+複雜 while 恢复 is 恢復. Only a clause holding a character the other script alone writes is
+converted - a set generated from OpenCC's dictionaries by `scripts/generate_chinese_script_table.py`.
+The model slips into the other script a clause at a time, and every converter assumes its input is
+wholly that script: run over correct Traditional text, they turn 機制作為 into 機製作為 or 干預 into
+幹預. Over 1,923 stored items this changed 46 fields, each a Simplified clause left in Traditional
+text, and nothing else. Detection had needed volume it did not have - 11% of real Traditional
+titles read as Simplified, some with no character that differs at all.
+
+A title still outside the digest language after translation - echoed back, or failed twice - is
+replaced by the summary's lead, up to the last clause mark within 40 characters. No rule tells a
+title that is only names from an untranslated sentence (ALL-CAPS and Title Case sentences look like
+names), and a name-only title reads better as "Anthropic 發布 Claude Opus 5.5" anyway.
+
+A headline
 with no article and no merged coverage is skipped outright rather than rewritten: the fallback would
 be its own summary, and a prompt asking for four to six sentences naming versions and numbers could
 only be met from one sentence by padding or inventing. This adds
@@ -321,6 +338,20 @@ one past the candidate cap - is removed. On real issues that cut The New Stack f
 article link, and that code is used first; the verbatim-headline matcher only covers an item with
 no usable code. Link-list newsletters that put an article and a comments link beside every headline
 matched none of their items by title alone, since both links score alike.
+
+A matched link is then followed to its destination, and the destination is what is stored and shown.
+Besides HTTP redirects this passes HubSpot's click page, which redirects by script - its next hop is
+read out of the page on the same scheme and host, never run - and a meta refresh of ten seconds or
+less. Every hop is validated like the first request: public addresses only, ports 80 and 443, no
+credentials, at most 2,083 characters and five hops. Once the chain arrives, the destination is the
+link even when its page turns a crawler away (401, 403, 429) with a page or plain text, is too large
+to read whole, or is a PDF; any other download is refused, a refusal served as one included, so a
+digest never links an executable or an archive. A refusal counts only once the chain has left the
+link's own host: from there it is as likely the click tracker itself, rate-limiting a run through
+its links. The link shown drops campaign tags and the parameters that carry the subscriber's
+identity (HubSpot's `_hsenc` and `ecid`, Mailchimp's `mc_eid`, and the like), so it does not tell
+whoever opens it who received the email, and a link that is still a tracker once they are gone -
+a click page, even one naming itself as its canonical - is not shown at all. On one run this took The New Stack and The Batch from no article links to all of them.
 
 On an 8 GB GPU the reviewer is the binding constraint: `qwen3:8b` at `OLLAMA_NUM_CTX=16384`
 needs roughly 8 GB for Q4 weights plus an f16 KV cache, so Ollama offloads layers to the

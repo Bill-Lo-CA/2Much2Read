@@ -129,17 +129,40 @@ def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pipeline, "_deepened_entries", lambda _settings, _ollama, entries, _status: entries)
 
 
+TRACKER = "https://info.example.io/e3t/Ctc/L2+113/abc"
+ARTICLE = ("https://publisher.example/article", "https://publisher.example/canonical")
+RESOLVED = ("https://publisher.example/canonical", "https://publisher.example/article", "https://publisher.example/canonical")
+TAGGED = "https://publisher.example/post?mc_cid=1&utm_source=news"
+
+
 @pytest.mark.parametrize(
-    ("final_url", "canonical"),
+    ("link", "cached", "fetched", "shown"),
     [
-        ("https://publisher.example/article", "https://publisher.example/canonical"),
+        ("https://short.example/go", None, ARTICLE, RESOLVED),
+        # Cached before the resolver could pass HubSpot's click page: it stopped on the page itself,
+        # and 30 days of that answer would keep the story's article out of the digest - with or
+        # without the click page naming itself as its canonical.
+        (TRACKER, (TRACKER, None), ARTICLE, RESOLVED),
+        (TRACKER, (TRACKER, TRACKER), ARTICLE, RESOLVED),
+        # An article Mailchimp tagged is shown without the tags, and is not resolved again.
+        (
+            "https://short.example/go",
+            (TAGGED, None),
+            ARTICLE,
+            ("https://publisher.example/post", TAGGED, "https://publisher.example/post"),
+        ),
         # The sender's own front page: the newsletter describing itself, not a story it carries.
-        ("https://www.example.com/", None),
+        ("https://short.example/go", None, ("https://www.example.com/", None), None),
     ],
-    ids=["article", "own-front-page"],
+    ids=["fresh", "stale-tracker-cache", "stale-tracker-canonical", "tagged-article-cache", "own-front-page"],
 )
 def test_gmail_url_enrichment_owns_and_persists_resolved_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, final_url: str, canonical: str | None
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    link: str,
+    cached: tuple[str, str | None] | None,
+    fetched: tuple[str, str | None],
+    shown: tuple[str, str, str | None] | None,
 ) -> None:
     sources_path = tmp_path / "sources.yaml"
     write_sources(sources_path)
@@ -148,6 +171,10 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
     )
+    if cached is not None:
+        seeded = Database(settings.database_path)
+        seeded.cache_url_resolution(link, "resolved", resolved_url=cached[0], canonical_url=cached[1])
+        seeded.close()
 
     def encoded(value: str) -> str:
         return urlsafe_b64encode(value.encode()).decode().rstrip("=")
@@ -164,9 +191,7 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(
                         {"mimeType": "text/plain", "body": {"data": encoded("A useful article")}},
                         {
                             "mimeType": "text/html",
-                            "body": {
-                                "data": encoded('<h2>Useful article</h2><a href="https://short.example/go">Useful article</a>')
-                            },
+                            "body": {"data": encoded(f'<h2>Useful article</h2><a href="{link}">Useful article</a>')},
                         },
                     ],
                 },
@@ -195,8 +220,8 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(
 
     class FakeFetcher:
         def resolve_url(self, raw_url: str) -> ResolvedUrl:
-            assert raw_url == "https://short.example/go"
-            return ResolvedUrl(raw_url, final_url, canonical)
+            assert raw_url == link
+            return ResolvedUrl(raw_url, *fetched)
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
@@ -210,18 +235,12 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(
         "SELECT source_url,raw_url,resolved_url,canonical_url,url_match_status,url_resolution_status FROM items"
     ).fetchone()
     database.close()
-    if canonical is None:
-        assert row is None
+    if shown is None:
+        # Its only item dropped, the email has nothing to digest.
+        assert (row, result.status) == (None, "no_content")
         return
     assert result.status == "ok"
-    assert tuple(row) == (
-        "https://publisher.example/canonical",
-        "https://short.example/go",
-        "https://publisher.example/article",
-        "https://publisher.example/canonical",
-        "matched",
-        "resolved",
-    )
+    assert tuple(row) == (shown[0], link, shown[1], shown[2], "matched", "resolved")
 
 
 class FakeDigestDatabase:

@@ -1,8 +1,9 @@
+import pytest
 from pydantic import HttpUrl
 
 from two_much_two_read.article_fetcher import ResolvedUrl
 from two_much_two_read.schemas import LinkCandidate, NewsletterItemAnalysis
-from two_much_two_read.url_enrichment import UrlEnricher
+from two_much_two_read.url_enrichment import UrlEnricher, shown_url
 
 
 def analysis(title: str = "Useful article", source_title: str | None = None) -> NewsletterItemAnalysis:
@@ -97,13 +98,55 @@ def test_a_translated_title_alone_matches_nothing() -> None:
     assert match.method == "unmatched"
 
 
-def test_does_not_display_an_unresolved_tracking_url() -> None:
+@pytest.mark.parametrize(
+    "final", ["https://info.example/e3t/token", "https://info.example/events/public/v1/encoded/track/tc/L2+113/x?_ud=1"]
+)
+def test_does_not_display_an_unresolved_tracking_url(final: str) -> None:
     enricher = UrlEnricher()
     match = enricher.match([analysis()], [candidate("link-0001", "Useful article", "https://info.example/e3t/token")])[0]
 
-    item = enricher.resolved_item(match, ResolvedUrl("https://info.example/e3t/token", "https://info.example/e3t/token", None))
+    item = enricher.resolved_item(match, ResolvedUrl("https://info.example/e3t/token", final, None))
 
     assert item.source_url is None
+
+
+def test_the_link_shown_carries_no_subscriber_identity() -> None:
+    # A click tracker hands the destination the subscriber's own ids; shown as it arrived, the link
+    # would tell anyone who opens it who received the email.
+    enricher = UrlEnricher()
+    match = enricher.match([analysis()], [candidate("link-0001", "Useful article", "https://info.example/e3t/token")])[0]
+    final = "https://thenewstack.io/story?_hsenc=p2ANqtz&_hsmi=2&ecid=AC1&utm_source=x&page=2&fbclid=F"
+
+    item = enricher.resolved_item(match, ResolvedUrl("https://info.example/e3t/token", final, None))
+
+    assert str(item.source_url) == "https://thenewstack.io/story?page=2"
+
+
+def test_a_link_too_long_to_store_is_left_out_rather_than_failing_the_email() -> None:
+    enricher = UrlEnricher()
+    match = enricher.match([analysis()], [candidate("link-0001", "Useful article", "https://short.example/go")])[0]
+    # Inside the fetcher's 2083 characters as it arrived; re-encoded without its tracking tags, each
+    # apostrophe becomes %27 and the URL no longer fits.
+    final = "https://example.com/a?utm_source=x&q=" + "'" * 1000
+
+    item = enricher.resolved_item(match, ResolvedUrl("https://short.example/go", final, None))
+
+    assert item.source_url is None
+
+
+@pytest.mark.parametrize(
+    ("final", "canonical", "shown"),
+    [
+        # Mailchimp tags the article's own address; the tags go, the article stays.
+        ("https://example.com/post?mc_cid=1&mc_eid=2", None, "https://example.com/post"),
+        # A click page naming itself as its canonical is still a click page.
+        ("https://info.example/e3t/token", "https://info.example/e3t/token", None),
+        ("https://example.com/post", "https://info.example/e3t/token", "https://example.com/post"),
+        ("https://example.com/post?utm_source=x", "https://example.com/post-canonical", "https://example.com/post-canonical"),
+    ],
+)
+def test_the_link_shown_is_judged_after_its_tags_are_removed(final: str, canonical: str | None, shown: str | None) -> None:
+    assert shown_url(ResolvedUrl("https://short.example/go", final, canonical)) == shown
 
 
 def coded(title: str, link: str | None) -> NewsletterItemAnalysis:

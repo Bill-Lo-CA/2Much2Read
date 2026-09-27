@@ -7,6 +7,8 @@ from datetime import UTC, datetime
 from typing import Literal, TypeAlias, cast
 from urllib.parse import parse_qsl, urlsplit
 
+from pydantic import HttpUrl, ValidationError
+
 from .article_fetcher import ArticleFetcher, ResolvedUrl, UrlResolutionError
 from .digest import canonical_url
 from .schemas import HTTP_URL, DigestItem, ItemAnalysis, LinkCandidate, NewsletterItemAnalysis
@@ -57,16 +59,44 @@ def _score(title: str, candidate: LinkCandidate) -> tuple[MatchMethod, float]:
     return ("url_slug", slug_score) if slug_score >= 0.7 else ("unmatched", 0.0)
 
 
+def _http_url(value: str | None) -> HttpUrl | None:
+    """The value as a URL, or None: stripping parameters can re-encode a URL past HttpUrl's length."""
+    if not value:
+        return None
+    try:
+        return HTTP_URL.validate_python(value)
+    except ValidationError:
+        return None
+
+
 def _tracking_url(value: str) -> bool:
     parts = urlsplit(value)
     hostname = (parts.hostname or "").casefold()
     query_keys = {key.casefold() for key, _ in parse_qsl(parts.query, keep_blank_values=True)}
+    path = parts.path.casefold()
     return (
-        "/e3t/" in parts.path.casefold()
+        "/e3t/" in path
+        # HubSpot's second hop, should a resolution ever stop on it.
+        or "/events/public/v1/encoded/track/" in path
         or "hubspot" in hostname
         or "mailchimp" in hostname
         or bool(query_keys & TRACKING_PARAMETERS)
     )
+
+
+def shown_url(resolved: ResolvedUrl) -> str | None:
+    """The link a digest shows for a resolution, or None when all it has is a tracker.
+
+    The page's name for itself first, then where the chain ended, each without campaign tags or the
+    reader's identity. The tracker test runs on that cleaned link, not the raw one: Mailchimp tags
+    the article's own address with mc_cid, which says nothing about the page, while a click page
+    that names itself as its canonical is still a click page.
+    """
+    for candidate in (resolved.canonical_url, resolved.final_url):
+        shown = canonical_url(candidate)
+        if shown is not None and not _tracking_url(shown):
+            return shown
+    return None
 
 
 class UrlEnricher:
@@ -122,12 +152,9 @@ class UrlEnricher:
             )
         raw_url = str(match.candidate.raw_url)
         if resolved is not None:
-            display = canonical_url(resolved.canonical_url or resolved.final_url)
-            if resolved.canonical_url is None and _tracking_url(resolved.final_url):
-                display = None
             return DigestItem(
                 **values,
-                source_url=HTTP_URL.validate_python(display) if display else None,
+                source_url=_http_url(shown_url(resolved)),
                 raw_url=HTTP_URL.validate_python(raw_url),
                 resolved_url=HTTP_URL.validate_python(resolved.final_url),
                 canonical_url=HTTP_URL.validate_python(resolved.canonical_url) if resolved.canonical_url else None,
