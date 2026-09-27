@@ -250,12 +250,21 @@ and the output reservation consume the window, and asking for four to six senten
 from a headline alone can only be answered by inventing.
 
 The wrong-language check runs per field as well as over the joined text, because the two catch
-different things. Telling Traditional from Simplified needs volume, so that runs on the join; but an
+different things. Telling French from English needs volume, so that runs on the join; but an
 aggregate reports only the dominant language, which lets a short English practical-significance
 field sit unnoticed beside a long Chinese summary. Script needs no volume, so it is checked per
-field — `降低延遲。` is far too short to classify as Traditional and still unmistakably CJK. All 476
-items in the live database carry CJK in both fields, so this rejects nothing that was already
-working. A headline
+field — `降低延遲。` is far too short to detect and still unmistakably CJK. All 476 items in the
+live database carry CJK in both fields, so this rejects nothing that was already working.
+
+Traditional against Simplified is not detected at all. Model-written text in a Chinese digest has
+every character that only the other script writes replaced by its form in the digest's (Taiwan's
+form for Traditional), from a table generated out of OpenCC's dictionaries by
+`scripts/generate_chinese_script_table.py`. A character both scripts write, such as 台 or 了, is
+left alone, so correct text is never rewritten: over 1,896 stored items this changed 46 fields, each
+for a Simplified character left in Traditional text. Detection had needed volume it did not have -
+11% of real Traditional titles read as Simplified, some with no character that differs at all.
+
+A headline
 with no article and no merged coverage is skipped outright rather than rewritten: the fallback would
 be its own summary, and a prompt asking for four to six sentences naming versions and numbers could
 only be met from one sentence by padding or inventing. This adds

@@ -227,7 +227,7 @@ def test_repairs_invalid_schema_once() -> None:
         ("en", FRENCH, ENGLISH, "Model release"),
         ("fr", ENGLISH, FRENCH, "Sortie du modèle"),
         ("ja", ENGLISH, JAPANESE, "モデルの公開"),
-        ("zh-TW", SIMPLIFIED_CHINESE, TRADITIONAL_CHINESE, "模型發布"),
+        ("zh-TW", JAPANESE, TRADITIONAL_CHINESE, "模型發布"),
     ],
 )
 @respx.mock
@@ -753,21 +753,10 @@ def test_one_field_in_the_wrong_language_costs_that_item_a_translation_not_the_e
         httpx.Response(500),
         _chat("not the schema"),
         _chat({"items": [{"index": 1, "title": "t", "summary": "Still English.", "why_it_matters": "Also English."}]}),
-        # The neighbouring variety is no translation into Traditional Chinese.
-        _chat(
-            {
-                "items": [
-                    {
-                        "index": 1,
-                        "title": "快照",
-                        "summary": "该模型可以改善团队的工作流程。",
-                        "why_it_matters": "它能够降低运营成本。",
-                    }
-                ]
-            }
-        ),
+        # Japanese is written with Chinese characters too, and is still no translation into Chinese.
+        _chat({"items": [{"index": 1, "title": "快照", "summary": JAPANESE[1], "why_it_matters": JAPANESE[2]}]}),
     ],
-    ids=["http-error", "invalid", "still-english", "simplified"],
+    ids=["http-error", "invalid", "still-english", "japanese"],
 )
 @respx.mock
 def test_an_item_that_stays_outside_the_language_is_dropped_alone(answer: httpx.Response) -> None:
@@ -816,21 +805,15 @@ def test_an_email_fails_only_when_no_item_can_be_brought_into_the_language() -> 
     english = _items_result(ENGLISH_SUMMARY)
     failed_translation = _chat({"items": [{"index": 0, "title": "t", "summary": "English.", "why_it_matters": "English."}]})
     route = respx.post("http://127.0.0.1:11434/api/chat").mock(
-        side_effect=[
-            _chat(english),
-            failed_translation,
-            failed_translation,
-            _chat(english),
-            failed_translation,
-            failed_translation,
-        ]
+        side_effect=[_chat(english), _chat(english), failed_translation, failed_translation]
     )
 
     with pytest.raises(OllamaSchemaError, match="OLLAMA_LANGUAGE_INVALID"):
         OllamaClient().extract("tldr-devops", "News")
 
-    # The first answer earned the repair round; its repeat failed the email.
-    assert route.call_count == 6
+    # An answer with every item outside the language goes straight to the repair round, one request
+    # instead of one an item; the repeat is translated, and failing that, fails the email.
+    assert route.call_count == 4
 
 
 @respx.mock
@@ -840,41 +823,63 @@ def test_items_are_translated_one_at_a_time_and_a_miss_is_tried_again() -> None:
     translated = {"title": "t", "summary": TRADITIONAL_CHINESE[1], "why_it_matters": TRADITIONAL_CHINESE[2]}
     route = respx.post("http://127.0.0.1:11434/api/chat").mock(
         side_effect=[
-            _chat(_items_result(ENGLISH_SUMMARY, second)),
-            _chat({"items": [{"index": 0, **translated}]}),
-            _chat({"items": [{"index": 1, "title": "t", "summary": "Still English.", "why_it_matters": "Still English."}]}),
+            _chat(_items_result(GOOD, ENGLISH_SUMMARY, second)),
             _chat({"items": [{"index": 1, **translated}]}),
+            _chat({"items": [{"index": 2, "title": "t", "summary": "Still English.", "why_it_matters": "Still English."}]}),
+            _chat({"items": [{"index": 2, **translated}]}),
         ]
     )
 
     result = OllamaClient().extract("tldr-devops", "News")
 
-    assert len(result.items) == 2 and result.dropped_for_language == 0
+    assert len(result.items) == 3 and result.dropped_for_language == 0
     sent = [json.loads(call.request.content)["messages"][1]["content"] for call in route.calls[1:]]
-    assert ['"index": 0' in text and '"index": 1' not in text for text in sent] == [True, False, False]
+    assert ['"index": 1' in text and '"index": 2' not in text for text in sent] == [True, False, False]
 
 
-@pytest.mark.parametrize(
-    ("digest_language", "prose", "neighbour", "title"),
-    [("zh-TW", TRADITIONAL_CHINESE, SIMPLIFIED_CHINESE, "模型發布"), ("en", ENGLISH, FRENCH, "Model release")],
-)
 @respx.mock
-def test_one_item_in_a_neighbouring_language_is_translated_though_its_script_is_right(
-    digest_language: str, prose: tuple[str, str, str], neighbour: tuple[str, str, str], title: str
-) -> None:
-    # The script is right and the whole answer reads as the digest language, so only the item alone
-    # shows it is Simplified in a Traditional digest, or French in an English one.
-    right = (title, prose[1], prose[2])
+def test_one_long_item_in_a_neighbouring_language_is_translated_alone() -> None:
+    # French in an English digest is in the right script, so only the item read on its own shows it.
+    # Long enough to be most of the answer, it used to make the whole answer read as French and fail
+    # every item; only an answer with every item outside now earns the repair round.
+    right = ("Model release", ENGLISH[1], ENGLISH[2])
+    french = ("Model release", " ".join([FRENCH[1]] * 6), " ".join([FRENCH[2]] * 6))
     route = respx.post("http://127.0.0.1:11434/api/chat").mock(
         side_effect=[
-            _chat(_items_result(right, right, right, (title, neighbour[1], neighbour[2]))),
-            _chat({"items": [{"index": 3, "title": title, "summary": prose[1], "why_it_matters": prose[2]}]}),
+            _chat(_items_result(right, right, french)),
+            _chat({"items": [{"index": 2, "title": "Model release", "summary": ENGLISH[1], "why_it_matters": ENGLISH[2]}]}),
         ]
     )
 
-    result = OllamaClient(digest_language=digest_language).extract("alphasignal", "News")
+    result = OllamaClient(digest_language="en").extract("alphasignal", "News")
 
-    assert [item.summary_zh_tw for item in result.items] == [prose[1]] * 4
+    assert [item.summary_zh_tw for item in result.items] == [ENGLISH[1]] * 3
     assert result.dropped_for_language == 0
     assert route.call_count == 2
-    assert '"index": 3' in json.loads(route.calls[1].request.content)["messages"][1]["content"]
+    assert '"index": 2' in json.loads(route.calls[1].request.content)["messages"][1]["content"]
+
+
+SIMPLIFIED_ITEM = ("OpenAI 推出 GPT-5.6 网络版", "该模型可以改善团队的工作流程。", "它能够降低运营成本。")
+TRADITIONAL_ITEM = ("OpenAI 推出 GPT-5.6 網絡版", "該模型可以改善團隊的工作流程。", "它能夠降低運營成本。")
+
+
+@pytest.mark.parametrize(
+    ("digest_language", "written", "expected"),
+    [("zh-TW", SIMPLIFIED_ITEM, TRADITIONAL_ITEM), ("zh-CN", TRADITIONAL_ITEM, SIMPLIFIED_ITEM)],
+)
+@respx.mock
+def test_chinese_in_the_other_script_is_written_in_the_digests_without_a_model_call(
+    digest_language: str, written: tuple[str, str, str], expected: tuple[str, str, str]
+) -> None:
+    # Which script a short title is in cannot be told - "推出" is both - and needs no telling: a
+    # character only the other script writes is replaced, and one both write is left as it is.
+    result = _items_result(written, (written[0], "平台了解適合的峰值。", "台灣與後端合作。"))
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_chat(result))
+
+    items = OllamaClient(digest_language=digest_language).extract("alphasignal", "News").items
+
+    assert (items[0].title, items[0].summary_zh_tw, items[0].why_it_matters_zh_tw) == expected
+    assert items[0].source_title == written[0]
+    if digest_language == "zh-TW":
+        assert (items[1].summary_zh_tw, items[1].why_it_matters_zh_tw) == ("平台了解適合的峰值。", "台灣與後端合作。")
+    assert route.call_count == 1

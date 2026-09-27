@@ -4,17 +4,15 @@ import json
 import logging
 import math
 import re
-from typing import Any, Literal, cast
+from typing import Any, Literal, TypeVar, cast
 
 import httpx
 from langdetect import DetectorFactory, LangDetectException, detect  # type: ignore[import-untyped]
-from langdetect_zh import DetectorFactory as ChineseDetectorFactory  # type: ignore[import-untyped]
-from langdetect_zh import LangDetectException as ChineseLangDetectException
-from langdetect_zh import detect as detect_chinese
 from pydantic import BaseModel, ValidationError
 
 from two_read_runtime.endpoint_policy import validate_ollama_endpoint
 
+from .chinese_script_table import TO_SIMPLIFIED, TO_TRADITIONAL
 from .config import Settings
 from .digest import digest_language_code
 from .schemas import (
@@ -168,7 +166,6 @@ EXTRACT_RESERVED_OUTPUT_BASE = 300
 EXTRACT_REPAIR_OVERHEAD_TOKENS = 120
 
 DetectorFactory.seed = 0
-ChineseDetectorFactory.seed = 0
 
 
 def _ollama_schema(value: Any) -> Any:
@@ -323,25 +320,45 @@ def _language_instruction(language: str) -> str:
     return f"Use {language} {field}"
 
 
+# Model text in a Chinese digest has each character written only in the other script replaced by
+# its form in this one. Which script a text is in used to be guessed, and a guess needs volume: 11%
+# of 1,470 real Traditional titles read as Simplified, some ("OpenAI 推出 GPT-5.6 Sol 超速版本")
+# with no character that differs at all. A replacement needs none, costs no model call, and leaves a
+# character both scripts write, such as 台 or 了, as it is. Over 1,896 stored items it changed 46
+# fields, every one for a Simplified character left in Traditional text: 网络, 扩, 审.
+CHINESE_SCRIPTS = {
+    "zh-tw": str.maketrans(dict(zip(TO_TRADITIONAL[0::2], TO_TRADITIONAL[1::2], strict=True))),
+    "zh-cn": str.maketrans(dict(zip(TO_SIMPLIFIED[0::2], TO_SIMPLIFIED[1::2], strict=True))),
+}
+
+
+ScriptedModel = TypeVar("ScriptedModel", bound=BaseModel)
+
+
+def _in_script(value: str, language: str) -> str:
+    """The text in the digest's Chinese script, or as it is for any other language."""
+    table = CHINESE_SCRIPTS.get(digest_language_code(language))
+    return value.translate(table) if table else value
+
+
 def _detected_language(text: str, expected: str) -> str:
-    detected = cast(str, detect(text))
-    if expected not in {"zh-cn", "zh-tw"}:
-        return detected
-    if not CJK_PATTERN.search(text) or JAPANESE_KANA_PATTERN.search(text) or HANGUL_PATTERN.search(text):
-        return detected
-    return cast(str, detect_chinese(text))
+    # Chinese text is in the digest's script once _in_script has run, so all that is left to tell is
+    # whether it is Chinese at all - and kana or Hangul are what show Japanese or Korean. Detection
+    # proper is no help here: langdetect read 1,464 of 1,896 real Traditional items as Korean.
+    if expected in CHINESE_SCRIPTS and not JAPANESE_KANA_PATTERN.search(text) and not HANGUL_PATTERN.search(text):
+        return expected if CJK_PATTERN.search(text) else cast(str, detect(text))
+    return cast(str, detect(text))
 
 
 def _wrong_script(value: str, expected: str) -> bool:
     """Whether one field is plainly not written in the expected script.
 
-    Telling Traditional from Simplified needs volume, so detection runs over joined fields - an
-    item's two, or a whole answer's. Script does not, and that difference is what lets one field
-    hide behind another: an English practical-significance field beside a long Chinese summary
-    never moves the detected language, which reports only the dominant one. Checked per field, it
-    has nowhere to hide. Length-insensitive is the point - "降低延遲。" is far too short to classify
-    as Traditional and still unmistakably CJK, and every one of 476 real items carries CJK in both
-    fields.
+    Telling French from English needs volume, so detection runs over joined fields - an item's two,
+    or a whole answer's. Script does not, and that difference is what lets one field hide behind
+    another: an English practical-significance field beside a long Chinese summary never moves the
+    detected language, which reports only the dominant one. Checked per field, it has nowhere to
+    hide. Length-insensitive is the point - "降低延遲。" is far too short to detect and still
+    unmistakably CJK, and every one of 476 real items carries CJK in both fields.
     """
     cjk = len(CJK_PATTERN.findall(value))
     if expected.startswith("zh"):
@@ -360,11 +377,8 @@ def _validate_digest_language(language: str, values: list[str]) -> None:
 def _validate_language_variety(language: str, values: list[str]) -> None:
     """Whether the fields, taken together, are the configured language and not a neighbour of it.
 
-    Traditional against Simplified, or French in an English digest. An answer gone the wrong way as
-    a whole is asked for again in one repair round, cheaper than translating every item; one item
-    gone that way among many right ones leaves the aggregate right, and is caught on its own by
-    _in_other_variety. Fields in the wrong script are left out - they are one field's problem,
-    handled per item - and with none left there is nothing to tell.
+    French in an English digest, or Japanese in a Chinese one. Fields in the wrong script are left
+    out - they are one field's problem - and with none left there is nothing to tell.
     """
     expected = digest_language_code(language)
     in_script = [value for value in values if not _wrong_script(value, expected)]
@@ -372,7 +386,7 @@ def _validate_language_variety(language: str, values: list[str]) -> None:
         return
     try:
         detected = _detected_language("\n".join(in_script), expected)
-    except (LangDetectException, ChineseLangDetectException) as error:
+    except LangDetectException as error:
         raise ValueError(f"could not detect DIGEST_LANGUAGE={language!r}") from error
     if detected != expected:
         raise ValueError(f"model returned {detected!r} for DIGEST_LANGUAGE={language!r}")
@@ -381,10 +395,10 @@ def _validate_language_variety(language: str, values: list[str]) -> None:
 def _in_other_variety(language: str, item: NewsletterItemAnalysis) -> bool:
     """Whether the item's summary and significance, read on their own, are a neighbour of the language.
 
-    Script cannot tell them: a Simplified item among Traditional ones, or a French one in an English
-    digest, is in the right script, and the aggregate reports only the dominant language. One item is
-    volume enough - none of 1,896 stored items was misread, nor any of 243 English newsletter
-    paragraphs - and an item too short to tell at all is left as it is.
+    Script cannot tell them: a French item in an English digest is in the right script, and the
+    whole answer reads as its dominant language. One item is volume enough - none of 243 English
+    newsletter paragraphs was misread - and an item too short to tell at all is left as it is.
+    Titles are not read this way: too short, and "Claude Opus 5.5" is no language at all.
     """
     expected = digest_language_code(language)
     values = [value for value in (item.summary_zh_tw, item.why_it_matters_zh_tw) if not _wrong_script(value, expected)]
@@ -392,7 +406,7 @@ def _in_other_variety(language: str, item: NewsletterItemAnalysis) -> bool:
         return False
     try:
         return _detected_language("\n".join(values), expected) != expected
-    except (LangDetectException, ChineseLangDetectException):
+    except LangDetectException:
         return False
 
 
@@ -490,16 +504,15 @@ class OllamaClient:
                 result = EmailExtraction.model_validate_json(raw)
                 result.source_id = source_id
                 result.truncated_input = truncated
-                result.items = result.items[:max_items]
-                # The answer as a whole must be the right language rather than a neighbour of it; a
-                # single field in the wrong script is that item's problem, settled below. The overview
-                # is left out of both: nothing downstream reads it.
-                _validate_language_variety(
-                    self.digest_language,
-                    [value for item in result.items for value in (item.summary_zh_tw, item.why_it_matters_zh_tw)],
-                )
-                # Inside the try on purpose: an answer none of whose items could be brought into the
-                # digest language is a whole-answer problem, and earns the repair round.
+                result.items = [self._item_in_script(item) for item in result.items[:max_items]]
+                # Only an answer with every item outside the language earns the repair round: one
+                # request, where translating costs one per item. Judging the answer by its dominant
+                # language instead let one long French item among short English ones fail them all.
+                # The overview is left out: nothing downstream reads it.
+                if not attempt and result.items and all(self._outside_language(item) for item in result.items):
+                    raise ValueError(f"every item is outside DIGEST_LANGUAGE={self.digest_language!r}")
+                # Inside the try on purpose: a repaired answer none of whose items could be brought
+                # into the digest language fails the email like any other invalid answer.
                 return self._items_in_language(source_id, result)
             except (ValidationError, ValueError, KeyError, TypeError) as error:
                 if attempt:
@@ -544,22 +557,13 @@ class OllamaClient:
         item is left.
         """
         expected = digest_language_code(self.digest_language)
-
-        def outside(item: NewsletterItemAnalysis) -> bool:
-            return (
-                _wrong_script(item.summary_zh_tw, expected)
-                or _wrong_script(item.why_it_matters_zh_tw, expected)
-                or _in_other_variety(self.digest_language, item)
-            )
-
+        outside = self._outside_language
         pending = [index for index, item in enumerate(result.items) if _wrong_script(item.title, expected) or outside(item)]
         if not pending:
             return result
         translated: dict[int, NewsletterItemAnalysis] = {}
         for index in pending:
             for _ in range(TRANSLATE_ATTEMPTS):
-                # A translation into the neighbouring variety - Simplified for a Traditional digest -
-                # is no translation at all, and is tried again like an untranslated answer.
                 answer = self._translated_items(source_id, {index: result.items[index]}).get(index)
                 if answer is not None and not outside(answer):
                     translated[index] = answer
@@ -586,6 +590,28 @@ class OllamaClient:
         result.items = kept
         result._dropped_for_language = dropped
         return result
+
+    def _outside_language(self, item: NewsletterItemAnalysis) -> bool:
+        """Whether the item's summary or significance is not in the digest language."""
+        expected = digest_language_code(self.digest_language)
+        return (
+            _wrong_script(item.summary_zh_tw, expected)
+            or _wrong_script(item.why_it_matters_zh_tw, expected)
+            or _in_other_variety(self.digest_language, item)
+        )
+
+    def _item_in_script(self, item: ScriptedModel) -> ScriptedModel:
+        """The item with its model-written text in the digest's Chinese script; see CHINESE_SCRIPTS.
+
+        The verbatim headline is left as the newsletter wrote it: it has to match the link's anchor.
+        """
+        return item.model_copy(
+            update={
+                name: _in_script(value, self.digest_language)
+                for name in ("title", "summary_zh_tw", "why_it_matters_zh_tw")
+                if isinstance(value := getattr(item, name, None), str)
+            }
+        )
 
     def _translated_items(self, source_id: str, items: dict[int, NewsletterItemAnalysis]) -> dict[int, NewsletterItemAnalysis]:
         """The items with their fields translated, keyed as given; any item that cannot be is left out."""
@@ -628,9 +654,9 @@ class OllamaClient:
                 translated[translation.index] = NewsletterItemAnalysis.model_validate(
                     {
                         **original.model_dump(),
-                        "title": title,
-                        "summary_zh_tw": translation.summary,
-                        "why_it_matters_zh_tw": translation.why_it_matters,
+                        "title": _in_script(title, self.digest_language),
+                        "summary_zh_tw": _in_script(translation.summary, self.digest_language),
+                        "why_it_matters_zh_tw": _in_script(translation.why_it_matters, self.digest_language),
                     }
                 )
             except ValidationError:
@@ -693,7 +719,7 @@ class OllamaClient:
                 raw = response.json()["message"]["content"]
                 if not isinstance(raw, str):
                     raise TypeError
-                result = ArticleAnalysis.model_validate_json(raw)
+                result = self._item_in_script(ArticleAnalysis.model_validate_json(raw))
                 _validate_digest_language(self.digest_language, [result.summary_zh_tw, result.why_it_matters_zh_tw])
                 return result
             except (ValidationError, ValueError, KeyError, TypeError) as error:
@@ -885,7 +911,7 @@ class OllamaClient:
             raw = response.json()["message"]["content"]
             if not isinstance(raw, str):
                 raise TypeError
-            result = ItemDeepening.model_validate_json(raw)
+            result = self._item_in_script(ItemDeepening.model_validate_json(raw))
             if result.covers_the_item:
                 # An English article rewritten for a zh-TW digest is the likeliest way for the model
                 # to answer in the source's language, and this replaces prose the extractor already
