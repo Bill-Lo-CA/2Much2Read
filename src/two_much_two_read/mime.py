@@ -24,6 +24,11 @@ MAX_HTML_BYTES = 2 * 1024 * 1024
 MAX_ANALYSIS_CHARS = 45_000
 MAX_LINK_CANDIDATES = 200
 MAX_LINK_OCCURRENCES = 2_000
+# A plain part this many times shorter than the HTML's text is a stand-in, not the newsletter: The
+# Hacker News sends 580 characters asking to be read "with an HTML friendly email client", and the
+# extractor, reading only that, made two items out of the subject line and gave them the HTML's
+# first links - both advertisements.
+PLAIN_PART_STAND_IN_RATIO = 4
 
 FOOTER_LINE_PATTERN = re.compile(
     r"^(?:unsubscribe|manage preferences|privacy policy|取消訂閱)(?:\s*[|·/]\s*"
@@ -296,8 +301,10 @@ def _content(plain: list[str], html: list[str]) -> ExtractedEmailContent:
     plain_content = _inlined_footnotes(_readable("\n".join(value.strip() for value in plain if value.strip())))
     analysis_text = plain_content
     html_content = "\n".join(value for value in html if value.strip())
-    if not analysis_text:
-        analysis_text = _readable(html_to_text(html_content))
+    html_text = _readable(html_to_text(html_content)) if html_content else ""
+    # Words against words: the HTML's text still carries every link's URL, which the plain part may not.
+    if len(URL_PATTERN.sub("", analysis_text)) * PLAIN_PART_STAND_IN_RATIO < len(URL_PATTERN.sub("", html_text)):
+        analysis_text = html_text
     candidates = _link_candidates(plain_content, html_content)
     # Coded before the length is measured and cut, so the cut is spent on text rather than URLs.
     analysis_text = _coded_text(analysis_text, candidates)

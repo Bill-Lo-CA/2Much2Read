@@ -181,6 +181,20 @@ def test_a_code_that_names_no_usable_link_falls_back_to_the_title() -> None:
         assert (match.method, match.candidate) == ("exact_anchor", story)
 
 
+def test_a_code_the_extractor_was_never_shown_falls_back_to_the_title() -> None:
+    # Given a plain part with no links, the extractor answered L1 anyway; L1 was the HTML's first
+    # link, an advertisement.
+    advert = candidate("link-0001", "Free whitepaper", "https://ads.example/whitepaper", 0)
+    story = candidate("link-0002", "Useful article", "https://example.com/story", 1)
+
+    shown = UrlEnricher().match([coded("Useful article", "L1")], [advert, story], "Useful article [L2]")[0]
+    unseen = UrlEnricher().match([coded("Useful article", "L1")], [advert, story], "Useful article, no links")[0]
+
+    assert (shown.method, shown.candidate) == ("exact_anchor", story)
+    assert (unseen.method, unseen.candidate) == ("exact_anchor", story)
+    assert UrlEnricher().match([coded("Useful article", "L1")], [advert, story], "Advert [L1]")[0].candidate is advert
+
+
 def test_a_code_already_taken_falls_back_to_the_title() -> None:
     first = candidate("link-0001", "First story", "https://example.com/first", 0)
     second = candidate("link-0002", "Second story", "https://example.com/second", 1)

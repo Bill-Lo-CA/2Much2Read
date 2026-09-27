@@ -484,3 +484,23 @@ def test_a_hostile_body_costs_one_pass_not_a_scan_from_every_character(plain: st
     extract_gmail_payload(_body("text/plain", plain))
 
     assert time.monotonic() - started < 2
+
+
+def test_a_plain_part_that_only_asks_for_html_gives_way_to_the_html() -> None:
+    # The Hacker News's plain part is 580 characters of "read it with an HTML friendly email client";
+    # read alone, it left the extractor the subject line and nothing else.
+    plain = "This email is not formatted for viewing in a text email client. Please read it with an HTML friendly email client."
+    stories = "".join(
+        f"<h2>Story {number}</h2><p>A long paragraph about story {number}, with enough words to be the newsletter itself. "
+        f'<a href="https://example.com/story-{number}">Read more</a></p>'
+        for number in range(6)
+    )
+    message = EmailMessage()
+    message.set_content(plain)
+    message.add_alternative(stories, subtype="html")
+
+    content = extract_mime(message.as_bytes())
+
+    assert "HTML friendly" not in content.analysis_text
+    assert "A long paragraph about story 5" in content.analysis_text
+    assert "[L6]" in content.analysis_text
