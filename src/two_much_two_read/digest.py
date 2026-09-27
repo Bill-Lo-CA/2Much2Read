@@ -130,15 +130,47 @@ def has_source_text(entry: DigestEntry) -> bool:
     return entry.content_basis in {"article", "hn_self_post"} or _article_url(entry) is not None or bool(entry.also_from)
 
 
+# Campaign tags, and the parameters that carry the subscriber's own identity: a newsletter's click
+# tracker hands them to the destination (HubSpot's ecid and _hsenc, Mailchimp's mc_eid, Marketo's
+# mkt_tok, ConvertKit's and Klaviyo's subscriber ids), and a link carrying them tells whoever opens
+# it who received the email. Ad click ids go too.
+TRACKING_QUERY_KEYS = {
+    "ref",
+    "source",
+    "campaign",
+    "mc_cid",
+    "mc_eid",
+    "mkt_tok",
+    "_hsenc",
+    "_hsmi",
+    "__hstc",
+    "__hssc",
+    "__hsfp",
+    "hsctatracking",
+    "ecid",
+    "ck_subscriber_id",
+    "_kx",
+    "vero_id",
+    "vero_conv",
+    "oly_enc_id",
+    "oly_anon_id",
+    "fbclid",
+    "gclid",
+    "dclid",
+    "msclkid",
+    "yclid",
+    "igshid",
+}
+
+
 def canonical_url(value: str | None) -> str | None:
     if not value:
         return None
     parts = urlsplit(value)
-    blocked = {"ref", "source", "campaign", "mc_cid", "mc_eid", "mkt_tok"}
     query = [
         (key, val)
         for key, val in parse_qsl(parts.query, keep_blank_values=True)
-        if not key.lower().startswith("utm_") and key.lower() not in blocked
+        if not key.lower().startswith("utm_") and key.lower() not in TRACKING_QUERY_KEYS
     ]
     return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, urlencode(query), ""))
 
