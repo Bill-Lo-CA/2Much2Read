@@ -14,13 +14,13 @@ dependencies = [
   "google-auth-oauthlib>=1.2,<2",
   "httpx>=0.28,<1",
   "langdetect>=1.0.9,<2",
-  "langdetect-zh>=1.0.4,<2",
   "lxml>=5.4,<7",
   "pydantic>=2.11,<3",
   "pydantic-settings>=2.9,<3",
   "pyyaml>=6.0,<7",
   "sentence-transformers>=5,<6",
   "typer>=0.16,<1",
+  "zhconv-rs>=0.4.2,<0.5",
 ]
 
 [dependency-groups]

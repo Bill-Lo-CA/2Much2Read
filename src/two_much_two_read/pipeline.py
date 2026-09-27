@@ -44,7 +44,7 @@ from .ollama import OllamaClient, OllamaContextError, OllamaSchemaError, close_o
 from .reranker import RelevanceReranker
 from .schemas import ArticleAnalysis, DigestItem, DigestReview, ExtractedEmailContent, ItemDeepening, ResolvedContent
 from .storage import Database
-from .url_enrichment import UrlEnricher, resolve_match
+from .url_enrichment import UrlEnricher, resolve_match, shown_url
 
 StatusReporter = Callable[[str], None]
 # The category whose reviewer slots are reserved by DIGEST_SECURITY_CANDIDATE_SLOTS, and whose
@@ -780,6 +780,23 @@ def _process_source(
                 continue
             raw_url = str(match.candidate.raw_url)
             cached = database.cached_url_resolution(raw_url)
+            if (
+                cached is not None
+                and cached["status"] == "resolved"
+                and cached["resolved_url"]
+                and shown_url(
+                    ResolvedUrl(
+                        raw_url,
+                        str(cached["resolved_url"]),
+                        str(cached["canonical_url"]) if cached["canonical_url"] else None,
+                    )
+                )
+                is None
+            ):
+                # Resolved before the resolver could pass a tracker's page-level hop, so it stopped on
+                # the click page - which may name itself as its canonical - and there is no link to
+                # show; the link deserves another try rather than 30 days of no article.
+                cached = None
             if cached is not None:
                 if cached["status"] == "resolved" and cached["resolved_url"]:
                     items.append(
@@ -811,7 +828,10 @@ def _process_source(
             items.append(url_enricher.resolved_item(match, resolved))
         database.store_items(document_id, items, replace=True, finalize=False)
         processed += 1
-        status(f"{source.id}: processed {subject}")
+        dropped = extraction.dropped_for_language
+        status(
+            f"{source.id}: processed {subject}" + (f" ({dropped} item(s) outside the digest language dropped)" if dropped else "")
+        )
         processed_document_ids.append(document_id)
         processed_documents.append((document_id, gmail_id))
     return discovered, discovered, processed, failed, processed_document_ids, processed_documents
