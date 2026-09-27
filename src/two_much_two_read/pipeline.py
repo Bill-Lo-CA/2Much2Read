@@ -89,6 +89,7 @@ def _items(database: Database, document_ids: list[int], limit: int, source_names
             DigestEntry(
                 item=item,
                 candidate_id=int(str(row["id"])),
+                source_type=str(row["source_type"]),
                 source_id=str(row["source_id"]),
                 source_name=source_names.get(str(row["source_id"]), str(row["source_id"])),
                 published_at=datetime.fromisoformat(str(row["published_at"])),
@@ -484,7 +485,7 @@ def _cap_key(entry: DigestEntry) -> str | None:
     counting them as one newsletter would hold the whole feed to two headlines. A post with no article
     of its own counts alone.
     """
-    if entry.hn_item_id is None:
+    if entry.source_type != "hackernews":
         return entry.source_id or entry.source_name
     article = entry.article_url if entry.article_url != entry.discussion_url else None
     hostname = urlsplit(article).hostname if article else None
@@ -748,9 +749,10 @@ def _links_front_page_of(item: DigestItem, sender: str | None) -> bool:
     console.dev and took a headline - not a story it carries. Only the sender's own site counts: a
     tool newsletter's items link tools' front pages, such as droprun.sh, and those are the stories.
     """
-    if sender is None or item.source_url is None:
+    link = item.source_url or item.raw_url
+    if sender is None or link is None:
         return False
-    parts = urlsplit(str(item.source_url))
+    parts = urlsplit(canonical_url(str(link)) or "")
     host = (parts.hostname or "").lower().removeprefix("www.")
     same_site = host == sender or host.endswith(f".{sender}") or sender.endswith(f".{host}")
     return bool(host) and same_site and parts.path in {"", "/"} and not parts.query

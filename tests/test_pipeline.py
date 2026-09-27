@@ -17,7 +17,7 @@ from conftest import directory_digest, recorded
 from pydantic import HttpUrl
 
 from two_much_two_read import mail_operations, pipeline
-from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl
+from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl, UrlResolutionError
 from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult, SourceItemCounts
 from two_much_two_read.config import HackerNewsSource, Settings
 from two_much_two_read.digest import DigestEntry
@@ -153,15 +153,23 @@ TAGGED = "https://publisher.example/post?mc_cid=1&utm_source=news"
         ),
         # The sender's own front page: the newsletter describing itself, not a story it carries.
         ("https://short.example/go", None, ("https://www.example.com/", None), None),
+        ("https://www.example.com/?ref=newsletter", None, None, None),
     ],
-    ids=["fresh", "stale-tracker-cache", "stale-tracker-canonical", "tagged-article-cache", "own-front-page"],
+    ids=[
+        "fresh",
+        "stale-tracker-cache",
+        "stale-tracker-canonical",
+        "tagged-article-cache",
+        "own-front-page",
+        "failed-own-front-page",
+    ],
 )
 def test_gmail_url_enrichment_owns_and_persists_resolved_url(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     link: str,
     cached: tuple[str, str | None] | None,
-    fetched: tuple[str, str | None],
+    fetched: tuple[str, str | None] | None,
     shown: tuple[str, str, str | None] | None,
 ) -> None:
     sources_path = tmp_path / "sources.yaml"
@@ -221,6 +229,8 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(
     class FakeFetcher:
         def resolve_url(self, raw_url: str) -> ResolvedUrl:
             assert raw_url == link
+            if fetched is None:
+                raise UrlResolutionError("URL_POLICY_BLOCKED")
             return ResolvedUrl(raw_url, *fetched)
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
