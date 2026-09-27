@@ -483,13 +483,28 @@ def _headlines_per_source(
     overflow: list[DigestEntry] = []
     taken: Counter[str | None] = Counter()
     for entry in sorted(headlines, key=_entry_rank, reverse=True):
-        source = entry.source_id or entry.source_name
+        source = _cap_key(entry)
         if len(kept) < picks and taken[source] < per_source:
             kept.append(entry)
             taken[source] += 1
         else:
             overflow.append(replace(entry, review_score=None))
     return kept, overflow
+
+
+def _cap_key(entry: DigestEntry) -> str | None:
+    """Whom a headline counts against for the per-source cap.
+
+    A newsletter, for its own items. A Hacker News story instead counts against the site it links:
+    every story in hn-best shares one source ID, but the stories come from unrelated publishers, and
+    counting them as one newsletter would hold the whole feed to two headlines. A post with no article
+    of its own counts alone.
+    """
+    if entry.hn_item_id is None:
+        return entry.source_id or entry.source_name
+    article = entry.article_url if entry.article_url != entry.discussion_url else None
+    hostname = urlsplit(article).hostname if article else None
+    return f"site:{hostname.removeprefix('www.')}" if hostname else f"hn:{entry.hn_item_id}"
 
 
 def _inert(value: str) -> str:

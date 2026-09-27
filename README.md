@@ -160,7 +160,8 @@ headline limit (fewer on a small `OLLAMA_NUM_CTX`, where their answers would cro
 candidates); the headlines are its best picks with at most the cap from any one newsletter. A
 pick over the cap, and a refill pick left unused, becomes an ordinary mention; with
 `DIGEST_MAX_ITEMS` above `DIGEST_TOP_ITEMS`, the other picks past the headlines stay where they
-were. The security floor applies after the cap, and may take
+were. A Hacker News story counts against the site it links rather than the feed, whose stories
+share one source but not one publisher. The security floor applies after the cap, and may take
 a newsletter past it to keep a security story on top. An item whose article is the sending
 newsletter's own front page - the newsletter describing its issue - is dropped at extraction.
 

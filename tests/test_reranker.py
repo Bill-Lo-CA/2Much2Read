@@ -993,6 +993,32 @@ def test_one_newsletter_holds_at_most_its_share_of_the_headlines() -> None:
     assert [value.candidate_id for value in uncapped if value.review_score is not None] == [1, 2, 3, 4, 5]
 
 
+def test_hacker_news_stories_count_against_the_site_they_link_not_the_feed() -> None:
+    # Every hn-best story shares one source ID; held to two as one newsletter, the feed would lose
+    # its third and fourth picks though they come from unrelated publishers.
+    def story(candidate_id: int, article: str | None, score: int) -> DigestEntry:
+        return replace(
+            _headline(candidate_id, "Hacker News", score),
+            hn_item_id=str(candidate_id),
+            article_url=article or f"https://news.ycombinator.com/item?id={candidate_id}",
+            discussion_url=f"https://news.ycombinator.com/item?id={candidate_id}",
+        )
+
+    picks = [
+        story(1, "https://github.com/a/one", 95),
+        story(2, "https://www.github.com/b/two", 94),
+        story(3, "https://github.com/c/three", 93),
+        story(4, "https://example.com/post", 92),
+        story(5, None, 91),
+        story(6, None, 90),
+    ]
+
+    capped, _ = pipeline._merged_entries(picks, 10, never_the_same, headline_limit=6, per_source=2)
+
+    # GitHub's third story is the only one over the cap; self posts count alone.
+    assert [value.candidate_id for value in capped if value.review_score is not None] == [1, 2, 4, 5, 6]
+
+
 def test_a_pick_the_cap_leaves_out_competes_for_the_mention_quota_like_any_mention() -> None:
     picks = [_headline(1, "Console", 95), _headline(2, "Console", 94), _headline(3, "Console", 93)]
     passed_over = [replace(entry(4, "Other story", "TLDR"), reranker_score=0.99)]
