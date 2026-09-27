@@ -49,7 +49,7 @@ MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)")
 # Text the newsletter itself wrote in the shape of a link code, such as a "[L2]" cache level. A
 # Markdown link label is left to the link pass, which takes the brackets off.
 LITERAL_LINK_CODE = re.compile(r"\[(\s*L\s*\d{1,4}\s*)\](?!\()", re.IGNORECASE)
-URL_PATTERN = re.compile(r"https?://[^\s<>\"'\]]+")
+URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
 # Characters that print as nothing. Senders pad the preview text with them, alternating with no-break
 # spaces, so that a mail client shows no more of the body in the inbox: TLDR's four editions each
 # send 52 such pairs, 264 tokens of nothing. Only runs go: one such character alone is part of the
@@ -62,7 +62,7 @@ INVISIBLE_RUN = re.compile(rf"[{INVISIBLE}](?:[ \t\u00a0\u2007\u202f]*[{INVISIBL
 # as TLDR's does, with only "[8]" in the text.
 FOOTNOTE_TABLE = re.compile(r"\n[ \t]*Links:[ \t]*\n[ \t]*-{3,}[ \t]*\n((?:[ \t]*\[\d{1,4}\][ \t]+\S+[ \t]*(?:\n|\Z))+)\s*\Z")
 FOOTNOTE_ENTRY = re.compile(r"\[(\d{1,4})\][ \t]+(\S+)")
-FOOTNOTE_REFERENCE = re.compile(r"(?<![\[\w])\[(\d{1,4})\](?![\](])")
+FOOTNOTE_REFERENCE = re.compile(r"(?<!\[)\[(\d{1,4})\](?![\](])")
 
 
 class EmailExtractionError(ValueError):

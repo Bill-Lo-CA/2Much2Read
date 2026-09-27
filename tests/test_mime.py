@@ -466,6 +466,22 @@ def test_numbered_notes_are_coded_where_the_story_is_and_the_list_goes() -> None
     assert graphalgo.nearby_text.startswith("GRAPHALGO SPREADS TO TERRAFORM")
 
 
+def test_a_numbered_note_adjacent_to_a_word_keeps_its_link() -> None:
+    plain = "Story[1]\n\nLinks:\n---\n[1] https://example.com/?filters[]=news\n"
+
+    content = extract_gmail_payload(_body("text/plain", plain))
+
+    assert content.analysis_text == "Story[L1]"
+    assert _codes(content) == {"L1": "https://example.com/?filters[]=news"}
+
+
+def test_a_bare_url_keeps_brackets_in_its_query() -> None:
+    content = extract_gmail_payload(_body("text/plain", "Story https://example.com/?filters[]=news"))
+
+    assert content.analysis_text == "Story [L1]"
+    assert _codes(content) == {"L1": "https://example.com/?filters[]=news"}
+
+
 def test_a_citation_without_a_closing_list_of_notes_is_left_alone() -> None:
     plain = "As shown before [1], the node shrinks.\n\nLinks:\n------\n[1] https://example.com/a\n\nMore text after the list."
 
