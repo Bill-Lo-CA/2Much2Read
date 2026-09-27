@@ -127,13 +127,35 @@ def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pipeline, "_deepened_entries", lambda _settings, _ollama, entries, _status: entries)
 
 
+TRACKER = "https://info.example.io/e3t/Ctc/L2+113/abc"
+RESOLVED = ("https://publisher.example/canonical", "https://publisher.example/article", "https://publisher.example/canonical")
+TAGGED = "https://publisher.example/post?mc_cid=1&utm_source=news"
+
+
 @pytest.mark.parametrize(
-    ("link", "stale_cache"),
-    [("https://short.example/go", False), ("https://info.example.io/e3t/Ctc/L2+113/abc", True)],
-    ids=["fresh", "stale-tracker-cache"],
+    ("link", "cached", "shown"),
+    [
+        ("https://short.example/go", None, RESOLVED),
+        # Cached before the resolver could pass HubSpot's click page: it stopped on the page itself,
+        # and 30 days of that answer would keep the story's article out of the digest - with or
+        # without the click page naming itself as its canonical.
+        (TRACKER, (TRACKER, None), RESOLVED),
+        (TRACKER, (TRACKER, TRACKER), RESOLVED),
+        # An article Mailchimp tagged is shown without the tags, and is not resolved again.
+        (
+            "https://short.example/go",
+            (TAGGED, None),
+            ("https://publisher.example/post", TAGGED, "https://publisher.example/post"),
+        ),
+    ],
+    ids=["fresh", "stale-tracker-cache", "stale-tracker-canonical", "tagged-article-cache"],
 )
 def test_gmail_url_enrichment_owns_and_persists_resolved_url(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, link: str, stale_cache: bool
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    link: str,
+    cached: tuple[str, str | None] | None,
+    shown: tuple[str, str, str | None],
 ) -> None:
     sources_path = tmp_path / "sources.yaml"
     write_sources(sources_path)
@@ -142,11 +164,9 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(
         database_path=tmp_path / "digest.sqlite3",
         lock_path=tmp_path / "digest.lock",
     )
-    if stale_cache:
-        # Cached before the resolver could pass HubSpot's click page: it stopped on the page itself,
-        # and 30 days of that answer would keep the story's article out of the digest.
+    if cached is not None:
         seeded = Database(settings.database_path)
-        seeded.cache_url_resolution(link, "resolved", resolved_url=link)
+        seeded.cache_url_resolution(link, "resolved", resolved_url=cached[0], canonical_url=cached[1])
         seeded.close()
 
     def encoded(value: str) -> str:
@@ -209,14 +229,7 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(
     ).fetchone()
     database.close()
     assert result.status == "ok"
-    assert tuple(row) == (
-        "https://publisher.example/canonical",
-        link,
-        "https://publisher.example/article",
-        "https://publisher.example/canonical",
-        "matched",
-        "resolved",
-    )
+    assert tuple(row) == (shown[0], link, shown[1], shown[2], "matched", "resolved")
 
 
 class FakeDigestDatabase:

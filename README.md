@@ -317,10 +317,12 @@ less. Every hop is validated like the first request: public addresses only, port
 credentials, at most 2,083 characters and five hops. Once the chain arrives, the destination is the
 link even when its page turns a crawler away (401, 403, 429) with a page or plain text, is too large
 to read whole, or is a PDF; any other download is refused, a refusal served as one included, so a
-digest never links an executable or an archive. The link shown
-drops campaign tags and the parameters that carry the subscriber's identity (HubSpot's `_hsenc` and
-`ecid`, Mailchimp's `mc_eid`, and the like), so it does not tell whoever opens it who received the
-email. On one run this took The New Stack and The Batch from no article links to all of them.
+digest never links an executable or an archive. A refusal counts only once the chain has left the
+link's own host: from there it is as likely the click tracker itself, rate-limiting a run through
+its links. The link shown drops campaign tags and the parameters that carry the subscriber's
+identity (HubSpot's `_hsenc` and `ecid`, Mailchimp's `mc_eid`, and the like), so it does not tell
+whoever opens it who received the email, and a link that is still a tracker once they are gone -
+a click page, even one naming itself as its canonical - is not shown at all. On one run this took The New Stack and The Batch from no article links to all of them.
 
 On an 8 GB GPU the reviewer is the binding constraint: `qwen3:8b` at `OLLAMA_NUM_CTX=16384`
 needs roughly 8 GB for Q4 weights plus an f16 KV cache, so Ollama offloads layers to the

@@ -354,21 +354,39 @@ def test_a_destination_that_turns_crawlers_away_is_still_the_link(status: int) -
 @pytest.mark.parametrize("content_type", ["application/zip", "application/octet-stream", "application/x-msdownload"])
 def test_a_refusal_that_is_a_download_is_no_link(content_type: str) -> None:
     # A server that turns the crawler away with a file may hand a browser the same file.
-    def response_provider(_: ValidatedURL) -> ArticleResponse:
+    def response_provider(request: ValidatedURL) -> ArticleResponse:
+        if request.target == "/c":
+            return ArticleResponse(302, {"location": "https://files.example/setup"}, b"")
         return ArticleResponse(403, {"content-type": content_type}, b"PK")
 
     with pytest.raises(UrlResolutionError, match="URL_CONTENT_TYPE_UNSUPPORTED"):
-        ArticleFetcher(public_dns, response_provider).resolve_url("https://files.example/setup")
+        ArticleFetcher(public_dns, response_provider).resolve_url("https://links.example/c")
 
 
 @pytest.mark.parametrize("headers", [{}, {"content-type": "text/plain"}, {"content-type": "application/json; charset=utf-8"}])
 def test_a_refusal_in_text_or_without_a_type_is_still_the_link(headers: dict[str, str]) -> None:
-    def response_provider(_: ValidatedURL) -> ArticleResponse:
+    def response_provider(request: ValidatedURL) -> ArticleResponse:
+        if request.target == "/c":
+            return ArticleResponse(302, {"location": "https://news.example/story"}, b"")
         return ArticleResponse(429, headers, b"slow down")
 
-    resolved = ArticleFetcher(public_dns, response_provider).resolve_url("https://news.example/story")
+    resolved = ArticleFetcher(public_dns, response_provider).resolve_url("https://links.example/c")
 
     assert resolved.final_url == "https://news.example/story"
+
+
+@pytest.mark.parametrize("status", [401, 403, 429])
+@pytest.mark.parametrize("hops", [0, 1], ids=["the-link-itself", "a-hop-on-its-host"])
+def test_a_refusal_before_the_chain_leaves_the_links_host_is_no_link(status: int, hops: int) -> None:
+    # A click tracker rate-limiting a run through thirty of its links answers 429 itself; taken as the
+    # destination, its address - and the subscriber identity it may carry - would reach every reader.
+    def response_provider(request: ValidatedURL) -> ArticleResponse:
+        if hops and request.target == "/c":
+            return ArticleResponse(302, {"location": "https://links.example/track/next"}, b"")
+        return ArticleResponse(status, {"content-type": "text/html"}, b"denied")
+
+    with pytest.raises(UrlResolutionError, match="URL_RESOLUTION_FAILED"):
+        ArticleFetcher(public_dns, response_provider).resolve_url("https://links.example/c")
 
 
 @pytest.mark.parametrize(("status", "code"), [(404, "URL_RESOLUTION_FAILED"), (503, "URL_RESOLUTION_FAILED")])

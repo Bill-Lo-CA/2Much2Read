@@ -32,7 +32,7 @@ MAX_URL_LENGTH = 2083
 PAGE_CONTENT_TYPES = {"text/html", "application/xhtml+xml"}
 # A destination that turns a crawler away still names the article: the redirect chain has already
 # shown where the link leads, and it opens in a reader's browser. A missing page (404) or a failing
-# server does not qualify.
+# server does not qualify, and nor does a refusal before the chain has left the link's own host.
 LINK_WITHOUT_PAGE_STATUSES = {401, 403, 429}
 # A PDF is named as a link, so a server that negotiates strictly must be told one is welcome, or it
 # answers 406. It ranks last: an article offered as a page and a PDF is still read as the page.
@@ -177,14 +177,16 @@ class ArticleFetcher:
         HTTP redirects, and the two page-level hops trackers use in their place: HubSpot's click
         page and a prompt meta refresh. Every hop is validated as a Location header is - public
         addresses only, no credentials, ports 80 and 443 - and nothing on a page is ever run. Once the
-        chain arrives, the destination is the link even when its page will not serve a crawler, is
-        too large to read whole, or is a PDF: the address is what the digest stores and shows. Any
-        other download is refused, so a link never leads a reader to an executable or an archive.
+        chain arrives, the destination is the link even when its page will not serve a crawler (once
+        the chain has left the link's own host), is too large to read whole, or is a PDF: the
+        address is what the digest stores and shows. Any other download is refused, so a link never
+        leads a reader to an executable or an archive.
         """
         deadline = self.clock() + URL_RESOLUTION_DEADLINE_SECONDS
         try:
             self._check_deadline(deadline)
             current = self._validate_url(requested_url, redirect=False, deadline=deadline)
+            requested_host = current.hostname
             seen_urls = {current.url}
             for redirects in range(MAX_REDIRECTS + 1):
                 self._check_deadline(deadline)
@@ -197,6 +199,12 @@ class ArticleFetcher:
                     if not location:
                         raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
                 elif response.status_code in LINK_WITHOUT_PAGE_STATUSES:
+                    # A refusal from the link's own host names no destination. It is as likely the
+                    # click tracker itself - rate-limiting (429) a run through thirty of its links -
+                    # and taking it would show every reader the tracker, and the subscriber identity
+                    # its address may carry.
+                    if current.hostname == requested_host:
+                        raise ArticleFetchError("ARTICLE_FETCH_FAILED")
                     if _content_type(response) not in REFUSAL_CONTENT_TYPES:
                         raise ArticleFetchError("ARTICLE_CONTENT_TYPE_UNSUPPORTED")
                     return ResolvedUrl(requested_url, current.url, None)
