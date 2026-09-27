@@ -4,7 +4,7 @@ import re
 from datetime import date, datetime
 from typing import ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, TypeAdapter, field_validator
+from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PrivateAttr, TypeAdapter, field_validator
 
 HTTP_URL = TypeAdapter(HttpUrl)
 MODEL_TEXT_INJECTION = re.compile(r"https?://|\[[^\]\r\n]*\]\([^)]*\)", re.IGNORECASE)
@@ -240,6 +240,13 @@ class EmailExtraction(BaseModel):
     overview_zh_tw: str = Field(max_length=1500)
     items: list[NewsletterItemAnalysis]
     truncated_input: bool = False
+    # How many items were left out for staying outside the digest language after translation. Private,
+    # so it is not in the schema the model is asked to fill.
+    _dropped_for_language: int = PrivateAttr(default=0)
+
+    @property
+    def dropped_for_language(self) -> int:
+        return self._dropped_for_language
 
     @field_validator("overview_zh_tw")
     @classmethod
@@ -247,3 +254,18 @@ class EmailExtraction(BaseModel):
         if MODEL_TEXT_INJECTION.search(value):
             raise ValueError("model-owned text must not contain URLs or Markdown links")
         return value
+
+
+class FieldTranslation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    index: int = Field(ge=0)
+    title: str = Field(min_length=1, max_length=200)
+    summary: str = Field(min_length=1, max_length=800)
+    why_it_matters: str = Field(min_length=1, max_length=800)
+
+
+class ItemTranslations(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: list[FieldTranslation]
