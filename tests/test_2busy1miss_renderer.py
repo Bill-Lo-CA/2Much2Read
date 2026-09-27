@@ -114,6 +114,21 @@ def test_calendar_event_links_include_meeting_and_description_urls_but_not_the_c
     )
 
 
+def test_google_path_that_only_starts_with_calendar_remains_a_link() -> None:
+    assert _event_links({"description": "Notes https://www.google.com/calendar-notes"}) == (
+        "https://www.google.com/calendar-notes",
+    )
+
+
+def test_malformed_event_url_does_not_hide_later_links() -> None:
+    assert _event_links(
+        {
+            "description": "Bad https://[invalid; notes https://docs.example/brief",
+            "conferenceData": {"entryPoints": [{"uri": "https://[invalid"}, {"uri": "https://meet.google.com/abc-defg-hij"}]},
+        }
+    ) == ("https://[invalid", "https://docs.example/brief", "https://meet.google.com/abc-defg-hij")
+
+
 def test_render_agenda_marks_events_crossing_the_day_boundary() -> None:
     timezone = ZoneInfo("America/Montreal")
     day = date(2026, 7, 9)

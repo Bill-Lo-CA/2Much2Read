@@ -74,10 +74,13 @@ def in_zone(event: CalendarEvent, timezone: ZoneInfo) -> CalendarEvent:
 
 def _calendar_page(url: str) -> bool:
     """Whether the URL opens the event in Google Calendar, rather than being where it takes place."""
-    parts = urlsplit(url)
-    hostname = (parts.hostname or "").casefold()
+    try:
+        parts = urlsplit(url)
+        hostname = (parts.hostname or "").casefold()
+    except ValueError:
+        return False
     return hostname == "calendar.google.com" or (
-        hostname in {"google.com", "www.google.com"} and parts.path.startswith("/calendar")
+        hostname in {"google.com", "www.google.com"} and (parts.path == "/calendar" or parts.path.startswith("/calendar/"))
     )
 
 
