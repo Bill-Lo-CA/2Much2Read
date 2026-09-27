@@ -43,15 +43,7 @@ from .digest import (
 from .gmail import GmailClient, credentials, message_headers
 from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
 from .mime import MAX_ANALYSIS_CHARS, EmailExtractionError, extract_gmail_payload
-from .ollama import (
-    REVIEW_RESERVED_OUTPUT_TOKENS,
-    REVIEW_RESERVED_TOKENS_PER_SELECTION,
-    OllamaClient,
-    OllamaContextError,
-    OllamaSchemaError,
-    close_ollama_client,
-    create_ollama_client,
-)
+from .ollama import OllamaClient, OllamaContextError, OllamaSchemaError, close_ollama_client, create_ollama_client
 from .reranker import RelevanceReranker
 from .schemas import ArticleAnalysis, DigestItem, DigestReview, ExtractedEmailContent, ItemDeepening, ResolvedContent
 from .storage import Database
@@ -125,6 +117,7 @@ class ReviewsDigest(Protocol):
         maximum: int,
         reserved_category: str = "",
         reserved: int = 0,
+        refill: int = 0,
     ) -> DigestReview: ...
 
 
@@ -210,22 +203,9 @@ def _review_candidates(ranked: list[DigestEntry], limit: int, security_slots: in
 
 
 # Picks past the headline limit, so a slot the per-source cap frees goes to the reviewer's next choice
-# rather than staying empty. Beyond the limit they are ordinary mentions.
+# rather than staying empty. Beyond the limit they are ordinary mentions. The reviewer asks for fewer,
+# or none, when they would cost it a candidate; see OllamaClient.review_digest.
 REVIEW_REFILL_PICKS = 5
-
-
-def _review_picks(settings: Settings) -> int:
-    """How many picks to ask the reviewer for: the headline quota, and refill picks while they fit.
-
-    Every pick reserves room for its answer in the prompt, and a refill pick is a nicety. On a small
-    OLLAMA_NUM_CTX five of them would leave the candidates no room at all - the reviewer would see
-    none and choose nothing - so they are asked for only while the answers stay within half the
-    window: all five at the default 16384, none at 2048.
-    """
-    if not settings.digest_headlines_per_source:
-        return settings.digest_max_items
-    room = (settings.ollama_num_ctx // 2 - REVIEW_RESERVED_OUTPUT_TOKENS) // REVIEW_RESERVED_TOKENS_PER_SELECTION
-    return settings.digest_max_items + max(0, min(REVIEW_REFILL_PICKS, room - settings.digest_max_items))
 
 
 def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[DigestEntry]) -> list[DigestEntry]:
@@ -262,7 +242,11 @@ def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[Di
     # The reviewer is released by the caller, once merging and the headline rewrite have also
     # finished with it: both run on this model, and nothing else loads in between.
     review = ollama.review_digest(
-        candidates, _review_picks(settings), RESERVED_CATEGORY, settings.digest_security_candidate_slots
+        candidates,
+        settings.digest_max_items,
+        RESERVED_CATEGORY,
+        settings.digest_security_candidate_slots,
+        REVIEW_REFILL_PICKS if settings.digest_headlines_per_source else 0,
     )
     scores = {selection.candidate_id: selection.score for selection in review.selected}
     selected = [replace(entry, review_score=scores[entry.candidate_id]) for entry in ranked if entry.candidate_id in scores]

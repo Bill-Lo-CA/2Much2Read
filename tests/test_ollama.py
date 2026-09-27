@@ -184,6 +184,30 @@ def test_review_candidates_are_trimmed_to_fit_num_ctx() -> None:
     assert [candidate["candidate_id"] for candidate in fitted] == list(range(1, len(fitted) + 1))
 
 
+@pytest.mark.parametrize(
+    ("count", "characters", "num_ctx", "maximum"),
+    [
+        # Long summaries fill a small prompt: any refill pick would crowd out a candidate, so none is asked.
+        (40, 200, 4096, 5),
+        # Everything fits: the refill is bounded only by the candidates left beyond the quota.
+        (8, 5, 16384, 8),
+        (20, 5, 16384, 10),
+    ],
+)
+@respx.mock
+def test_refill_picks_never_cost_the_reviewer_a_candidate(count: int, characters: int, num_ctx: int, maximum: int) -> None:
+    candidates = [review_candidate(index, characters) for index in range(1, count + 1)]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_chat({"selected": []}))
+
+    OllamaClient(num_ctx=num_ctx).review_digest(candidates, 5, refill=5)
+
+    prompt = json.loads(route.calls[0].request.content)["messages"][1]["content"]
+    sent = json.loads(prompt.split("<digest_candidates>\n", 1)[1].split("\n</digest_candidates>", 1)[0])
+    schema = ollama._ollama_schema(DigestReview.model_json_schema())
+    assert sent == ollama.fitted_review_candidates(candidates, schema, 5, num_ctx)
+    assert f"maximum_selected={maximum}\n" in prompt
+
+
 def test_review_candidates_are_kept_whole_when_they_fit() -> None:
     schema = ollama._ollama_schema(DigestReview.model_json_schema())
     candidates = [review_candidate(index, 5) for index in range(1, 6)]

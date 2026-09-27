@@ -816,9 +816,24 @@ class OllamaClient:
         maximum: int,
         reserved_category: str = "",
         reserved: int = 0,
+        refill: int = 0,
     ) -> DigestReview:
+        """Ask the reviewer for up to maximum picks, and up to refill more while they cost nothing.
+
+        Every pick reserves room for its answer, so a refill pick can crowd a candidate out of the
+        prompt: on a small OLLAMA_NUM_CTX, or beside long summaries, one the headline quota alone
+        would have kept. The refill is only a spare, so it shrinks until the fitted candidates are
+        exactly those the quota alone gets, and never exceeds the candidates left to pick.
+        """
         schema = _ollama_schema(DigestReview.model_json_schema())
-        candidates = fitted_review_candidates(candidates, schema, maximum, self.num_ctx, reserved_category, reserved)
+        fitted = fitted_review_candidates(candidates, schema, maximum, self.num_ctx, reserved_category, reserved)
+        extra = min(refill, max(0, len(fitted) - maximum))
+        while (
+            extra
+            and fitted_review_candidates(candidates, schema, maximum + extra, self.num_ctx, reserved_category, reserved) != fitted
+        ):
+            extra -= 1
+        candidates, maximum = fitted, maximum + extra
         prompt = _review_prompt(candidates, schema, maximum)
         response = self._client.post(
             f"{self.base_url}/api/chat",
