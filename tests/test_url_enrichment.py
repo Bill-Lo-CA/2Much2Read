@@ -143,6 +143,8 @@ def test_a_link_too_long_to_store_is_left_out_rather_than_failing_the_email() ->
         ("https://info.example/e3t/token", "https://info.example/e3t/token", None),
         ("https://example.com/post", "https://info.example/e3t/token", "https://example.com/post"),
         ("https://example.com/post?utm_source=x", "https://example.com/post-canonical", "https://example.com/post-canonical"),
+        # An unsubscribe page, as a resolution cached before the resolver refused them may hold.
+        ("https://app.alphasignal.ai/unsubscribe/u/abc?cid=1", None, None),
     ],
 )
 def test_the_link_shown_is_judged_after_its_tags_are_removed(final: str, canonical: str | None, shown: str | None) -> None:

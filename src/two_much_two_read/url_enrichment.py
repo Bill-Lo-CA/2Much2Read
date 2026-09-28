@@ -9,7 +9,7 @@ from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import HttpUrl, ValidationError
 
-from .article_fetcher import ArticleFetcher, ResolvedUrl, UrlResolutionError
+from .article_fetcher import ArticleFetcher, ResolvedUrl, UrlResolutionError, unsubscribe_url
 from .digest import canonical_url
 from .schemas import HTTP_URL, DigestItem, ItemAnalysis, LinkCandidate, NewsletterItemAnalysis
 
@@ -90,8 +90,11 @@ def shown_url(resolved: ResolvedUrl) -> str | None:
     The page's name for itself first, then where the chain ended, each without campaign tags or the
     reader's identity. The tracker test runs on that cleaned link, not the raw one: Mailchimp tags
     the article's own address with mc_cid, which says nothing about the page, while a click page
-    that names itself as its canonical is still a click page.
+    that names itself as its canonical is still a click page. An unsubscribe page is never shown,
+    including one a cached resolution reached before the resolver refused them.
     """
+    if any(url and unsubscribe_url(url) for url in (resolved.canonical_url, resolved.final_url)):
+        return None
     for candidate in (resolved.canonical_url, resolved.final_url):
         shown = canonical_url(candidate)
         if shown is not None and not _tracking_url(shown):

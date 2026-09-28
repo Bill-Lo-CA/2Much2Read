@@ -13,7 +13,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from urllib import robotparser
-from urllib.parse import urljoin, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
@@ -50,9 +50,33 @@ HUBSPOT_NEXT_HOP_PATH = r"/events/public/v1/encoded/track/tc/[^\s\"'<>\\]+"
 # A refresh this soon is the page redirecting; a longer one is a page reloading itself.
 MAX_META_REFRESH_SECONDS = 10
 META_REFRESH = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[;,]\s*url\s*=\s*['\"]?([^'\"\s]+)", re.IGNORECASE)
+# How an unsubscribe link names itself. "unsub" is matched anywhere - unsubscribe, unsub/ - except
+# inside a longer word such as "unsubtle"; the opt-out spellings only as a whole word, since an
+# article's slug is as likely to be about opting out as the link is to do it.
+UNSUBSCRIBE_WORD = re.compile(r"unsub(?:scri|(?![a-z]))")
+UNSUBSCRIBE_TOKENS = frozenset({"optout", "opt-out", "opt_out", "disable_email"})
 _DNS_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="article-dns")
 
 logger = logging.getLogger(__name__)
+
+
+def unsubscribe_url(url: str) -> bool:
+    """Whether opening the URL may unsubscribe the reader, going by the words its address uses.
+
+    An unsubscribe link does its work when it is opened, and resolving a link opens it. AlphaSignal
+    ends an issue with "Stop receiving emails here:" and a one-click /unsubscribe/ link carrying the
+    subscriber's id; the extractor gave that link to a story, the resolver opened it, and the digest
+    showed it. The host, the path and the query are all read, so a tracker's encoded destination
+    counts too.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+    except ValueError:
+        return False
+    query = [value for pair in parse_qsl(parts.query, keep_blank_values=True) for value in pair]
+    text = " ".join([host, unquote(parts.path), *query]).casefold()
+    return bool(UNSUBSCRIBE_WORD.search(text)) or not UNSUBSCRIBE_TOKENS.isdisjoint(re.split(r"[^a-z0-9_-]+", text))
 
 
 class ArticleFetchError(ValueError):
@@ -288,6 +312,10 @@ class ArticleFetcher:
         if parsed.username is not None or parsed.password is not None:
             raise ArticleFetchError(code)
         if port not in {None, 80, 443}:
+            raise ArticleFetchError(code)
+        # Before any request, and for every hop: a tracker's link reaches the unsubscribe page only
+        # by redirect.
+        if unsubscribe_url(value):
             raise ArticleFetchError(code)
         hostname = parsed.hostname.rstrip(".").lower()
         if not hostname or hostname == "localhost":
