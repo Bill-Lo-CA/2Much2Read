@@ -92,20 +92,55 @@ def test_urls_move_below_the_table_without_metadata_links() -> None:
     assert render_reminder(ReminderCandidate(event, "default-5m", "5m", start), MONTREAL).endswith(f"```\n{links}")
 
 
-def test_calendar_event_links_include_event_meeting_and_description_urls() -> None:
+def test_calendar_event_links_include_meeting_and_description_urls_but_not_the_calendar_page() -> None:
+    # The event's own page in Google Calendar, and the invitation's "view your event" links, open
+    # what the reader is already looking at.
     assert _event_links(
         {
-            "htmlLink": "https://calendar.example/event",
+            "htmlLink": "https://www.google.com/calendar/event?eid=abc",
             "hangoutLink": "https://meet.google.com/abc-defg-hij",
-            "description": "Notes: https://docs.example/brief.",
+            "description": (
+                "Notes: https://docs.example/brief.\n"
+                "View your event at https://calendar.google.com/calendar/event?action=VIEW&eid=abc\n"
+                "Or https://www.google.com/calendar/event?eid=abc and https://parkrun.example/kanata"
+            ),
             "conferenceData": {"entryPoints": [{"uri": "https://zoom.example/join"}]},
         }
     ) == (
-        "https://calendar.example/event",
         "https://meet.google.com/abc-defg-hij",
         "https://docs.example/brief",
+        "https://parkrun.example/kanata",
         "https://zoom.example/join",
     )
+
+
+def test_calendar_pages_of_other_events_and_calendars_are_left_out_too() -> None:
+    # The reader wants where to go, not a calendar: a link to another event or a shared calendar
+    # is still a calendar page.
+    assert _event_links(
+        {
+            "description": (
+                "Agenda https://calendar.google.com/calendar/event?eid=other and "
+                "https://calendar.google.com/calendar/embed?src=club%40example.org "
+                "at https://maps.example/hall"
+            )
+        }
+    ) == ("https://maps.example/hall",)
+
+
+def test_google_path_that_only_starts_with_calendar_remains_a_link() -> None:
+    assert _event_links({"description": "Notes https://www.google.com/calendar-notes"}) == (
+        "https://www.google.com/calendar-notes",
+    )
+
+
+def test_malformed_event_url_does_not_hide_later_links() -> None:
+    assert _event_links(
+        {
+            "description": "Bad https://[invalid; notes https://docs.example/brief",
+            "conferenceData": {"entryPoints": [{"uri": "https://[invalid"}, {"uri": "https://meet.google.com/abc-defg-hij"}]},
+        }
+    ) == ("https://[invalid", "https://docs.example/brief", "https://meet.google.com/abc-defg-hij")
 
 
 def test_render_agenda_marks_events_crossing_the_day_boundary() -> None:
@@ -276,7 +311,7 @@ def test_render_agenda_chunks_at_discord_limit() -> None:
 def test_the_meet_link_the_adapter_collected_reaches_the_reminder() -> None:
     """CalendarEvent.links was populated and never read.
 
-    google_calendar._event_links already gathers the Meet, Zoom, htmlLink and description URLs, but
+    google_calendar._event_links already gathers the Meet, Zoom and description URLs, but
     the renderer's own link scan looked only at the title, calendar name, and location - so a
     meeting's join link reached the reader only if someone had also typed it into a displayed field.
     """
