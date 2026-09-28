@@ -73,7 +73,7 @@ def in_zone(event: CalendarEvent, timezone: ZoneInfo) -> CalendarEvent:
 
 
 def _calendar_page(url: str) -> bool:
-    """Whether the URL opens the event in Google Calendar, rather than being where it takes place."""
+    """Whether the URL opens a page of Google Calendar, rather than a place an event happens."""
     try:
         parts = urlsplit(url)
         hostname = (parts.hostname or "").casefold()
@@ -87,9 +87,10 @@ def _calendar_page(url: str) -> bool:
 def _event_links(item: dict[str, Any]) -> tuple[str, ...]:
     """The links to where the event happens: its meeting, and what its description points to.
 
-    Not its page in Google Calendar - the event's own htmlLink, or the "view your event" link an
-    invitation writes into the description. The reader is already looking at the event; 93 of the
-    155 links sent before this were that page, crowding out the map, Zoom and event pages.
+    No page of Google Calendar: not the event's own htmlLink, the "view your event" link an
+    invitation writes into the description, nor one to another event or calendar. The reader is
+    already looking at the calendar and wants where to go; 93 of the 155 links sent before this were
+    calendar pages, crowding out the map, Zoom and event pages.
     """
     conference = item.get("conferenceData") or {}
     values = [item.get("hangoutLink"), item.get("description")]

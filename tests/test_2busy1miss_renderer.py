@@ -114,6 +114,20 @@ def test_calendar_event_links_include_meeting_and_description_urls_but_not_the_c
     )
 
 
+def test_calendar_pages_of_other_events_and_calendars_are_left_out_too() -> None:
+    # The reader wants where to go, not a calendar: a link to another event or a shared calendar
+    # is still a calendar page.
+    assert _event_links(
+        {
+            "description": (
+                "Agenda https://calendar.google.com/calendar/event?eid=other and "
+                "https://calendar.google.com/calendar/embed?src=club%40example.org "
+                "at https://maps.example/hall"
+            )
+        }
+    ) == ("https://maps.example/hall",)
+
+
 def test_google_path_that_only_starts_with_calendar_remains_a_link() -> None:
     assert _event_links({"description": "Notes https://www.google.com/calendar-notes"}) == (
         "https://www.google.com/calendar-notes",
