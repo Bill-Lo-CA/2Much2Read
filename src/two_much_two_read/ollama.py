@@ -124,6 +124,11 @@ TITLE_TRANSLATION_NUM_CTX = 2048
 YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 # A figure as a whole token: 5.5 is not found in 15.5, nor 26 in 260.
 FIGURE = re.compile(r"\d+(?:[.,]\d+)*")
+# A single digit that versions a name - GPT-5, Opus 5, Q3 - which a translation must keep as it is.
+VERSION_DIGIT = re.compile(r"(?:[A-Za-z]-?|[A-Z][A-Za-z]*\s)(\d)(?![\d.,])")
+# A month named before a day ("Aug 26"), which a translation writes as its number (8 月 26 日).
+MONTH_NAME = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?(?=\s*\d)", re.IGNORECASE)
+MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 # A title still outside the digest language once translation is done - the model echoed it, or
 # failed twice - gives way to the start of the summary, which has passed the language check. Telling
 # a title that is only names ("Claude Opus 5.5") from an untranslated sentence cannot be done by rule:
@@ -434,24 +439,30 @@ def _checked_title(source: str, translated: str, language: str) -> str | None:
 
     A year the source never gave is removed where it only dates a month and day: TranslateGemma wrote
     "Quick thoughts on GitHub Actions Aug 26 incident" as 2023 年 8 月 26 日, an invented fact that
-    reads as a plain one. Anywhere else it rejects the translation, as does a lost version or figure
-    (Sonnet 5.5 as 2.5 or 15.5), an ellipsis the source did not have (a headline cut short), or text still
-    outside the digest's script.
+    reads as a plain one. Anywhere else it rejects the translation, as do a changed or invented
+    figure, an ellipsis the source did not have (a headline cut short), and text still outside the
+    digest's script.
     """
-    title = translated.strip().rstrip("。.")
+    title = translated.strip()
+    # Before the closing punctuation goes, which would take a trailing "..." with it.
+    if any(mark in title and mark not in source for mark in ("...", "…")):
+        return None
+    title = title.rstrip("。.")
     given = set(YEAR.findall(source))
     for year in set(YEAR.findall(title)) - given:
         title = re.sub(rf"(?<!\d){year}\s*年\s*(?=\d{{1,2}}\s*月)", "", title)
     if set(YEAR.findall(title)) - given:
         return None
-    # Figures it must keep: a version such as 5.5, or a number of two digits or more, each as a whole
-    # token. A single digit may fairly come back as a word ("2 weeks" as 兩週), and a month name as
-    # its number. A conversion is refused with the rest ($65B written as 650 億): nothing tells it
-    # from a changed figure.
+    # Each figure compared as a whole token. The source's must survive: a version such as 5.5, a
+    # number of two digits or more, and a single digit that versions a name (GPT-5). Any other
+    # single digit may fairly come back as a word ("2 weeks" as 兩週). The translation may add none
+    # but the number of a month the source named. A conversion is refused with the rest ($65B as
+    # 650 億): nothing tells it from a changed figure.
+    source_figures = FIGURE.findall(source)
+    kept = {figure for figure in source_figures if "." in figure or len(figure) > 1} | set(VERSION_DIGIT.findall(source))
+    months = {str(MONTHS.index(name.casefold()[:3]) + 1) for name in MONTH_NAME.findall(source)}
     figures = set(FIGURE.findall(title))
-    if any(figure not in figures for figure in FIGURE.findall(source) if "." in figure or len(figure) > 1):
-        return None
-    if any(mark in title and mark not in source for mark in ("...", "…")):
+    if kept - figures or figures - set(source_figures) - months:
         return None
     if not title or _wrong_script(title, digest_language_code(language)):
         return None
@@ -668,7 +679,10 @@ class OllamaClient:
             for _ in range(TRANSLATE_ATTEMPTS):
                 answer = self._translated_items(source_id, {index: result.items[index]}).get(index)
                 if answer is not None and not outside(answer):
-                    translated[index] = answer
+                    # The fields only. This translation's title is of the extractor's title, which
+                    # may carry the extractor's mistake; the headline is translated below from the
+                    # newsletter's own words, if it needs to be.
+                    translated[index] = answer.model_copy(update={"title": result.items[index].title})
                     break
         kept: list[NewsletterItemAnalysis] = []
         for index, item in enumerate(result.items):

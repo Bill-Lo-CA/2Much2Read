@@ -862,6 +862,37 @@ def test_the_translation_is_of_the_verbatim_headline_not_the_extractors_title() 
     assert json.loads(route.calls[1].request.content)["messages"][0]["content"].endswith("\n\n\nClaude Sonnet 5.5 ships")
 
 
+@respx.mock
+def test_a_title_translated_with_its_fields_is_still_translated_from_the_verbatim_headline() -> None:
+    # The summary was English, so the whole item went to the field translator, which translated the
+    # extractor's wrong 2.5 faithfully. Only its fields are kept; the headline comes from 5.5.
+    answer = _items_result(GOOD, ("Claude Sonnet 2.5 ships", "Anthropic shipped a new model.", "It is cheaper."))
+    answer["items"][1]["source_title"] = "Claude Sonnet 5.5 ships"  # type: ignore[index]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[
+            _chat(answer),
+            _chat(
+                {
+                    "items": [
+                        {
+                            "index": 1,
+                            "title": "Claude Sonnet 2.5 上線",
+                            "summary": "Anthropic 推出新模型。",
+                            "why_it_matters": "價格更低。",
+                        }
+                    ]
+                }
+            ),
+            _translation("Claude Sonnet 5.5 上線"),
+        ]
+    )
+
+    result = OllamaClient().extract("tldr-ai", "News")
+
+    assert (result.items[1].title, result.items[1].summary_zh_tw) == ("Claude Sonnet 5.5 上線", "Anthropic 推出新模型。")
+    assert json.loads(route.calls[2].request.content)["messages"][0]["content"].endswith("\n\n\nClaude Sonnet 5.5 ships")
+
+
 @pytest.mark.parametrize(
     "translation",
     ["詳見 https://evil.example/ 的說明", "很長的標題" * 50],
@@ -899,6 +930,13 @@ def test_a_translation_the_schema_refuses_takes_the_summarys_lead(translation: s
         ("Anthropic launches Claude Sonnet 5.5", "Anthropic 推出 Claude Sonnet 2.5", None),
         # A figure is a whole token: 5.5 is not in 15.5.
         ("Anthropic launches Claude Sonnet 5.5", "Anthropic 推出 Claude Sonnet 15.5", None),
+        # A single digit that versions a name is kept as it is; another may become a word.
+        ("OpenAI ships GPT-5 to everyone", "OpenAI 向所有人推出 GPT-6", None),
+        ("Anthropic ships Opus 5 in 2 weeks", "Anthropic 將在兩週內推出 Opus 5", "Anthropic 將在兩週內推出 Opus 5"),
+        # A figure the source never gave is refused, but for the number of a month it named.
+        ("A new open model is released", "新的 70B 開源模型發布", None),
+        # A cut-off title ends in dots that closing punctuation must not take away first.
+        ("Anthropic launches a new Claude model", "Anthropic 推出新的 Claude...", None),
         # A conversion cannot be told from a changed figure, so it is refused too.
         ("Revenue crossed $65B ARR", "年收入超過 650 億美元", None),
         ("Anthropic launches Claude Sonnet 5.5 with near-Opus performance", "Anthropic 推出 Claude Sonnet ...", None),
