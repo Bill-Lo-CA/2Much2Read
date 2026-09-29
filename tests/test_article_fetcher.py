@@ -148,6 +148,9 @@ def test_a_listed_address_is_matched_in_any_spelling_of_its_default_port() -> No
     assert requests == ["/c/1"]
     assert unsubscribe_url("http://publisher.example:80/us", {"http://publisher.example/us"})
     assert not unsubscribe_url("https://publisher.example:8443/us", {"https://publisher.example/us"})
+    # An empty path is requested as /.
+    assert unsubscribe_url("https://publisher.example/?uid=abc", {"https://publisher.example?uid=abc"})
+    assert unsubscribe_url("https://publisher.example?uid=abc", {"https://publisher.example/?uid=abc"})
 
 
 def test_a_page_naming_a_listed_address_as_its_canonical_keeps_its_own_address() -> None:

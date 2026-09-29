@@ -61,7 +61,8 @@ logger = logging.getLogger(__name__)
 
 
 def _comparable(url: str) -> str:
-    """The URL as one spelling: scheme and host in lower case, a default port and any fragment left out."""
+    """The URL as one spelling: scheme and host in lower case, an empty path as /, a default port and
+    any fragment left out - the spellings a request makes the same, as _validate_url's does."""
     try:
         parts = urlsplit(url.strip())
         scheme, host, port = parts.scheme.lower(), (parts.hostname or "").lower(), parts.port
@@ -70,7 +71,8 @@ def _comparable(url: str) -> str:
     netloc = f"[{host}]" if ":" in host else host
     if port is not None and port != {"http": 80, "https": 443}.get(scheme):
         netloc = f"{netloc}:{port}"
-    return urlunsplit((scheme, netloc, parts.path, parts.query, ""))
+    path = parts.path or ("/" if scheme in {"http", "https"} else "")
+    return urlunsplit((scheme, netloc, path, parts.query, ""))
 
 
 def unsubscribe_url(url: str, listed: Collection[str] = ()) -> bool:
