@@ -1020,6 +1020,51 @@ def test_an_entry_let_in_by_a_fold_is_compared_with_those_below_it_too() -> None
     assert [value.item.title for value in merged] == ["Opus 5.5", "Grok 4.7", "Muse 2"]
 
 
+def test_a_report_matching_only_an_absorbed_one_still_folds() -> None:
+    # A and C share no name, B shares one with each. B folds into A first; C must still be compared
+    # with B, or it stays beside A as a duplicate.
+    ranked = [
+        entry(1, "Grok launch", "TLDR AI"),
+        entry(2, "Grok Colossus pricing", "AlphaSignal"),
+        entry(3, "Colossus pricing", "AINews"),
+    ]
+
+    merged = merge_before_selection(ranked, lambda entries: entries, lambda _left, _right: True)
+
+    assert [(value.candidate_id, value.also_from) for value in merged] == [(1, ("AlphaSignal", "AINews"))]
+
+
+def test_a_repeat_found_through_a_folded_report_is_kept() -> None:
+    # Only the second report matches an earlier day. It folds into the first, so it is marked before
+    # merging; the merged entry keeps the count.
+    marked: list[int | None] = []
+
+    def mark(entries: list[DigestEntry], wanted: object) -> list[DigestEntry]:
+        assert callable(wanted)
+        out = []
+        for value in entries:
+            if wanted(value) and value.candidate_id not in marked:
+                marked.append(value.candidate_id)
+                if value.candidate_id == 2:
+                    value = replace(value, previous_days=2, previous_window=3)
+            out.append(value)
+        return out
+
+    class Reviewer:
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
+            picks = [{"candidate_id": candidate["candidate_id"], "score": 90, "reason_zh_tw": "具體"} for candidate in candidates]
+            return DigestReview.model_validate({"selected": picks})
+
+        def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
+            return True
+
+    settings = Settings(digest_review_candidate_limit=2, digest_max_items=2, digest_repeat_window_days=0)
+    ranked = [entry(1, "Grok 4.7 launch", "TLDR AI"), entry(2, "Grok 4.7 pricing", "AlphaSignal")]
+    shown, _ = pipeline._selected_entries(settings, Reviewer(), ranked, mark, lambda _m: None)
+
+    assert [(value.candidate_id, value.previous_days) for value in shown] == [(1, 2)]
+
+
 def test_a_pair_is_judged_once_whichever_way_round_it_is_asked() -> None:
     asked: list[str] = []
 

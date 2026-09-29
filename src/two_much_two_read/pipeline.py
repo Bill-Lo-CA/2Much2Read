@@ -377,6 +377,12 @@ def _selected_entries(
         bare = [entry for entry in entries if not has_source_text(entry)]
         return reviewer_candidates(entries) + bare[: settings.digest_secondary_items]
 
+    # Marked before merging as well as after: a repeat found only through a report that folds into
+    # another would be lost, since the survivor's own words and link are all later marking reads.
+    # Folding keeps the larger count. The marker judges an entry once, so the second pass only
+    # reaches candidates a fold let in.
+    reviewing = {id(entry) for entry in reviewer_candidates(ranked)}
+    ranked = mark_repeats(ranked, lambda entry: id(entry) in reviewing)
     ranked = merge_before_selection(ranked, may_be_shown, same_story)
     reviewing = {id(entry) for entry in reviewer_candidates(ranked)}
     ranked = mark_repeats(ranked, lambda entry: id(entry) in reviewing)

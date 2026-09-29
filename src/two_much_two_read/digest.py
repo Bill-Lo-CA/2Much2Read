@@ -471,6 +471,10 @@ def merge_before_selection(
     """
     entries: list[DigestEntry | None] = list(ranked)
     checked: list[int] = []
+    # Every report a checked entry stands for, itself first. A merged entry's title and summary are
+    # its primary's, so B folded into A would otherwise hide B's words from C: A~B and B~C with no
+    # overlap between A and C left C beside A as a duplicate.
+    members: dict[int, list[DigestEntry]] = {}
     while True:
         shown = [index for index, value in enumerate(entries) if value is not None]
         current = [value for value in entries if value is not None]
@@ -483,16 +487,28 @@ def merge_before_selection(
             assert entry is not None
             # Against every checked entry, not only those above: an entry let in by a fold may rank
             # above some that were checked before it.
-            candidates = [(other, value) for other in checked if (value := entries[other]) is not None]
-            match = _first_match(entry, [value for _, value in candidates], same_story)
-            if match is None:
+            other = next(
+                (
+                    other
+                    for other in checked
+                    if any(share_a_candidate_token(entry, member) and same_story(entry, member) for member in members[other])
+                ),
+                None,
+            )
+            if other is None:
                 bisect.insort(checked, index)
+                members[index] = [entry]
                 continue
-            other, value = candidates[match]
-            higher, lower = (other, entry) if other < index else (index, value)
-            entries[higher] = _folded(value if higher == other else entry, lower)
-            entries[other if higher == index else index] = None
-            if higher == index:
+            kept = entries[other]
+            assert kept is not None
+            if other < index:
+                entries[other] = _folded(kept, entry)
+                entries[index] = None
+                members[other].append(entry)
+            else:
+                entries[index] = _folded(entry, kept)
+                entries[other] = None
+                members[index] = [entry, *members.pop(other)]
                 checked.remove(other)
                 bisect.insort(checked, index)
 
