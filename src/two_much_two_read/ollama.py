@@ -100,6 +100,14 @@ Return exactly schema-conforming JSON and no reasoning or commentary."""
 # covers most of the rest. The larger review model managed batches, but loading it between emails
 # would swap models on every one.
 TRANSLATE_ATTEMPTS = 2
+# A newsletter that sends one piece an issue - SemiAnalysis's teardowns, Latent Space's interviews -
+# was cut into items by its sections: Intel's Panther Lake teardown became six digest lines on
+# 2026-09-27, and one OpenRouter interview six on 09-26. Such a source is given max_items_per_email: 1,
+# and one item must then stand for the piece, not for whichever section came first.
+ONE_PIECE_INSTRUCTION = (
+    "Treat this issue as one piece: return exactly one item covering it as a whole. Its source_title is the "
+    "issue's own headline, and its summary and why-it-matters describe the whole piece, not one of its sections.\n"
+)
 # A title still outside the digest language once translation is done - the model echoed it, or
 # failed twice - gives way to the start of the summary, which has passed the language check. Telling
 # a title that is only names ("Claude Opus 5.5") from an untranslated sentence cannot be done by rule:
@@ -517,7 +525,8 @@ class OllamaClient:
         def prompt_for(text: str, cut: bool) -> str:
             return (
                 f"source_id={source_id}\ntruncated_input={str(cut).lower()}\nmax_items={max_items}\n"
-                f"Schema: {json.dumps(schema)}\n<newsletter_content>\n{text}\n</newsletter_content>"
+                + (ONE_PIECE_INSTRUCTION if max_items == 1 else "")
+                + f"Schema: {json.dumps(schema)}\n<newsletter_content>\n{text}\n</newsletter_content>"
             )
 
         overhead = _estimated_tokens(system) + _estimated_tokens(prompt_for("", True))

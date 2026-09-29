@@ -838,6 +838,18 @@ def test_a_title_whose_translation_fails_twice_never_reaches_the_digest() -> Non
     assert route.call_count == 3
 
 
+@pytest.mark.parametrize(("max_items", "one_piece"), [(1, True), (10, False)])
+@respx.mock
+def test_a_cap_of_one_asks_for_the_whole_piece_rather_than_its_first_section(max_items: int, one_piece: bool) -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_chat(_items_result(GOOD)))
+
+    OllamaClient().extract("semianalysis", "Intel Panther Lake Teardown", max_items=max_items)
+
+    request = json.loads(route.calls[0].request.content)["messages"][1]["content"]
+    assert ("return exactly one item covering it as a whole" in request) is one_piece
+    assert request.index("max_items=") < request.index("Schema:")
+
+
 @pytest.mark.parametrize(
     ("summary", "title"),
     [

@@ -280,6 +280,11 @@ wholly that script: run over correct Traditional text, they turn 機制作為 in
 text, and nothing else. Detection had needed volume it did not have - 11% of real Traditional
 titles read as Simplified, some with no character that differs at all.
 
+A newsletter that sends one piece an issue - an article, essay, interview, or podcast episode - is
+given `max_items_per_email: 1` in `sources.yaml`. The extractor otherwise cuts such a piece into items
+by its sections: one Intel teardown became six digest lines, one interview six more. With a cap of
+one it is told to return a single item for the whole piece, headed by the issue's own headline.
+
 A title still outside the digest language after translation - echoed back, or failed twice - is
 replaced by the summary's lead, up to the last clause mark within 40 characters. No rule tells a
 title that is only names from an untranslated sentence (ALL-CAPS and Title Case sentences look like
