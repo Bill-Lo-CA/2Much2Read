@@ -132,6 +132,7 @@ class Settings(BaseSettings):
     ollama_trust_env: bool = False
     ollama_model: str = "llama3.2:3b"
     ollama_review_model: str = "qwen3:8b"
+    ollama_translate_model: str = "translategemma:4b"
     ollama_num_ctx: int = Field(default=16384, ge=2048)
     ollama_timeout_seconds: float = Field(default=300, gt=0)
     ollama_keep_alive: str = "10m"

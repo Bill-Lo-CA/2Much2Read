@@ -12,6 +12,7 @@ from two_much_two_read.ollama import (
     OllamaClient,
     OllamaContextError,
     OllamaSchemaError,
+    _checked_title,
     _in_script,
     _language_instruction,
     _ollama_schema,
@@ -47,7 +48,7 @@ def valid_result() -> dict[str, object]:
 
 def valid_article_result() -> dict[str, object]:
     return {
-        "title": "Model release",
+        "title": "模型發布",
         "category": "AI_MODEL",
         "summary_zh_tw": "文章發布新模型。",
         "why_it_matters_zh_tw": "可改善團隊工作流程。",
@@ -798,17 +799,19 @@ def test_an_item_that_stays_outside_the_language_is_dropped_alone(answer: httpx.
     assert route.call_count == 3
 
 
+def _translation(text: str) -> httpx.Response:
+    return httpx.Response(200, json={"message": {"content": text}})
+
+
 @respx.mock
-def test_a_title_is_translated_and_one_left_untranslated_takes_the_summarys_lead() -> None:
+def test_a_title_is_translated_by_the_translator_and_one_left_untranslated_takes_the_summarys_lead() -> None:
     # "Claude Opus 5.5" is only names, but no rule tells that from an ALL-CAPS sentence; the lead of
     # the summary, which is in the digest language, stands in for both.
-    respx.post("http://127.0.0.1:11434/api/chat").mock(
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
         side_effect=[
             _chat(_items_result(("Viggle ships turbo image model", *GOOD[1:]), ("Claude Opus 5.5", *GOOD[1:]))),
-            _chat(
-                {"items": [{"index": 0, "title": "Viggle 推出 Turbo 影像模型", "summary": GOOD[1], "why_it_matters": GOOD[2]}]}
-            ),
-            _chat({"items": [{"index": 1, "title": "Claude Opus 5.5 release", "summary": GOOD[1], "why_it_matters": GOOD[2]}]}),
+            _translation("Viggle 推出 Turbo 影像模型。"),
+            _translation("Claude Opus 5.5"),
         ]
     )
 
@@ -816,10 +819,15 @@ def test_a_title_is_translated_and_one_left_untranslated_takes_the_summarys_lead
 
     assert [item.title for item in result.items] == ["Viggle 推出 Turbo 影像模型", "發布新模型"]
     assert result.dropped_for_language == 0
+    request = json.loads(route.calls[1].request.content)
+    assert request["model"] == "translategemma:4b" and "format" not in request
+    prompt = request["messages"][0]["content"]
+    assert "English (en) to Traditional Chinese (zh-Hant-TW)" in prompt
+    assert prompt.endswith("Traditional Chinese:\n\n\nViggle ships turbo image model")
 
 
 @respx.mock
-def test_a_title_whose_translation_fails_twice_never_reaches_the_digest() -> None:
+def test_a_title_whose_translation_fails_never_reaches_the_digest() -> None:
     # The summary and significance are Chinese, so the item stays; its English sentence of a title
     # used to stay with it.
     english_title = (
@@ -828,14 +836,43 @@ def test_a_title_whose_translation_fails_twice_never_reaches_the_digest() -> Non
         "縮短啟動時間。",
     )
     route = respx.post("http://127.0.0.1:11434/api/chat").mock(
-        side_effect=[_chat(_items_result(GOOD, english_title)), httpx.Response(500), _chat("not the schema")]
+        side_effect=[_chat(_items_result(GOOD, english_title)), httpx.Response(500)]
     )
 
     result = OllamaClient().extract("tldr-devops", "News")
 
     assert [item.title for item in result.items] == ["模型發布", "GKE 新增 Pod 快照，可在需要時還原工作負載"]
     assert result.items[1].source_title == "Google Kubernetes Engine adds Pod snapshots"
-    assert route.call_count == 3
+    assert route.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("source", "translated", "kept"),
+    [
+        (
+            "Anthropic launches Claude Sonnet 5.5 at half the price",
+            "Anthropic 推出 Claude Sonnet 5.5，價格減半。",
+            "Anthropic 推出 Claude Sonnet 5.5，價格減半",
+        ),
+        # A year the source never gave, dating a month and day, is taken out; the rest is sound.
+        (
+            "Quick thoughts on GitHub Actions Aug 26 incident",
+            "關於 2023 年 8 月 26 日 GitHub Actions 事件的看法",
+            "關於 8 月 26 日 GitHub Actions 事件的看法",
+        ),
+        ("TNS Episode - Sep 25 2026", "TNS 節目 - 2026年9月25日", "TNS 節目 - 2026年9月25日"),
+        ("Revenue crossed $65B ARR", "年收入超過 650 億美元", "年收入超過 650 億美元"),
+        # Anything else it cannot vouch for is refused.
+        ("Anthropic launches Claude Sonnet 5.5", "Anthropic 推出 Claude Sonnet 2.5", None),
+        ("Anthropic launches Claude Sonnet 5.5 with near-Opus performance", "Anthropic 推出 Claude Sonnet ...", None),
+        ("GitHub Actions incident review", "2023 年 GitHub Actions 事件回顧", None),
+        ("OpenAI blocked its agent's web access", "OpenAI blocked its agent's web access", None),
+    ],
+)
+def test_a_translated_title_is_kept_only_when_it_says_what_the_source_does(
+    source: str, translated: str, kept: str | None
+) -> None:
+    assert _checked_title(source, translated, "zh-TW") == kept
 
 
 @pytest.mark.parametrize(
@@ -856,16 +893,26 @@ def test_the_fallback_title_is_the_summarys_lead_up_to_a_clause_mark(summary: st
     assert _title_from_summary(summary) == title
 
 
+@pytest.mark.parametrize(
+    ("translation", "title"),
+    [
+        (_translation("Pod 快照登陸 GKE"), "Pod 快照登陸 GKE"),
+        (_translation("Pod snapshots arrive in GKE"), "GKE 新增 Pod 快照，可還原"),
+    ],
+    ids=["translated", "untranslated"],
+)
 @respx.mock
-def test_an_article_analysis_title_outside_the_language_takes_the_summarys_lead() -> None:
+def test_an_article_analysis_title_outside_the_language_is_translated_or_takes_the_summarys_lead(
+    translation: httpx.Response, title: str
+) -> None:
     answer = {**valid_article_result(), "title": "Pod snapshots arrive in GKE", "summary_zh_tw": "GKE 新增 Pod 快照，可還原。"}
-    respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_chat(answer))
+    respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_chat(answer), translation])
 
     result = OllamaClient().analyze_article(
         "hn-best", 1, "Pod snapshots arrive in GKE", 1, 1, "2026-07-24T00:00:00+00:00", "article", "x"
     )
 
-    assert result.title == "GKE 新增 Pod 快照，可還原"
+    assert result.title == title
 
 
 @respx.mock

@@ -100,6 +100,31 @@ Return exactly schema-conforming JSON and no reasoning or commentary."""
 # covers most of the rest. The larger review model managed batches, but loading it between emails
 # would swap models on every one.
 TRANSLATE_ATTEMPTS = 2
+# A headline is translated by a model made for it. The extractor, qwen3:4b, left the English
+# headline as it was in every item of the emails traced on 2026-09-29, and the same model then
+# translating it, asked for JSON, left 16 of 34 in English, cut one to "Claude Sonnet ..." with
+# "（需完整翻譯）" appended, turned Sonnet 5.5 into Sonnet 2.5 on a second run, and filled three with
+# details from the summary. TranslateGemma 4B, given the same 34, left only the two that are names
+# alone. This is its own prompt, which it was trained on; the two blank lines before the text are
+# part of it (https://ollama.com/library/translategemma).
+TITLE_TRANSLATION_PROMPT = (
+    "You are a professional {source} ({source_code}) to {target} ({target_code}) translator. Your goal is to "
+    "accurately convey the meaning and nuances of the original {source} text while adhering to {target} grammar, "
+    "vocabulary, and cultural sensitivities. Produce only the {target} translation, without any additional "
+    "explanations or commentary. Please translate the following {source} text into {target}:\n\n\n{text}"
+)
+TRANSLATION_LANGUAGES = {
+    "zh-tw": ("Traditional Chinese", "zh-Hant-TW"),
+    "zh-cn": ("Simplified Chinese", "zh-Hans-CN"),
+    "en": ("English", "en"),
+}
+# A headline is short; the translator needs no more room than this, and a small window keeps it
+# small beside the extractor.
+TITLE_TRANSLATION_NUM_CTX = 2048
+YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
+# Figures a translation must keep: a version such as 5.5, or a number of two digits or more. A single
+# digit may fairly come back as a word ("2 weeks" as 兩週), and a month name as its number.
+KEPT_FIGURE = re.compile(r"\d+\.\d+|\d{2,}")
 # A title still outside the digest language once translation is done - the model echoed it, or
 # failed twice - gives way to the start of the summary, which has passed the language check. Telling
 # a title that is only names ("Claude Opus 5.5") from an untranslated sentence cannot be done by rule:
@@ -405,6 +430,30 @@ def _title_from_summary(summary: str) -> str:
     return cut.rstrip() + "…"
 
 
+def _checked_title(source: str, translated: str, language: str) -> str | None:
+    """The translated headline, or None when it cannot be trusted to say what the source does.
+
+    A year the source never gave is removed where it only dates a month and day: TranslateGemma wrote
+    "Quick thoughts on GitHub Actions Aug 26 incident" as 2023 年 8 月 26 日, an invented fact that
+    reads as a plain one. Anywhere else it rejects the translation, as does a lost version or figure
+    (Sonnet 5.5 as 2.5), an ellipsis the source did not have (a headline cut short), or text still
+    outside the digest's script.
+    """
+    title = translated.strip().rstrip("。.")
+    given = set(YEAR.findall(source))
+    for year in set(YEAR.findall(title)) - given:
+        title = re.sub(rf"(?<!\d){year}\s*年\s*(?=\d{{1,2}}\s*月)", "", title)
+    if set(YEAR.findall(title)) - given:
+        return None
+    if any(figure not in title for figure in KEPT_FIGURE.findall(source)):
+        return None
+    if any(mark in title and mark not in source for mark in ("...", "…")):
+        return None
+    if not title or _wrong_script(title, digest_language_code(language)):
+        return None
+    return title
+
+
 def _titled(item: ScriptedModel, language: str) -> ScriptedModel:
     """The item, its title replaced by the summary's lead when the title is outside the language."""
     title, summary = getattr(item, "title", None), getattr(item, "summary_zh_tw", None)
@@ -480,6 +529,7 @@ class OllamaClient:
         digest_language: str = "zh-TW",
         review_model: str = "qwen3:8b",
         *,
+        translate_model: str = "translategemma:4b",
         allow_remote: bool = False,
         trust_env: bool = False,
     ) -> None:
@@ -491,6 +541,7 @@ class OllamaClient:
         self.keep_alive = keep_alive
         self.digest_language = digest_language
         self.review_model = review_model
+        self.translate_model = translate_model
         self._client = httpx.Client(timeout=timeout, trust_env=trust_env)
 
     def close(self) -> None:
@@ -605,8 +656,8 @@ class OllamaClient:
         """
         expected = digest_language_code(self.digest_language)
         outside = self._outside_language
-        pending = [index for index, item in enumerate(result.items) if _wrong_script(item.title, expected) or outside(item)]
-        if not pending:
+        pending = [index for index, item in enumerate(result.items) if outside(item)]
+        if not pending and not any(_wrong_script(item.title, expected) for item in result.items):
             return result
         translated: dict[int, NewsletterItemAnalysis] = {}
         for index in pending:
@@ -620,7 +671,7 @@ class OllamaClient:
             item = translated.get(index, item)
             if outside(item):
                 continue
-            kept.append(_titled(item, self.digest_language))
+            kept.append(self._with_title_in_language(source_id, item))
         dropped = len(result.items) - len(kept)
         if result.items and not kept:
             raise OllamaSchemaError(
@@ -637,6 +688,48 @@ class OllamaClient:
         result.items = kept
         result._dropped_for_language = dropped
         return result
+
+    def _with_title_in_language(self, source_id: str, item: ScriptedModel) -> ScriptedModel:
+        """The item with its headline in the digest language: translated, or failing that the summary's lead."""
+        title = getattr(item, "title", None)
+        if not isinstance(title, str) or not _wrong_script(title, digest_language_code(self.digest_language)):
+            return item
+        translated = self._translated_title(source_id, title)
+        if translated is not None:
+            return item.model_copy(update={"title": translated})
+        return _titled(item, self.digest_language)
+
+    def _translated_title(self, source_id: str, title: str) -> str | None:
+        expected = digest_language_code(self.digest_language)
+        target = TRANSLATION_LANGUAGES.get(expected)
+        if target is None:
+            return None
+        # A title outside a Chinese digest is in a Latin script, nearly always English; one outside
+        # an English digest is Chinese.
+        source = ("Chinese", "zh") if expected == "en" else ("English", "en")
+        prompt = TITLE_TRANSLATION_PROMPT.format(
+            source=source[0], source_code=source[1], target=target[0], target_code=target[1], text=title
+        )
+        try:
+            response = self._client.post(
+                f"{self.base_url}/api/chat",
+                json={
+                    "model": self.translate_model,
+                    "messages": [{"role": "user", "content": prompt}],
+                    "stream": False,
+                    "keep_alive": self.keep_alive,
+                    "options": {"temperature": 0, "num_ctx": TITLE_TRANSLATION_NUM_CTX},
+                },
+                timeout=self.timeout,
+            )
+            response.raise_for_status()
+            answer = response.json()["message"]["content"]
+            if not isinstance(answer, str):
+                raise TypeError
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as error:
+            logger.warning("title translation for %s failed: %s", source_id, type(error).__name__)
+            return None
+        return _checked_title(title, _in_script(answer, self.digest_language), self.digest_language)
 
     def _outside_language(self, item: NewsletterItemAnalysis) -> bool:
         """Whether the item's summary or significance is not in the digest language."""
@@ -768,7 +861,7 @@ class OllamaClient:
                     raise TypeError
                 result = self._item_in_script(ArticleAnalysis.model_validate_json(raw))
                 _validate_digest_language(self.digest_language, [result.summary_zh_tw, result.why_it_matters_zh_tw])
-                return _titled(result, self.digest_language)
+                return self._with_title_in_language(source_id, result)
             except (ValidationError, ValueError, KeyError, TypeError) as error:
                 if attempt:
                     raise OllamaSchemaError(
@@ -1008,6 +1101,7 @@ def create_ollama_client(settings: Settings) -> OllamaClient:
         settings.ollama_keep_alive,
         settings.digest_language,
         settings.ollama_review_model,
+        translate_model=settings.ollama_translate_model,
         allow_remote=settings.ollama_allow_remote,
         trust_env=settings.ollama_trust_env,
     )

@@ -838,6 +838,7 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
         "extractor:load",
         "extractor:run",
         "unload:llama3.2:3b",
+        "unload:translategemma:4b",
         "reranker:load",
         "reranker:rank",
         "reranker:unload",

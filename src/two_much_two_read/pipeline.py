@@ -1208,7 +1208,9 @@ def run_pipeline(
                 source_names_by_id = {source.id: source.name for source in sources}
                 entries = _items(database, processed_document_ids, settings.digest_rerank_candidate_limit, source_names_by_id)
             finally:
+                # Both, since titles are translated between emails and the translator stays loaded too.
                 _unload_model(ollama, settings.ollama_model, status)
+                _unload_model(ollama, settings.ollama_translate_model, status)
 
             reranker = RelevanceReranker(settings.reranker_model, settings.reranker_device)
             try:
