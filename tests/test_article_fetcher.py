@@ -148,6 +148,12 @@ def test_a_listed_address_is_matched_in_any_spelling_of_its_default_port() -> No
     assert requests == ["/c/1"]
     assert unsubscribe_url("http://publisher.example:80/us", {"http://publisher.example/us"})
     assert not unsubscribe_url("https://publisher.example:8443/us", {"https://publisher.example/us"})
+    # A trailing dot, an IDNA host and percent-escapes of unreserved characters reach the same place.
+    assert unsubscribe_url("https://publisher.example./us?uid=abc", {"https://publisher.example/us?uid=abc"})
+    assert unsubscribe_url("https://xn--bcher-kva.example/us", {"https://bücher.example/us"})
+    assert unsubscribe_url("https://publisher.example/%75s?uid=%61bc", {"https://publisher.example/us?uid=abc"})
+    assert unsubscribe_url("https://publisher.example/us?to=a%2fb", {"https://publisher.example/us?to=a%2Fb"})
+    assert not unsubscribe_url("https://publisher.example/us?to=a/b", {"https://publisher.example/us?to=a%2Fb"})
     # An empty path is requested as /.
     assert unsubscribe_url("https://publisher.example/?uid=abc", {"https://publisher.example?uid=abc"})
     assert unsubscribe_url("https://publisher.example?uid=abc", {"https://publisher.example/?uid=abc"})
@@ -164,6 +170,18 @@ def test_a_page_naming_a_listed_address_as_its_canonical_keeps_its_own_address()
     )
 
     assert (resolved.final_url, resolved.canonical_url) == ("https://publisher.example/story", None)
+
+
+def test_an_article_about_unsubscribing_is_still_fetched() -> None:
+    # Only a newsletter's link carries its subscriber; a story someone shared does not.
+    def response_provider(request: ValidatedURL) -> ArticleResponse:
+        if request.target == "/robots.txt":
+            return ArticleResponse(200, {"content-type": "text/plain"}, b"User-agent: *\nAllow: /")
+        return ArticleResponse(200, {"content-type": "text/html"}, article_body())
+
+    fetched = ArticleFetcher(public_dns, response_provider).fetch("https://example.com/blog/designing-the-unsubscribe-button")
+
+    assert fetched.final_url == "https://example.com/blog/designing-the-unsubscribe-button"
 
 
 def test_pins_validated_addresses_for_robots_redirects_and_article_requests() -> None:

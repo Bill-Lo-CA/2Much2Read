@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import html
 import http.client
 import ipaddress
@@ -55,24 +56,42 @@ META_REFRESH = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[;,]\s*url\s*=\s*['\"]?([^'\"\
 # article's slug is as likely to be about opting out as the link is to do it.
 UNSUBSCRIBE_WORD = re.compile(r"unsub(?:scri|(?![a-z]))")
 UNSUBSCRIBE_TOKENS = frozenset({"optout", "opt-out", "opt_out", "disable_email"})
+PERCENT_ESCAPE = re.compile(r"%([0-9A-Fa-f]{2})")
+UNRESERVED = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _DNS_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="article-dns")
 
 logger = logging.getLogger(__name__)
 
 
+def _unreserved(text: str) -> str:
+    """Percent-escapes as one spelling: an unreserved character decoded, any other in upper case."""
+    return PERCENT_ESCAPE.sub(
+        lambda match: (
+            chr(value) if (value := int(match.group(1), 16)) < 128 and chr(value) in UNRESERVED else match.group().upper()
+        ),
+        text,
+    )
+
+
 def _comparable(url: str) -> str:
-    """The URL as one spelling: scheme and host in lower case, an empty path as /, a default port and
-    any fragment left out - the spellings a request makes the same, as _validate_url's does."""
+    """The URL as one spelling, so two that reach the same resource compare equal.
+
+    What _validate_url and the server make the same: scheme and host in lower case, the host without
+    a trailing dot and in its ASCII (IDNA) form, an empty path as /, a default port and any fragment
+    left out, and percent-escapes as RFC 3986 normalises them.
+    """
     try:
         parts = urlsplit(url.strip())
-        scheme, host, port = parts.scheme.lower(), (parts.hostname or "").lower(), parts.port
+        scheme, host, port = parts.scheme.lower(), (parts.hostname or "").rstrip(".").lower(), parts.port
     except ValueError:
         return url
+    with contextlib.suppress(UnicodeError):
+        host = host.encode("idna").decode("ascii")
     netloc = f"[{host}]" if ":" in host else host
     if port is not None and port != {"http": 80, "https": 443}.get(scheme):
         netloc = f"{netloc}:{port}"
-    path = parts.path or ("/" if scheme in {"http", "https"} else "")
-    return urlunsplit((scheme, netloc, path, parts.query, ""))
+    path = _unreserved(parts.path) or ("/" if scheme in {"http", "https"} else "")
+    return urlunsplit((scheme, netloc, path, _unreserved(parts.query), ""))
 
 
 def unsubscribe_url(url: str, listed: Collection[str] = ()) -> bool:
@@ -322,7 +341,7 @@ class ArticleFetcher:
         return candidate.url
 
     def _validate_url(
-        self, value: str, *, redirect: bool, deadline: float | None = None, unsubscribe: Collection[str] = ()
+        self, value: str, *, redirect: bool, deadline: float | None = None, unsubscribe: Collection[str] | None = None
     ) -> ValidatedURL:
         if deadline is not None:
             self._check_deadline(deadline)
@@ -341,8 +360,9 @@ class ArticleFetcher:
         if port not in {None, 80, 443}:
             raise ArticleFetchError(code)
         # Before any request, and for every hop: a tracker's link reaches the unsubscribe page only
-        # by redirect.
-        if unsubscribe_url(value, unsubscribe):
+        # by redirect. Only for a newsletter's link, which carries its subscriber: a Hacker News story
+        # or an article about unsubscribe buttons unsubscribes nobody.
+        if unsubscribe is not None and unsubscribe_url(value, unsubscribe):
             raise ArticleFetchError(code)
         hostname = parsed.hostname.rstrip(".").lower()
         if not hostname or hostname == "localhost":
