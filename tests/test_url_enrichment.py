@@ -158,6 +158,14 @@ def test_the_link_shown_is_never_an_address_the_list_unsubscribe_header_names() 
     assert shown_url(resolved, {"https://publisher.example/us?uid=abc"}) is None
 
 
+def test_a_resolved_item_never_shows_a_listed_address() -> None:
+    enricher = UrlEnricher()
+    match = enricher.match([analysis()], [candidate("link-0001", "Useful article", "https://short.example/go")])[0]
+    resolved = ResolvedUrl("https://short.example/go", "https://publisher.example/story", "https://publisher.example/us?uid=abc")
+
+    assert enricher.resolved_item(match, resolved, {"https://publisher.example/us?uid=abc"}).source_url is None
+
+
 def coded(title: str, link: str | None) -> NewsletterItemAnalysis:
     return NewsletterItemAnalysis.model_validate({**analysis(title).model_dump(), "source_title": title, "link": link})
 

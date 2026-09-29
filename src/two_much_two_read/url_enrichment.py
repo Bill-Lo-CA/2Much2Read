@@ -146,13 +146,19 @@ class UrlEnricher:
             matches.append(UrlMatch(item, candidate, method, confidence))
         return matches
 
-    def resolved_item(self, match: UrlMatch, resolved: ResolvedUrl) -> DigestItem:
-        return self._item(match, resolved=resolved)
+    def resolved_item(self, match: UrlMatch, resolved: ResolvedUrl, unsubscribe: Collection[str] = ()) -> DigestItem:
+        return self._item(match, resolved=resolved, unsubscribe=unsubscribe)
 
     def failed_item(self, match: UrlMatch, error_code: str) -> DigestItem:
         return self._item(match, error_code=error_code)
 
-    def _item(self, match: UrlMatch, resolved: ResolvedUrl | None = None, error_code: str | None = None) -> DigestItem:
+    def _item(
+        self,
+        match: UrlMatch,
+        resolved: ResolvedUrl | None = None,
+        error_code: str | None = None,
+        unsubscribe: Collection[str] = (),
+    ) -> DigestItem:
         values = {name: getattr(match.item, name) for name in ItemAnalysis.model_fields}
         if match.candidate is None:
             match_status = cast(Literal["unmatched", "ambiguous"], match.method)
@@ -166,7 +172,7 @@ class UrlEnricher:
         if resolved is not None:
             return DigestItem(
                 **values,
-                source_url=_http_url(shown_url(resolved)),
+                source_url=_http_url(shown_url(resolved, unsubscribe)),
                 raw_url=HTTP_URL.validate_python(raw_url),
                 resolved_url=HTTP_URL.validate_python(resolved.final_url),
                 canonical_url=HTTP_URL.validate_python(resolved.canonical_url) if resolved.canonical_url else None,

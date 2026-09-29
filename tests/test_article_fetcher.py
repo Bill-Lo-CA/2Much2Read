@@ -133,6 +133,36 @@ def test_a_tracker_is_not_followed_to_an_address_the_list_unsubscribe_header_nam
     assert requests == ["/c/1"]
 
 
+def test_a_listed_address_is_matched_in_any_spelling_of_its_default_port() -> None:
+    # The header may write :443 where a redirect leaves it out, or the other way round.
+    requests: list[str] = []
+
+    def response_provider(request: ValidatedURL) -> ArticleResponse:
+        requests.append(request.target)
+        return ArticleResponse(302, {"location": "https://publisher.example/us?uid=abc"}, b"")
+
+    fetcher = ArticleFetcher(public_dns, response_provider)
+    with pytest.raises(UrlResolutionError, match="URL_REDIRECT_BLOCKED"):
+        fetcher.resolve_url("https://click.example/c/1", {"https://PUBLISHER.example:443/us?uid=abc"})
+
+    assert requests == ["/c/1"]
+    assert unsubscribe_url("http://publisher.example:80/us", {"http://publisher.example/us"})
+    assert not unsubscribe_url("https://publisher.example:8443/us", {"https://publisher.example/us"})
+
+
+def test_a_page_naming_a_listed_address_as_its_canonical_keeps_its_own_address() -> None:
+    # The canonical is the link shown first, so a page claiming the unsubscribe address as its own
+    # is shown by where the chain arrived instead.
+    def response_provider(_: ValidatedURL) -> ArticleResponse:
+        return ArticleResponse(200, {"content-type": "text/html"}, b'<html><link rel="canonical" href="/us?uid=abc"></html>')
+
+    resolved = ArticleFetcher(public_dns, response_provider).resolve_url(
+        "https://publisher.example/story", {"https://publisher.example/us?uid=abc"}
+    )
+
+    assert (resolved.final_url, resolved.canonical_url) == ("https://publisher.example/story", None)
+
+
 def test_pins_validated_addresses_for_robots_redirects_and_article_requests() -> None:
     requests: list[ValidatedURL] = []
 

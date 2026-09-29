@@ -902,6 +902,7 @@ def _process_source(
                                 str(cached["resolved_url"]),
                                 str(cached["canonical_url"]) if cached["canonical_url"] else None,
                             ),
+                            content.unsubscribe_urls,
                         )
                     )
                 else:
@@ -920,7 +921,7 @@ def _process_source(
                 resolved_url=resolved.final_url,
                 canonical_url=resolved.canonical_url,
             )
-            items.append(url_enricher.resolved_item(match, resolved))
+            items.append(url_enricher.resolved_item(match, resolved, content.unsubscribe_urls))
         sender = _sender_domain(headers.get("from", ""))
         own_front_page = [item for item in items if _links_front_page_of(item, sender)]
         items = [item for item in items if not _links_front_page_of(item, sender)]

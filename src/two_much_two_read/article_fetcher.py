@@ -61,11 +61,16 @@ logger = logging.getLogger(__name__)
 
 
 def _comparable(url: str) -> str:
+    """The URL as one spelling: scheme and host in lower case, a default port and any fragment left out."""
     try:
         parts = urlsplit(url.strip())
+        scheme, host, port = parts.scheme.lower(), (parts.hostname or "").lower(), parts.port
     except ValueError:
         return url
-    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, ""))
+    netloc = f"[{host}]" if ":" in host else host
+    if port is not None and port != {"http": 80, "https": 443}.get(scheme):
+        netloc = f"{netloc}:{port}"
+    return urlunsplit((scheme, netloc, parts.path, parts.query, ""))
 
 
 def unsubscribe_url(url: str, listed: Collection[str] = ()) -> bool:
@@ -256,7 +261,7 @@ class ArticleFetcher:
                     self._check_deadline(deadline)
                     page_location = self._page_redirect(current, response.body, soup)
                     if page_location is None:
-                        return ResolvedUrl(requested_url, current.url, self._canonical_url(current, soup, deadline))
+                        return ResolvedUrl(requested_url, current.url, self._canonical_url(current, soup, deadline, unsubscribe))
                     location, page_hop = page_location, True
                 if redirects == MAX_REDIRECTS:
                     raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
@@ -265,7 +270,7 @@ class ArticleFetcher:
                 )
                 if page_hop and next_url.url == current.url:
                     # A page that refreshes to itself is the destination, not a hop.
-                    return ResolvedUrl(requested_url, current.url, self._canonical_url(current, soup, deadline))
+                    return ResolvedUrl(requested_url, current.url, self._canonical_url(current, soup, deadline, unsubscribe))
                 if next_url.url in seen_urls:
                     raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
                 seen_urls.add(next_url.url)
@@ -291,7 +296,11 @@ class ArticleFetcher:
                 return match.group(2)
         return None
 
-    def _canonical_url(self, page: ValidatedURL, soup: BeautifulSoup, deadline: float) -> str | None:
+    def _canonical_url(
+        self, page: ValidatedURL, soup: BeautifulSoup, deadline: float, unsubscribe: Collection[str] = ()
+    ) -> str | None:
+        # unsubscribe as for a hop: a page may name the email's List-Unsubscribe address as its own,
+        # and the canonical is the link the digest shows first.
         self._check_deadline(deadline)
         canonical = soup.find("link", rel=lambda value: value and "canonical" in value)
         value = str(canonical.get("href", "")) if canonical else ""
@@ -301,7 +310,7 @@ class ArticleFetcher:
         if not value:
             return None
         try:
-            candidate = self._validate_url(urljoin(page.url, value), redirect=False, deadline=deadline)
+            candidate = self._validate_url(urljoin(page.url, value), redirect=False, deadline=deadline, unsubscribe=unsubscribe)
         except ArticleFetchError:
             return None
         if page.url.startswith("https://") and candidate.url.startswith("http://"):
