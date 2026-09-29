@@ -15,7 +15,7 @@ from two_read_runtime.endpoint_policy import validate_ollama_endpoint
 
 from .chinese_script_table import SIMPLIFIED_ONLY, TRADITIONAL_ONLY
 from .config import Settings
-from .digest import digest_language_code
+from .digest import STORY_BOILERPLATE, digest_language_code
 from .schemas import (
     ArticleAnalysis,
     DigestReview,
@@ -122,9 +122,8 @@ TRANSLATION_LANGUAGES = {
 # small beside the extractor.
 TITLE_TRANSLATION_NUM_CTX = 2048
 YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
-# Figures a translation must keep: a version such as 5.5, or a number of two digits or more. A single
-# digit may fairly come back as a word ("2 weeks" as 兩週), and a month name as its number.
-KEPT_FIGURE = re.compile(r"\d+\.\d+|\d{2,}")
+# A figure as a whole token: 5.5 is not found in 15.5, nor 26 in 260.
+FIGURE = re.compile(r"\d+(?:[.,]\d+)*")
 # A title still outside the digest language once translation is done - the model echoed it, or
 # failed twice - gives way to the start of the summary, which has passed the language check. Telling
 # a title that is only names ("Claude Opus 5.5") from an untranslated sentence cannot be done by rule:
@@ -436,7 +435,7 @@ def _checked_title(source: str, translated: str, language: str) -> str | None:
     A year the source never gave is removed where it only dates a month and day: TranslateGemma wrote
     "Quick thoughts on GitHub Actions Aug 26 incident" as 2023 年 8 月 26 日, an invented fact that
     reads as a plain one. Anywhere else it rejects the translation, as does a lost version or figure
-    (Sonnet 5.5 as 2.5), an ellipsis the source did not have (a headline cut short), or text still
+    (Sonnet 5.5 as 2.5 or 15.5), an ellipsis the source did not have (a headline cut short), or text still
     outside the digest's script.
     """
     title = translated.strip().rstrip("。.")
@@ -445,7 +444,12 @@ def _checked_title(source: str, translated: str, language: str) -> str | None:
         title = re.sub(rf"(?<!\d){year}\s*年\s*(?=\d{{1,2}}\s*月)", "", title)
     if set(YEAR.findall(title)) - given:
         return None
-    if any(figure not in title for figure in KEPT_FIGURE.findall(source)):
+    # Figures it must keep: a version such as 5.5, or a number of two digits or more, each as a whole
+    # token. A single digit may fairly come back as a word ("2 weeks" as 兩週), and a month name as
+    # its number. A conversion is refused with the rest ($65B written as 650 億): nothing tells it
+    # from a changed figure.
+    figures = set(FIGURE.findall(title))
+    if any(figure not in figures for figure in FIGURE.findall(source) if "." in figure or len(figure) > 1):
         return None
     if any(mark in title and mark not in source for mark in ("...", "…")):
         return None
@@ -671,7 +675,7 @@ class OllamaClient:
             item = translated.get(index, item)
             if outside(item):
                 continue
-            kept.append(self._with_title_in_language(source_id, item))
+            kept.append(self._with_title_in_language(source_id, item, item.source_title))
         dropped = len(result.items) - len(kept)
         if result.items and not kept:
             raise OllamaSchemaError(
@@ -689,14 +693,24 @@ class OllamaClient:
         result._dropped_for_language = dropped
         return result
 
-    def _with_title_in_language(self, source_id: str, item: ScriptedModel) -> ScriptedModel:
-        """The item with its headline in the digest language: translated, or failing that the summary's lead."""
+    def _with_title_in_language(self, source_id: str, item: ScriptedModel, headline: str) -> ScriptedModel:
+        """The item with its headline in the digest language: translated, or failing that the summary's lead.
+
+        headline is what the source itself wrote - an email item's verbatim source_title, a Hacker
+        News story's own title - never the extractor's title, which may already carry its mistake:
+        translated from a wrong 2.5, a translation of 2.5 checks out. The translated item is built
+        again rather than copied, so the schema's rules - no links, 200 characters - hold for what the
+        translator wrote as they do for the extractor.
+        """
         title = getattr(item, "title", None)
         if not isinstance(title, str) or not _wrong_script(title, digest_language_code(self.digest_language)):
             return item
-        translated = self._translated_title(source_id, title)
+        translated = self._translated_title(source_id, STORY_BOILERPLATE.sub("", headline).strip() or headline)
         if translated is not None:
-            return item.model_copy(update={"title": translated})
+            try:
+                return type(item).model_validate({**item.model_dump(), "title": translated})
+            except ValidationError:
+                pass
         return _titled(item, self.digest_language)
 
     def _translated_title(self, source_id: str, title: str) -> str | None:
@@ -861,7 +875,7 @@ class OllamaClient:
                     raise TypeError
                 result = self._item_in_script(ArticleAnalysis.model_validate_json(raw))
                 _validate_digest_language(self.digest_language, [result.summary_zh_tw, result.why_it_matters_zh_tw])
-                return self._with_title_in_language(source_id, result)
+                return self._with_title_in_language(source_id, result, title)
             except (ValidationError, ValueError, KeyError, TypeError) as error:
                 if attempt:
                     raise OllamaSchemaError(

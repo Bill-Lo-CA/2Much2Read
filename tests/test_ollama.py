@@ -846,6 +846,39 @@ def test_a_title_whose_translation_fails_never_reaches_the_digest() -> None:
     assert route.call_count == 2
 
 
+@respx.mock
+def test_the_translation_is_of_the_verbatim_headline_not_the_extractors_title() -> None:
+    # The extractor copied the headline wrong. Translating its copy, a faithful 2.5 would check out.
+    answer = _items_result(("Claude Sonnet 2.5 ships (4 minute read)", *GOOD[1:]))
+    answer["items"][0]["source_title"] = "Claude Sonnet 5.5 ships (4 minute read)"  # type: ignore[index]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[_chat(answer), _translation("Claude Sonnet 5.5 上線")]
+    )
+
+    result = OllamaClient().extract("tldr-ai", "News")
+
+    assert result.items[0].title == "Claude Sonnet 5.5 上線"
+    # Its reading-time marker is not the headline's, and not a figure it must keep.
+    assert json.loads(route.calls[1].request.content)["messages"][0]["content"].endswith("\n\n\nClaude Sonnet 5.5 ships")
+
+
+@pytest.mark.parametrize(
+    "translation",
+    ["詳見 https://evil.example/ 的說明", "很長的標題" * 50],
+    ids=["link", "too-long"],
+)
+@respx.mock
+def test_a_translation_the_schema_refuses_takes_the_summarys_lead(translation: str) -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[_chat(_items_result(("Viggle ships turbo image model", *GOOD[1:]))), _translation(translation)]
+    )
+
+    result = OllamaClient().extract("alphasignal", "News")
+
+    assert [item.title for item in result.items] == ["發布新模型"]
+    assert route.call_count == 2
+
+
 @pytest.mark.parametrize(
     ("source", "translated", "kept"),
     [
@@ -861,9 +894,13 @@ def test_a_title_whose_translation_fails_never_reaches_the_digest() -> None:
             "關於 8 月 26 日 GitHub Actions 事件的看法",
         ),
         ("TNS Episode - Sep 25 2026", "TNS 節目 - 2026年9月25日", "TNS 節目 - 2026年9月25日"),
-        ("Revenue crossed $65B ARR", "年收入超過 650 億美元", "年收入超過 650 億美元"),
+        ("Revenue crossed 65% of target", "營收達目標的 65%", "營收達目標的 65%"),
         # Anything else it cannot vouch for is refused.
         ("Anthropic launches Claude Sonnet 5.5", "Anthropic 推出 Claude Sonnet 2.5", None),
+        # A figure is a whole token: 5.5 is not in 15.5.
+        ("Anthropic launches Claude Sonnet 5.5", "Anthropic 推出 Claude Sonnet 15.5", None),
+        # A conversion cannot be told from a changed figure, so it is refused too.
+        ("Revenue crossed $65B ARR", "年收入超過 650 億美元", None),
         ("Anthropic launches Claude Sonnet 5.5 with near-Opus performance", "Anthropic 推出 Claude Sonnet ...", None),
         ("GitHub Actions incident review", "2023 年 GitHub Actions 事件回顧", None),
         ("OpenAI blocked its agent's web access", "OpenAI blocked its agent's web access", None),
