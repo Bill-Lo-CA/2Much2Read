@@ -151,6 +151,13 @@ def test_the_link_shown_is_judged_after_its_tags_are_removed(final: str, canonic
     assert shown_url(ResolvedUrl("https://short.example/go", final, canonical)) == shown
 
 
+def test_the_link_shown_is_never_an_address_the_list_unsubscribe_header_names() -> None:
+    resolved = ResolvedUrl("https://short.example/go", "https://publisher.example/us?uid=abc", None)
+
+    assert shown_url(resolved) == "https://publisher.example/us?uid=abc"
+    assert shown_url(resolved, {"https://publisher.example/us?uid=abc"}) is None
+
+
 def coded(title: str, link: str | None) -> NewsletterItemAnalysis:
     return NewsletterItemAnalysis.model_validate({**analysis(title).model_dump(), "source_title": title, "link": link})
 

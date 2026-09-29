@@ -882,13 +882,15 @@ def _process_source(
                         raw_url,
                         str(cached["resolved_url"]),
                         str(cached["canonical_url"]) if cached["canonical_url"] else None,
-                    )
+                    ),
+                    content.unsubscribe_urls,
                 )
                 is None
             ):
                 # Resolved before the resolver could pass a tracker's page-level hop, so it stopped on
                 # the click page - which may name itself as its canonical - and there is no link to
-                # show; the link deserves another try rather than 30 days of no article.
+                # show; the link deserves another try rather than 30 days of no article. Or it reached
+                # an unsubscribe page before the resolver refused them, and trying again refuses it.
                 cached = None
             if cached is not None:
                 if cached["status"] == "resolved" and cached["resolved_url"]:
@@ -906,7 +908,7 @@ def _process_source(
                     items.append(url_enricher.failed_item(match, str(cached["error_code"] or "URL_RESOLUTION_FAILED")))
                 continue
             try:
-                resolved = resolve_match(match, url_fetcher)
+                resolved = resolve_match(match, url_fetcher, content.unsubscribe_urls)
             except UrlResolutionError as error:
                 cache_status = "blocked" if error.code in {"URL_POLICY_BLOCKED", "URL_REDIRECT_BLOCKED"} else "failed"
                 database.cache_url_resolution(raw_url, cache_status, error_code=error.code)

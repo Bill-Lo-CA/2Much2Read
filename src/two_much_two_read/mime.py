@@ -173,7 +173,7 @@ def _link_candidates(plain: str, html: str, unsubscribe: frozenset[str] = frozen
         nonlocal scanned
         scanned += 1
         safe_url = _safe_url(raw_url)
-        if safe_url is None or safe_url in seen or safe_url in unsubscribe or unsubscribe_url(safe_url):
+        if safe_url is None or safe_url in seen or unsubscribe_url(safe_url, unsubscribe):
             return
         if CONTROL_LABEL_PATTERN.fullmatch(anchor_text.strip()):
             return
@@ -336,6 +336,7 @@ def _content(plain: list[str], html: list[str], unsubscribe: frozenset[str] = fr
         analysis_text=analysis_text,
         original_characters=original_characters,
         link_candidates=candidates,
+        unsubscribe_urls=unsubscribe,
     )
 
 

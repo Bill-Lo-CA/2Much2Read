@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
+from collections.abc import Collection, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, TypeAlias, cast
@@ -84,7 +84,7 @@ def _tracking_url(value: str) -> bool:
     )
 
 
-def shown_url(resolved: ResolvedUrl) -> str | None:
+def shown_url(resolved: ResolvedUrl, unsubscribe: Collection[str] = ()) -> str | None:
     """The link a digest shows for a resolution, or None when all it has is a tracker.
 
     The page's name for itself first, then where the chain ended, each without campaign tags or the
@@ -93,7 +93,7 @@ def shown_url(resolved: ResolvedUrl) -> str | None:
     that names itself as its canonical is still a click page. An unsubscribe page is never shown,
     including one a cached resolution reached before the resolver refused them.
     """
-    if any(url and unsubscribe_url(url) for url in (resolved.canonical_url, resolved.final_url)):
+    if any(url and unsubscribe_url(url, unsubscribe) for url in (resolved.canonical_url, resolved.final_url)):
         return None
     for candidate in (resolved.canonical_url, resolved.final_url):
         shown = canonical_url(candidate)
@@ -189,7 +189,7 @@ class UrlEnricher:
         )
 
 
-def resolve_match(match: UrlMatch, fetcher: ArticleFetcher) -> ResolvedUrl:
+def resolve_match(match: UrlMatch, fetcher: ArticleFetcher, unsubscribe: Collection[str] = ()) -> ResolvedUrl:
     if match.candidate is None:
         raise UrlResolutionError("URL_MATCH_UNRESOLVED")
-    return fetcher.resolve_url(str(match.candidate.raw_url))
+    return fetcher.resolve_url(str(match.candidate.raw_url), unsubscribe)

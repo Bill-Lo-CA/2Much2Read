@@ -118,6 +118,21 @@ def test_an_unsubscribe_link_is_never_opened_even_behind_a_tracker() -> None:
     assert requests == ["/c/1"]
 
 
+def test_a_tracker_is_not_followed_to_an_address_the_list_unsubscribe_header_names() -> None:
+    # The header's address says nothing of unsubscribing, so its words cannot catch it.
+    requests: list[str] = []
+
+    def response_provider(request: ValidatedURL) -> ArticleResponse:
+        requests.append(request.target)
+        return ArticleResponse(302, {"location": "https://Publisher.example/us?uid=abc#top"}, b"")
+
+    fetcher = ArticleFetcher(public_dns, response_provider)
+    with pytest.raises(UrlResolutionError, match="URL_REDIRECT_BLOCKED"):
+        fetcher.resolve_url("https://click.example/c/1", {"https://publisher.example/us?uid=abc"})
+
+    assert requests == ["/c/1"]
+
+
 def test_pins_validated_addresses_for_robots_redirects_and_article_requests() -> None:
     requests: list[ValidatedURL] = []
 

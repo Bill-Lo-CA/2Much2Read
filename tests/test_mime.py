@@ -442,6 +442,8 @@ def test_the_list_unsubscribe_header_names_links_that_are_no_candidates() -> Non
 
     for content in (extract_gmail_payload(payload), extract_mime(message.as_bytes())):
         assert _codes(content) == {"L1": "https://example.com/story"}
+        # Kept for resolution, which a tracker in the body may lead to it.
+        assert content.unsubscribe_urls == {unsubscribe}
 
 
 def test_urls_no_longer_spend_the_character_budget() -> None:

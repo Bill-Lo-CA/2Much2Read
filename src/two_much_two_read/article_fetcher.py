@@ -8,7 +8,7 @@ import re
 import socket
 import ssl
 import time
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Collection, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
@@ -60,15 +60,26 @@ _DNS_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="article-dn
 logger = logging.getLogger(__name__)
 
 
-def unsubscribe_url(url: str) -> bool:
-    """Whether opening the URL may unsubscribe the reader, going by the words its address uses.
+def _comparable(url: str) -> str:
+    try:
+        parts = urlsplit(url.strip())
+    except ValueError:
+        return url
+    return urlunsplit((parts.scheme.lower(), parts.netloc.lower(), parts.path, parts.query, ""))
+
+
+def unsubscribe_url(url: str, listed: Collection[str] = ()) -> bool:
+    """Whether opening the URL may unsubscribe the reader: listed as such, or by the words it uses.
 
     An unsubscribe link does its work when it is opened, and resolving a link opens it. AlphaSignal
     ends an issue with "Stop receiving emails here:" and a one-click /unsubscribe/ link carrying the
     subscriber's id; the extractor gave that link to a story, the resolver opened it, and the digest
     showed it. The host, the path and the query are all read, so a tracker's encoded destination
-    counts too.
+    counts too. listed is what the email's List-Unsubscribe header names, whose addresses need say
+    nothing of unsubscribing (AlphaSignal's is /us?uid=).
     """
+    if listed and _comparable(url) in {_comparable(value) for value in listed}:
+        return True
     try:
         parts = urlsplit(url)
         host = parts.hostname or ""
@@ -195,7 +206,7 @@ class ArticleFetcher:
             return FetchedArticle(requested_url, current.url, content_type, response.body)
         raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
 
-    def resolve_url(self, requested_url: str) -> ResolvedUrl:
+    def resolve_url(self, requested_url: str, unsubscribe: Collection[str] = ()) -> ResolvedUrl:
         """Follow a newsletter link to the page it stands for, and name that page.
 
         HTTP redirects, and the two page-level hops trackers use in their place: HubSpot's click
@@ -204,12 +215,13 @@ class ArticleFetcher:
         chain arrives, the destination is the link even when its page will not serve a crawler (once
         the chain has left the link's own host), is too large to read whole, or is a PDF: the
         address is what the digest stores and shows. Any other download is refused, so a link never
-        leads a reader to an executable or an archive.
+        leads a reader to an executable or an archive. unsubscribe is the email's List-Unsubscribe
+        addresses: a tracker in the body may redirect to one, and no hop to it is ever requested.
         """
         deadline = self.clock() + URL_RESOLUTION_DEADLINE_SECONDS
         try:
             self._check_deadline(deadline)
-            current = self._validate_url(requested_url, redirect=False, deadline=deadline)
+            current = self._validate_url(requested_url, redirect=False, deadline=deadline, unsubscribe=unsubscribe)
             requested_host = current.hostname
             seen_urls = {current.url}
             for redirects in range(MAX_REDIRECTS + 1):
@@ -248,7 +260,9 @@ class ArticleFetcher:
                     location, page_hop = page_location, True
                 if redirects == MAX_REDIRECTS:
                     raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
-                next_url = self._validate_url(urljoin(current.url, location), redirect=True, deadline=deadline)
+                next_url = self._validate_url(
+                    urljoin(current.url, location), redirect=True, deadline=deadline, unsubscribe=unsubscribe
+                )
                 if page_hop and next_url.url == current.url:
                     # A page that refreshes to itself is the destination, not a hop.
                     return ResolvedUrl(requested_url, current.url, self._canonical_url(current, soup, deadline))
@@ -296,7 +310,9 @@ class ArticleFetcher:
             return None
         return candidate.url
 
-    def _validate_url(self, value: str, *, redirect: bool, deadline: float | None = None) -> ValidatedURL:
+    def _validate_url(
+        self, value: str, *, redirect: bool, deadline: float | None = None, unsubscribe: Collection[str] = ()
+    ) -> ValidatedURL:
         if deadline is not None:
             self._check_deadline(deadline)
         code = "ARTICLE_REDIRECT_BLOCKED" if redirect else "ARTICLE_URL_BLOCKED"
@@ -315,7 +331,7 @@ class ArticleFetcher:
             raise ArticleFetchError(code)
         # Before any request, and for every hop: a tracker's link reaches the unsubscribe page only
         # by redirect.
-        if unsubscribe_url(value):
+        if unsubscribe_url(value, unsubscribe):
             raise ArticleFetchError(code)
         hostname = parsed.hostname.rstrip(".").lower()
         if not hostname or hostname == "localhost":
