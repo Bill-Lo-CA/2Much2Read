@@ -1012,6 +1012,8 @@ def test_a_translation_the_schema_refuses_takes_the_summarys_lead(translation: s
         ("Anthropic launches Claude Sonnet 5.5 with near-Opus performance", "Anthropic 推出 Claude Sonnet ...", None),
         ("GitHub Actions incident review", "2023 年 GitHub Actions 事件回顧", None),
         ("Q3 earnings improve", "2023年3月收益改善", None),
+        ("Market 26 grows", "市場於 2023 年 3 月 26 日成長", None),
+        ("March 26 revenue rises", "2023年3月26日營收上升", "3月26日營收上升"),
         ("OpenAI blocked its agent's web access", "OpenAI blocked its agent's web access", None),
     ],
 )

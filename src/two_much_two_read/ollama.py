@@ -131,7 +131,11 @@ PLACEHOLDER = re.compile(r"[（(]\s*(?:省略|略|需完整翻譯|待翻譯|未�
 # A single digit that versions a name - GPT-5, Opus 5, Q3 - which a translation must keep as it is.
 VERSION_DIGIT = re.compile(r"(?:[A-Za-z]-?|[A-Z][A-Za-z]*\s)(\d)(?![\d.,])")
 # A month named before a day ("Aug 26"), which a translation writes as its number (8 月 26 日).
-MONTH_DAY = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*(\d{1,2})(?!\d)", re.IGNORECASE)
+MONTH_DAY = re.compile(
+    r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{1,2})(?!\d)",
+    re.IGNORECASE,
+)
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 # A title still outside the digest language once translation is done - the model echoed it, or
 # failed twice - gives way to the start of the summary, which has passed the language check. Telling
