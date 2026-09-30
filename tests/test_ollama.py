@@ -1011,6 +1011,7 @@ def test_a_translation_the_schema_refuses_takes_the_summarys_lead(translation: s
         ("Revenue crossed $65B ARR", "年收入超過 650 億美元", None),
         ("Anthropic launches Claude Sonnet 5.5 with near-Opus performance", "Anthropic 推出 Claude Sonnet ...", None),
         ("GitHub Actions incident review", "2023 年 GitHub Actions 事件回顧", None),
+        ("Q3 earnings improve", "2023年3月收益改善", None),
         ("OpenAI blocked its agent's web access", "OpenAI blocked its agent's web access", None),
     ],
 )

@@ -131,7 +131,7 @@ PLACEHOLDER = re.compile(r"[（(]\s*(?:省略|略|需完整翻譯|待翻譯|未�
 # A single digit that versions a name - GPT-5, Opus 5, Q3 - which a translation must keep as it is.
 VERSION_DIGIT = re.compile(r"(?:[A-Za-z]-?|[A-Z][A-Za-z]*\s)(\d)(?![\d.,])")
 # A month named before a day ("Aug 26"), which a translation writes as its number (8 月 26 日).
-MONTH_NAME = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?(?=\s*\d)", re.IGNORECASE)
+MONTH_DAY = re.compile(r"\b(jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.?\s*(\d{1,2})(?!\d)", re.IGNORECASE)
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 # A title still outside the digest language once translation is done - the model echoed it, or
 # failed twice - gives way to the start of the summary, which has passed the language check. Telling
@@ -441,9 +441,10 @@ def _title_from_summary(summary: str) -> str:
 def _checked_title(source: str, translated: str, language: str) -> str | None:
     """The translated headline, or None when it cannot be trusted to say what the source does.
 
-    A year the source never gave is removed where it only dates a month and day: TranslateGemma wrote
-    "Quick thoughts on GitHub Actions Aug 26 incident" as 2023 年 8 月 26 日, an invented fact that
-    reads as a plain one. Anywhere else it rejects the translation, as do a changed or invented
+    A year the source never gave is removed only when it dates the same month and day the source
+    named: TranslateGemma wrote "Quick thoughts on GitHub Actions Aug 26 incident" as
+    2023 年 8 月 26 日, an invented fact that reads as a plain one. Anywhere else it rejects the
+    translation, as do a changed or invented
     figure, an ellipsis the source did not have (a headline cut short), and text still outside the
     digest's script.
     """
@@ -453,8 +454,13 @@ def _checked_title(source: str, translated: str, language: str) -> str | None:
         return None
     title = title.rstrip("。.")
     given = set(YEAR.findall(source))
+    source_dates = {(MONTHS.index(name.casefold()[:3]) + 1, int(day)) for name, day in MONTH_DAY.findall(source)}
     for year in set(YEAR.findall(title)) - given:
-        title = re.sub(rf"(?<!\d){year}\s*年\s*(?=\d{{1,2}}\s*月)", "", title)
+        title = re.sub(
+            rf"(?<!\d){year}\s*年\s*(?=(\d{{1,2}})\s*月\s*(\d{{1,2}})\s*日)",
+            lambda match: "" if (int(match[1]), int(match[2])) in source_dates else match[0],
+            title,
+        )
     if set(YEAR.findall(title)) - given:
         return None
     # Each figure compared as a whole token. The source's must survive: a version such as 5.5, a
@@ -464,7 +470,7 @@ def _checked_title(source: str, translated: str, language: str) -> str | None:
     # 650 億): nothing tells it from a changed figure.
     source_figures = FIGURE.findall(source)
     kept = {figure for figure in source_figures if "." in figure or len(figure) > 1} | set(VERSION_DIGIT.findall(source))
-    months = {str(MONTHS.index(name.casefold()[:3]) + 1) for name in MONTH_NAME.findall(source)}
+    months = {str(month) for month, _ in source_dates}
     figures = set(FIGURE.findall(title))
     if kept - figures or figures - set(source_figures) - months:
         return None
