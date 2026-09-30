@@ -774,6 +774,21 @@ def test_one_field_in_the_wrong_language_costs_that_item_a_translation_not_the_e
     assert '"index": 1' in translation[1]["content"] and "發布新模型" not in translation[1]["content"]
 
 
+@pytest.mark.parametrize("unused_title", ["詳見 https://example.com", "很長的標題" * 50], ids=["link", "too-long"])
+@respx.mock
+def test_a_bad_unused_field_translation_title_does_not_drop_valid_fields(unused_title: str) -> None:
+    answer = _items_result(GOOD, ("模型發布", "A new model is released.", "It improves speed."))
+    translation = _chat(
+        {"items": [{"index": 1, "title": unused_title, "summary": "新模型發布。", "why_it_matters": "可提升速度。"}]}
+    )
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_chat(answer), translation, translation])
+
+    result = OllamaClient().extract("alphasignal", "News")
+
+    assert (result.items[1].title, result.items[1].summary_zh_tw) == ("模型發布", "新模型發布。")
+    assert route.call_count == 2
+
+
 @pytest.mark.parametrize(
     "answer",
     [
@@ -863,6 +878,18 @@ def test_the_translation_is_of_the_verbatim_headline_not_the_extractors_title() 
 
 
 @respx.mock
+def test_a_substack_view_post_line_is_not_translated_as_the_headline() -> None:
+    answer = _items_result(("OpenRouter agent deployment", "OpenRouter 討論 AI 代理的部署方式。", "可改善部署流程。"))
+    answer["items"][0]["source_title"] = "View this post on the web at https://latent.space/p/openrouter"  # type: ignore[index]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_chat(answer), _translation("在網路上查看這篇文章")])
+
+    result = OllamaClient().extract("latent-space", "News")
+
+    assert result.items[0].title == "OpenRouter 討論 AI 代理的部署方式"
+    assert route.call_count == 1
+
+
+@respx.mock
 def test_a_title_translated_with_its_fields_is_still_translated_from_the_verbatim_headline() -> None:
     # The summary was English, so the whole item went to the field translator, which translated the
     # extractor's wrong 2.5 faithfully. Only its fields are kept; the headline comes from 5.5.
@@ -910,6 +937,17 @@ def test_a_placeholder_is_no_text_in_the_digest_language() -> None:
     assert [item.title for item in result.items] == ["模型發布"]
     assert result.dropped_for_language == 1
     assert route.call_count == 3
+
+
+@respx.mock
+def test_an_ellipsis_with_a_normal_parenthetical_is_not_a_placeholder() -> None:
+    answer = _items_result(("OpenAI 發布新功能", "OpenAI 發布新功能…（詳見下文）", "可改善工作流程。"))
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_chat(answer))
+
+    result = OllamaClient().extract("alphasignal", "News")
+
+    assert result.items[0].summary_zh_tw == "OpenAI 發布新功能…（詳見下文）"
+    assert route.call_count == 1
 
 
 @respx.mock

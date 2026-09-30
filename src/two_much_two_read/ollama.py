@@ -127,7 +127,7 @@ FIGURE = re.compile(r"\d+(?:[.,]\d+)*")
 # A note where text should be. qwen3:4b wrote "GPT-...（省略）" as the title, summary and
 # significance of a TLDR Dev item headed "GPT-6.1 SOL (WEBSITE)" on 2026-09-30, and ended a title
 # with "（需完整翻譯）" the day before; the Chinese in them passed for the digest language.
-PLACEHOLDER = re.compile(r"(?:\.\.\.|…)\s*[（(][^（）()]{0,12}[）)]|[（(]\s*(?:省略|略|需完整翻譯|待翻譯|未翻譯)\s*[）)]")
+PLACEHOLDER = re.compile(r"[（(]\s*(?:省略|略|需完整翻譯|待翻譯|未翻譯)\s*[）)]")
 # A single digit that versions a name - GPT-5, Opus 5, Q3 - which a translation must keep as it is.
 VERSION_DIGIT = re.compile(r"(?:[A-Za-z]-?|[A-Z][A-Za-z]*\s)(\d)(?![\d.,])")
 # A month named before a day ("Aug 26"), which a translation writes as its number (8 月 26 日).
@@ -674,10 +674,7 @@ class OllamaClient:
             for _ in range(TRANSLATE_ATTEMPTS):
                 answer = self._translated_items(source_id, {index: result.items[index]}).get(index)
                 if answer is not None and not outside(answer):
-                    # The fields only. This translation's title is of the extractor's title, which
-                    # may carry the extractor's mistake; the headline is translated below from the
-                    # newsletter's own words, if it needs to be.
-                    translated[index] = answer.model_copy(update={"title": result.items[index].title})
+                    translated[index] = answer
                     break
         kept: list[NewsletterItemAnalysis] = []
         for index, item in enumerate(result.items):
@@ -714,7 +711,13 @@ class OllamaClient:
         title, summary = getattr(item, "title", None), getattr(item, "summary_zh_tw", None)
         if not isinstance(title, str) or not self._title_needs_translation(title):
             return item
-        translated = self._translated_title(source_id, STORY_BOILERPLATE.sub("", headline).strip() or headline)
+        headline = STORY_BOILERPLATE.sub("", headline).strip() or headline
+        # Substack's plain text can have only this link line where the subject held the headline.
+        translated = (
+            None
+            if headline.casefold().startswith("view this post on the web at")
+            else self._translated_title(source_id, headline)
+        )
         if translated is not None:
             try:
                 return type(item).model_validate({**item.model_dump(), "title": translated})
@@ -809,19 +812,15 @@ class OllamaClient:
             # Losing the translation costs only the items that needed it, never the email.
             logger.warning("translation for %s failed: %s", source_id, type(error).__name__)
             return {}
-        expected = digest_language_code(self.digest_language)
         translated: dict[int, NewsletterItemAnalysis] = {}
         for translation in answer.items:
             original = items.get(translation.index)
             if original is None or translation.index in translated:
                 continue
-            # A title that is only names comes back as it went; the original is kept then.
-            title = original.title if _wrong_script(translation.title, expected) else translation.title
             try:
                 translated[translation.index] = NewsletterItemAnalysis.model_validate(
                     {
                         **original.model_dump(),
-                        "title": _in_script(title, self.digest_language),
                         "summary_zh_tw": _in_script(translation.summary, self.digest_language),
                         "why_it_matters_zh_tw": _in_script(translation.why_it_matters, self.digest_language),
                     }
