@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import base64
 import binascii
+import contextlib
+import ipaddress
 import re
 from collections.abc import Callable, Iterable
 from email import policy
@@ -50,6 +52,8 @@ MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)")
 # Markdown link label is left to the link pass, which takes the brackets off.
 LITERAL_LINK_CODE = re.compile(r"\[(\s*L\s*\d{1,4}\s*)\](?!\()", re.IGNORECASE)
 URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
+# A URL as the address it reaches: scheme, host and port, path, query (_target).
+Target = tuple[str, str, str, str]
 # How an unsubscribe link names itself in its address. "unsub" anywhere - unsubscribe, unsub/ - but
 # inside a longer word such as "unsubtle"; the opt-out spellings only as a whole word, since an
 # article's slug is as likely to be about opting out as the link is to do it.
@@ -162,7 +166,7 @@ def _plain_context(text: str, position: int, raw_url: str) -> str:
     return line.replace(raw_url, "").strip(" -:()")[:400]
 
 
-def _link_candidates(plain: str, html: str, unsubscribe: frozenset[str] = frozenset()) -> list[LinkCandidate]:
+def _link_candidates(plain: str, html: str, unsubscribe: frozenset[Target] = frozenset()) -> list[LinkCandidate]:
     """The links an email offers, in document order, for matching its items to their articles.
 
     Two bounds, and neither fails the email. MAX_LINK_OCCURRENCES caps the work: every link the
@@ -194,7 +198,7 @@ def _link_candidates(plain: str, html: str, unsubscribe: frozenset[str] = frozen
         nonlocal scanned
         scanned += 1
         safe_url = _safe_url(raw_url)
-        if safe_url is None or safe_url in seen or safe_url in unsubscribe or unsubscribe_link(safe_url):
+        if safe_url is None or safe_url in seen or _target(safe_url) in unsubscribe or unsubscribe_link(safe_url):
             return
         if CONTROL_LABEL_PATTERN.fullmatch(anchor_text.strip()):
             return
@@ -327,13 +331,32 @@ def _inlined_footnotes(text: str) -> str:
     return FOOTNOTE_REFERENCE.sub(lambda match: notes.get(match.group(1), match.group()), text[: table.start()])
 
 
-def _list_unsubscribe(values: Iterable[str]) -> frozenset[str]:
+def _list_unsubscribe(values: Iterable[str]) -> frozenset[Target]:
     """The web addresses a List-Unsubscribe header gives, each written as <url>."""
     targets = (target for value in values for target in re.findall(r"<([^<>]*)>", value))
-    return frozenset(url for target in targets if (url := _safe_url(target)) is not None)
+    return frozenset(_target(url) for target in targets if (url := _safe_url(target)) is not None)
 
 
-def _content(plain: list[str], html: list[str], unsubscribe: frozenset[str] = frozenset()) -> ExtractedEmailContent:
+def _target(url: str) -> Target:
+    """A safe URL as the address it reaches, so that the header and the body can spell it differently.
+
+    Host case, a trailing dot, the default port, an IP literal's spelling, an empty path, and
+    percent-encoding in the path all leave the request's target the same.
+    """
+    parts = urlsplit(url)
+    host = (parts.hostname or "").rstrip(".")
+    with contextlib.suppress(ValueError):
+        host = str(ipaddress.ip_address(host))
+    try:
+        port = parts.port
+    except ValueError:
+        return (parts.scheme, parts.netloc, parts.path, parts.query)
+    if port == {"http": 80, "https": 443}[parts.scheme]:
+        port = None
+    return (parts.scheme, host if port is None else f"{host}:{port}", unquote(parts.path) or "/", parts.query)
+
+
+def _content(plain: list[str], html: list[str], unsubscribe: frozenset[Target] = frozenset()) -> ExtractedEmailContent:
     # Stripped after cleaning: a plain part that was only padding is empty, not a space that outweighs
     # nothing and then trims to nothing.
     plain_content = _inlined_footnotes(_readable("\n".join(value.strip() for value in plain if value.strip())).strip())
