@@ -130,13 +130,13 @@ FIGURE = re.compile(r"\d+(?:[.,]\d+)*")
 PLACEHOLDER = re.compile(r"[（(]\s*(?:省略|略|需完整翻譯|待翻譯|未翻譯)\s*[）)]")
 # A single digit that versions a name - GPT-5, Opus 5, Q3 - which a translation must keep as it is.
 VERSION_DIGIT = re.compile(r"(?:[A-Za-z]-?|[A-Z][A-Za-z]*\s)(\d)(?![\d.,])")
-# A month named before a day or a year ("Aug 26", "Aug 2026"), which a translation writes as its
-# number (8 月 26 日, 2026 年 8 月).
-MONTH_DATE = re.compile(
-    r"\b(jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
-    r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?)\.?\s+(\d{4}|\d{1,2})(?!\d)",
-    re.IGNORECASE,
+# An English month may stand alone or name a date ("March", "Aug 26", "Aug 2026").
+MONTH_WORD = (
+    r"jan(?:uary)?|feb(?:ruary)?|mar(?:ch)?|apr(?:il)?|may|jun(?:e)?|jul(?:y)?|"
+    r"aug(?:ust)?|sep(?:t(?:ember)?)?|oct(?:ober)?|nov(?:ember)?|dec(?:ember)?"
 )
+MONTH_NAME = re.compile(rf"\b({MONTH_WORD})\b", re.IGNORECASE)
+MONTH_DATE = re.compile(rf"\b({MONTH_WORD})\.?\s+(\d{{4}}|\d{{1,2}})(?!\d)", re.IGNORECASE)
 MONTHS = ("jan", "feb", "mar", "apr", "may", "jun", "jul", "aug", "sep", "oct", "nov", "dec")
 # A title still outside the digest language once translation is done - the model echoed it, or
 # failed twice - gives way to the start of the summary, which has passed the language check. Telling
@@ -476,6 +476,10 @@ def _checked_title(source: str, translated: str, language: str) -> str | None:
     source_figures = FIGURE.findall(source)
     kept = {figure for figure in source_figures if "." in figure or len(figure) > 1} | set(VERSION_DIGIT.findall(source))
     months = {str(month) for month, _ in named}
+    # English month names are capitalized; lowercase "may" is usually a verb.
+    months.update(
+        str(MONTHS.index(match[1].casefold()[:3]) + 1) for match in MONTH_NAME.finditer(source) if match[1][0].isupper()
+    )
     figures = set(FIGURE.findall(title))
     if kept - figures or figures - set(source_figures) - months:
         return None

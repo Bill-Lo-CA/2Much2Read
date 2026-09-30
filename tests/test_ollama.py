@@ -1018,6 +1018,10 @@ def test_a_translation_the_schema_refuses_takes_the_summarys_lead(translation: s
         ("AI roundup, Aug 2026", "2026年8月AI綜述", "2026年8月AI綜述"),
         ("State of AI: September 2026", "人工智慧現況：2026年9月", "人工智慧現況：2026年9月"),
         ("AI roundup, Aug 2026", "2023年8月AI綜述", None),
+        ("March release notes", "3 月發行說明", "3 月發行說明"),
+        ("March release notes", "2023 年 3 月發行說明", None),
+        ("Market release notes", "3 月發行說明", None),
+        ("OpenAI may release notes", "OpenAI 將於 5 月發布說明", None),
         ("OpenAI blocked its agent's web access", "OpenAI blocked its agent's web access", None),
     ],
 )
