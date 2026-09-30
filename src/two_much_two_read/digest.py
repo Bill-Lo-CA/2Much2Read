@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import bisect
 import math
 import re
 from collections import Counter
@@ -434,17 +435,82 @@ def merge_related_entries(
         if index is None:
             deduped.append(mention)
             continue
-        kept = deduped[index]
-        if has_source_text(mention) and not has_source_text(kept):
-            # The one with something behind it becomes primary whichever ranked higher: its summary
-            # is the one worth keeping, and its article is the one a reader can open. The story keeps
-            # the higher rank, which the list position already reflects - the mention quota cuts in
-            # this order, so a lower score here would hold a slot a higher-scoring story is denied.
-            scores = [score for score in (kept.reranker_score, mention.reranker_score) if score is not None]
-            deduped[index] = replace(_absorbed(mention, kept), reranker_score=max(scores, default=None))
-        else:
-            deduped[index] = _absorbed(kept, mention)
+        deduped[index] = _folded(deduped[index], mention)
     return merged, deduped
+
+
+def _folded(kept: DigestEntry, other: DigestEntry) -> DigestEntry:
+    """kept, which ranked higher, and other as one entry."""
+    if has_source_text(other) and not has_source_text(kept):
+        # The one with something behind it becomes primary whichever ranked higher: its summary is
+        # the one worth keeping, and its article is the one a reader can open. The story keeps the
+        # higher rank, which the list position already reflects - the mention quota cuts in this
+        # order, so a lower score here would hold a slot a higher-scoring story is denied.
+        scores = [score for score in (kept.reranker_score, other.reranker_score) if score is not None]
+        return replace(_absorbed(other, kept), reranker_score=max(scores, default=None))
+    return _absorbed(kept, other)
+
+
+def merge_before_selection(
+    ranked: list[DigestEntry],
+    pool: Callable[[list[DigestEntry]], list[DigestEntry]],
+    same_story: Callable[[DigestEntry, DigestEntry], bool],
+) -> list[DigestEntry]:
+    """Fold each story's coverage into one entry before anything is chosen from them.
+
+    Merging used to follow the review, and only folded a mention into a headline or another mention.
+    Two picks were never compared, so the reviewer's own duplicates stayed: on 2026-09-28 Jev was
+    headlines 8 and 10, from Data Engineering Weekly and AlphaSignal. Merged first, the reviewer is
+    handed each story once, and the mentions are what is left of distinct stories.
+
+    pool names the entries that may be shown - the reviewer's candidates and the leading mentions -
+    since comparing every pair of a day's items would cost hundreds of judgements. Folding shrinks
+    the pool and lets entries further down into it, so it is taken again until it holds nothing
+    unchecked. Each entry is compared with those already checked, and the first pair the model
+    agrees on folds into the higher-ranked of the two; ranked order is kept.
+    """
+    entries: list[DigestEntry | None] = list(ranked)
+    checked: list[int] = []
+    # Every report a checked entry stands for, itself first. A merged entry's title and summary are
+    # its primary's, so B folded into A would otherwise hide B's words from C: A~B and B~C with no
+    # overlap between A and C left C beside A as a duplicate.
+    members: dict[int, list[DigestEntry]] = {}
+    while True:
+        shown = [index for index, value in enumerate(entries) if value is not None]
+        current = [value for value in entries if value is not None]
+        position = {id(value): index for index, value in zip(shown, current, strict=True)}
+        fresh = sorted(position[id(value)] for value in pool(current) if position[id(value)] not in checked)
+        if not fresh:
+            return current
+        for index in fresh:
+            entry = entries[index]
+            assert entry is not None
+            # Against every checked entry, not only those above: an entry let in by a fold may rank
+            # above some that were checked before it.
+            other = next(
+                (
+                    other
+                    for other in checked
+                    if any(share_a_candidate_token(entry, member) and same_story(entry, member) for member in members[other])
+                ),
+                None,
+            )
+            if other is None:
+                bisect.insort(checked, index)
+                members[index] = [entry]
+                continue
+            kept = entries[other]
+            assert kept is not None
+            if other < index:
+                entries[other] = _folded(kept, entry)
+                entries[index] = None
+                members[other].append(entry)
+            else:
+                entries[index] = _folded(entry, kept)
+                entries[other] = None
+                members[index] = [entry, *members.pop(other)]
+                checked.remove(other)
+                bisect.insort(checked, index)
 
 
 def _first_match(

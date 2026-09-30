@@ -19,6 +19,7 @@ from two_much_two_read.digest import (
     _entry_rank,
     dedupe_entries,
     has_source_text,
+    merge_before_selection,
     merge_related_entries,
     render_digest,
     with_previous_coverage,
@@ -963,6 +964,121 @@ def test_repeats_are_checked_on_what_the_reviewer_and_the_reader_see(tmp_path: P
     assert [value.previous_days for value in shown] == [1, 1]
     assert asked == ["Grok 4.7 pricing", "Grok 4.7 benchmarks"]
     assert messages == ["Checking 1 candidates against 1 items from the previous 3 days"] * 2
+
+
+def test_the_reviewer_is_handed_each_story_once() -> None:
+    # 2026-09-28: Jev was headlines 8 and 10, from Data Engineering Weekly and AlphaSignal. Merging ran
+    # after the review and never compared two picks; now the reviewer sees the story once, with both
+    # newsletters, and the slot the copy would have taken goes to another story.
+    handed: list[list[dict[str, object]]] = []
+
+    class Reviewer:
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
+            handed.append(candidates)
+            picks = [{"candidate_id": candidate["candidate_id"], "score": 90, "reason_zh_tw": "具體"} for candidate in candidates]
+            return DigestReview.model_validate({"selected": picks})
+
+        def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
+            return "Jev" in left["title"] and "Jev" in right["title"]
+
+    settings = Settings(digest_review_candidate_limit=2, digest_max_items=2, digest_repeat_window_days=0)
+    ranked = [
+        entry(1, "Jev System One models", "AlphaSignal"),
+        entry(2, "What Jev will do to data engineering", "Data Engineering Weekly"),
+        entry(3, "Grok 4.7 launch", "TLDR AI"),
+    ]
+    shown, _ = pipeline._selected_entries(settings, Reviewer(), ranked, lambda entries, _wanted: entries, lambda _m: None)
+
+    assert [(candidate["candidate_id"], candidate["source"]) for candidate in handed[0]] == [
+        (1, "AlphaSignal, Data Engineering Weekly"),
+        (3, "TLDR AI"),
+    ]
+    assert [(value.candidate_id, value.also_from) for value in shown] == [(1, ("Data Engineering Weekly",)), (3, ())]
+
+
+def test_an_entry_let_in_by_a_fold_is_compared_with_those_below_it_too() -> None:
+    # A pool of the leading three entries but 5, and 5, as a reviewer candidate would be. Folding 3
+    # into 2 lets 4 in, which ranks above 5 but arrives after it was checked; 5 is the same story, so
+    # it folds into 4 rather than being left beside it.
+    def pool(entries: list[DigestEntry]) -> list[DigestEntry]:
+        others = [value for value in entries if value.candidate_id != 5]
+        return others[:3] + [value for value in entries if value.candidate_id == 5]
+
+    def same_story(left: DigestEntry, right: DigestEntry) -> bool:
+        return {left.item.title, right.item.title} in ({"Grok 4.7", "Grok 4.7 pricing"}, {"Muse 2", "Muse 2 benchmarks"})
+
+    ranked = [
+        _headline_only(1, "Opus 5.5"),
+        _headline_only(2, "Grok 4.7"),
+        _headline_only(3, "Grok 4.7 pricing"),
+        _headline_only(4, "Muse 2"),
+        _headline_only(5, "Muse 2 benchmarks"),
+    ]
+
+    merged = merge_before_selection(ranked, pool, same_story)
+
+    assert [value.item.title for value in merged] == ["Opus 5.5", "Grok 4.7", "Muse 2"]
+
+
+def test_a_report_matching_only_an_absorbed_one_still_folds() -> None:
+    # A and C share no name, B shares one with each. B folds into A first; C must still be compared
+    # with B, or it stays beside A as a duplicate.
+    ranked = [
+        entry(1, "Grok launch", "TLDR AI"),
+        entry(2, "Grok Colossus pricing", "AlphaSignal"),
+        entry(3, "Colossus pricing", "AINews"),
+    ]
+
+    merged = merge_before_selection(ranked, lambda entries: entries, lambda _left, _right: True)
+
+    assert [(value.candidate_id, value.also_from) for value in merged] == [(1, ("AlphaSignal", "AINews"))]
+
+
+def test_a_repeat_found_through_a_folded_report_is_kept() -> None:
+    # Only the second report matches an earlier day. It folds into the first, so it is marked before
+    # merging; the merged entry keeps the count.
+    marked: list[int | None] = []
+
+    def mark(entries: list[DigestEntry], wanted: object) -> list[DigestEntry]:
+        assert callable(wanted)
+        out = []
+        for value in entries:
+            if wanted(value) and value.candidate_id not in marked:
+                marked.append(value.candidate_id)
+                if value.candidate_id == 2:
+                    value = replace(value, previous_days=2, previous_window=3)
+            out.append(value)
+        return out
+
+    class Reviewer:
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
+            picks = [{"candidate_id": candidate["candidate_id"], "score": 90, "reason_zh_tw": "具體"} for candidate in candidates]
+            return DigestReview.model_validate({"selected": picks})
+
+        def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
+            return True
+
+    settings = Settings(digest_review_candidate_limit=2, digest_max_items=2, digest_repeat_window_days=0)
+    ranked = [entry(1, "Grok 4.7 launch", "TLDR AI"), entry(2, "Grok 4.7 pricing", "AlphaSignal")]
+    shown, _ = pipeline._selected_entries(settings, Reviewer(), ranked, mark, lambda _m: None)
+
+    assert [(value.candidate_id, value.previous_days) for value in shown] == [(1, 2)]
+
+
+def test_a_pair_is_judged_once_whichever_way_round_it_is_asked() -> None:
+    asked: list[str] = []
+
+    class Judge:
+        def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
+            asked.append(left["title"])
+            return False
+
+    judge = pipeline._story_judge(Judge(), 10, lambda _m: None)
+    first, second = entry(1, "Grok 4.7", "TLDR AI"), entry(2, "Grok 4.7 pricing", "AlphaSignal")
+
+    assert not judge(first, second)
+    assert not judge(second, first)
+    assert asked == ["Grok 4.7"]
 
 
 def _headline(candidate_id: int, source: str, score: int) -> DigestEntry:
