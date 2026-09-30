@@ -3,13 +3,13 @@ from __future__ import annotations
 import base64
 import binascii
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable
 from email import policy
 from email.message import Message
 from email.parser import BytesParser
 from functools import partial
 from typing import Literal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
@@ -50,6 +50,11 @@ MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)")
 # Markdown link label is left to the link pass, which takes the brackets off.
 LITERAL_LINK_CODE = re.compile(r"\[(\s*L\s*\d{1,4}\s*)\](?!\()", re.IGNORECASE)
 URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
+# How an unsubscribe link names itself in its address. "unsub" anywhere - unsubscribe, unsub/ - but
+# inside a longer word such as "unsubtle"; the opt-out spellings only as a whole word, since an
+# article's slug is as likely to be about opting out as the link is to do it.
+UNSUBSCRIBE_WORD = re.compile(r"unsub(?:scri|(?![a-z]))")
+UNSUBSCRIBE_TOKENS = frozenset({"optout", "opt-out", "opt_out", "disable_email"})
 # Characters that print as nothing. Senders pad the preview text with them, alternating with no-break
 # spaces, so that a mail client shows no more of the body in the inbox: TLDR's four editions each
 # send 52 such pairs, 264 tokens of nothing. Only runs go: one such character alone is part of the
@@ -63,6 +68,24 @@ INVISIBLE_RUN = re.compile(rf"[{INVISIBLE}](?:[ \t\u00a0\u2007\u202f]*[{INVISIBL
 FOOTNOTE_TABLE = re.compile(r"\n[ \t]*Links:[ \t]*\n[ \t]*-{3,}[ \t]*\n((?:[ \t]*\[\d{1,4}\][ \t]+\S+[ \t]*(?:\n|\Z))+)\s*\Z")
 FOOTNOTE_ENTRY = re.compile(r"\[(\d{1,4})\][ \t]+(\S+)")
 FOOTNOTE_REFERENCE = re.compile(r"(?<!\[)\[(\d{1,4})\](?![\](])")
+
+
+def unsubscribe_link(url: str) -> bool:
+    """Whether the URL's own words say it unsubscribes: in its host, path, or query, decoded.
+
+    A newsletter's footer control is no story's link, whatever it is labelled. AlphaSignal ended an
+    issue with "Stop receiving emails here:" and labelled the same link "unsubscribe_me(): return
+    True"; neither is a label the footer filter knows, so it became a candidate, the only link code
+    in the text the extractor read, and the extractor gave it to a story.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+    except ValueError:
+        return False
+    query = [value for pair in parse_qsl(parts.query, keep_blank_values=True) for value in pair]
+    text = " ".join([host, unquote(parts.path), *query]).casefold()
+    return bool(UNSUBSCRIBE_WORD.search(text)) or not UNSUBSCRIBE_TOKENS.isdisjoint(re.split(r"[^a-z0-9_-]+", text))
 
 
 class EmailExtractionError(ValueError):
@@ -139,7 +162,7 @@ def _plain_context(text: str, position: int, raw_url: str) -> str:
     return line.replace(raw_url, "").strip(" -:()")[:400]
 
 
-def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
+def _link_candidates(plain: str, html: str, unsubscribe: frozenset[str] = frozenset()) -> list[LinkCandidate]:
     """The links an email offers, in document order, for matching its items to their articles.
 
     Two bounds, and neither fails the email. MAX_LINK_OCCURRENCES caps the work: every link the
@@ -151,6 +174,9 @@ def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
     link in the HTML and the plain part, so they crossed it on repeats alone and the whole email
     failed - AINews lost 11 of 25 issues that way - when the cost of a cut is only that items
     further down match no link.
+
+    No unsubscribe link is a candidate, whatever its label: those the email's List-Unsubscribe
+    header names (unsubscribe), and any whose address says it unsubscribes (unsubscribe_link).
     """
     candidates: list[LinkCandidate] = []
     seen: set[str] = set()
@@ -168,7 +194,7 @@ def _link_candidates(plain: str, html: str) -> list[LinkCandidate]:
         nonlocal scanned
         scanned += 1
         safe_url = _safe_url(raw_url)
-        if safe_url is None or safe_url in seen:
+        if safe_url is None or safe_url in seen or safe_url in unsubscribe or unsubscribe_link(safe_url):
             return
         if CONTROL_LABEL_PATTERN.fullmatch(anchor_text.strip()):
             return
@@ -301,7 +327,13 @@ def _inlined_footnotes(text: str) -> str:
     return FOOTNOTE_REFERENCE.sub(lambda match: notes.get(match.group(1), match.group()), text[: table.start()])
 
 
-def _content(plain: list[str], html: list[str]) -> ExtractedEmailContent:
+def _list_unsubscribe(values: Iterable[str]) -> frozenset[str]:
+    """The web addresses a List-Unsubscribe header gives, each written as <url>."""
+    targets = (target for value in values for target in re.findall(r"<([^<>]*)>", value))
+    return frozenset(url for target in targets if (url := _safe_url(target)) is not None)
+
+
+def _content(plain: list[str], html: list[str], unsubscribe: frozenset[str] = frozenset()) -> ExtractedEmailContent:
     # Stripped after cleaning: a plain part that was only padding is empty, not a space that outweighs
     # nothing and then trims to nothing.
     plain_content = _inlined_footnotes(_readable("\n".join(value.strip() for value in plain if value.strip())).strip())
@@ -311,7 +343,7 @@ def _content(plain: list[str], html: list[str]) -> ExtractedEmailContent:
     # Words against words: the HTML's text still carries every link's URL, which the plain part may not.
     if len(URL_PATTERN.sub("", analysis_text)) * PLAIN_PART_STAND_IN_RATIO < len(URL_PATTERN.sub("", html_text)):
         analysis_text = html_text
-    candidates = _link_candidates(plain_content, html_content)
+    candidates = _link_candidates(plain_content, html_content, unsubscribe)
     # Coded before the length is measured and cut, so the cut is spent on text rather than URLs.
     analysis_text = _coded_text(analysis_text, candidates)
     # Line by line rather than with [ \t]+\n, which rescans a long run of spaces from each of them.
@@ -368,7 +400,7 @@ def extract_mime(raw: bytes) -> ExtractedEmailContent:
             plain.append(_decode(part, payload))
         elif content_type == "text/html":
             html.append(_decode(part, payload))
-    return _content(plain, html)
+    return _content(plain, html, _list_unsubscribe(str(value) for value in message.get_all("List-Unsubscribe", [])))
 
 
 def _gmail_payload_bytes(data: str) -> bytes | None:
@@ -428,4 +460,13 @@ def extract_gmail_payload(payload: dict[str, object]) -> ExtractedEmailContent:
                 if isinstance(part, dict):
                     budget.visit(depth + 1)
                     stack.append((part, depth + 1))
-    return _content(plain, html)
+    headers = payload.get("headers", [])
+    return _content(
+        plain,
+        html,
+        _list_unsubscribe(
+            str(header.get("value", ""))
+            for header in (headers if isinstance(headers, list) else [])
+            if isinstance(header, dict) and str(header.get("name", "")).casefold() == "list-unsubscribe"
+        ),
+    )
