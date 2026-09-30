@@ -291,7 +291,7 @@ def dedupe_entries(items: list[DigestEntry]) -> list[DigestEntry]:
 # translation is the Latin-script product and vendor names, which makes them a usable shortlist for
 # which pairs to ask about. TLDR's section markers are stripped first: they are shared by every item
 # in a section and would shortlist a whole newsletter against itself.
-STORY_BOILERPLATE = re.compile(r"\((?:product launch|sponsor|\d+\s*minute read)\)", re.IGNORECASE)
+STORY_BOILERPLATE = re.compile(r"\((?:product launch|sponsor|website|github repo|\d+\s*minute read)\)", re.IGNORECASE)
 STORY_TOKEN = re.compile(r"[A-Za-z][A-Za-z0-9.\-]*")
 # Capitalised in the source, or carrying a version number. This once tried to be a definition of
 # identity, which it cannot be - ordinary English vocabulary is capitalised in a Title Case headline.

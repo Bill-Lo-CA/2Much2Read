@@ -124,6 +124,10 @@ TITLE_TRANSLATION_NUM_CTX = 2048
 YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 # A figure as a whole token: 5.5 is not found in 15.5, nor 26 in 260.
 FIGURE = re.compile(r"\d+(?:[.,]\d+)*")
+# A note where text should be. qwen3:4b wrote "GPT-...（省略）" as the title, summary and
+# significance of a TLDR Dev item headed "GPT-6.1 SOL (WEBSITE)" on 2026-09-30, and ended a title
+# with "（需完整翻譯）" the day before; the Chinese in them passed for the digest language.
+PLACEHOLDER = re.compile(r"(?:\.\.\.|…)\s*[（(][^（）()]{0,12}[）)]|[（(]\s*(?:省略|略|需完整翻譯|待翻譯|未翻譯)\s*[）)]")
 # A single digit that versions a name - GPT-5, Opus 5, Q3 - which a translation must keep as it is.
 VERSION_DIGIT = re.compile(r"(?:[A-Za-z]-?|[A-Z][A-Za-z]*\s)(\d)(?![\d.,])")
 # A month named before a day ("Aug 26"), which a translation writes as its number (8 月 26 日).
@@ -469,14 +473,6 @@ def _checked_title(source: str, translated: str, language: str) -> str | None:
     return title
 
 
-def _titled(item: ScriptedModel, language: str) -> ScriptedModel:
-    """The item, its title replaced by the summary's lead when the title is outside the language."""
-    title, summary = getattr(item, "title", None), getattr(item, "summary_zh_tw", None)
-    if isinstance(title, str) and isinstance(summary, str) and _wrong_script(title, digest_language_code(language)):
-        return item.model_copy(update={"title": _title_from_summary(summary)})
-    return item
-
-
 def _validate_digest_language(language: str, values: list[str]) -> None:
     expected = digest_language_code(language)
     for value in values:
@@ -669,10 +665,9 @@ class OllamaClient:
         still outside it takes the summary's lead instead; see FALLBACK_TITLE_CHARACTERS. The email
         fails only when no item is left.
         """
-        expected = digest_language_code(self.digest_language)
         outside = self._outside_language
         pending = [index for index, item in enumerate(result.items) if outside(item)]
-        if not pending and not any(_wrong_script(item.title, expected) for item in result.items):
+        if not pending and not any(self._title_needs_translation(item.title) for item in result.items):
             return result
         translated: dict[int, NewsletterItemAnalysis] = {}
         for index in pending:
@@ -716,8 +711,8 @@ class OllamaClient:
         again rather than copied, so the schema's rules - no links, 200 characters - hold for what the
         translator wrote as they do for the extractor.
         """
-        title = getattr(item, "title", None)
-        if not isinstance(title, str) or not _wrong_script(title, digest_language_code(self.digest_language)):
+        title, summary = getattr(item, "title", None), getattr(item, "summary_zh_tw", None)
+        if not isinstance(title, str) or not self._title_needs_translation(title):
             return item
         translated = self._translated_title(source_id, STORY_BOILERPLATE.sub("", headline).strip() or headline)
         if translated is not None:
@@ -725,7 +720,10 @@ class OllamaClient:
                 return type(item).model_validate({**item.model_dump(), "title": translated})
             except ValidationError:
                 pass
-        return _titled(item, self.digest_language)
+        return item.model_copy(update={"title": _title_from_summary(summary)}) if isinstance(summary, str) else item
+
+    def _title_needs_translation(self, title: str) -> bool:
+        return _wrong_script(title, digest_language_code(self.digest_language)) or bool(PLACEHOLDER.search(title))
 
     def _translated_title(self, source_id: str, title: str) -> str | None:
         expected = digest_language_code(self.digest_language)
@@ -760,11 +758,12 @@ class OllamaClient:
         return _checked_title(title, _in_script(answer, self.digest_language), self.digest_language)
 
     def _outside_language(self, item: NewsletterItemAnalysis) -> bool:
-        """Whether the item's summary or significance is not in the digest language."""
+        """Whether the item's summary or significance is not in the digest language, or is a placeholder."""
         expected = digest_language_code(self.digest_language)
         return (
             _wrong_script(item.summary_zh_tw, expected)
             or _wrong_script(item.why_it_matters_zh_tw, expected)
+            or any(PLACEHOLDER.search(value) for value in (item.summary_zh_tw, item.why_it_matters_zh_tw))
             or _in_other_variety(self.digest_language, item)
         )
 

@@ -893,6 +893,38 @@ def test_a_title_translated_with_its_fields_is_still_translated_from_the_verbati
     assert json.loads(route.calls[2].request.content)["messages"][0]["content"].endswith("\n\n\nClaude Sonnet 5.5 ships")
 
 
+@respx.mock
+def test_a_placeholder_is_no_text_in_the_digest_language() -> None:
+    # 2026-09-30: "GPT-...（省略）" filled all three fields of a TLDR Dev item, and its Chinese passed
+    # for the digest language. The fields go to the translator, and still a placeholder, the item goes.
+    placeholder = ("GPT-...（省略）", "GPT-...（省略）", "GPT-...（省略）")
+    answer = _items_result(GOOD, placeholder)
+    answer["items"][1]["source_title"] = "GPT-6.1 SOL (WEBSITE)"  # type: ignore[index]
+    still = _chat(
+        {"items": [{"index": 1, "title": "GPT-...（省略）", "summary": "GPT-...（省略）", "why_it_matters": "（省略）"}]}
+    )
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_chat(answer), still, still])
+
+    result = OllamaClient().extract("tldr-dev", "News")
+
+    assert [item.title for item in result.items] == ["模型發布"]
+    assert result.dropped_for_language == 1
+    assert route.call_count == 3
+
+
+@respx.mock
+def test_a_placeholder_title_is_translated_from_the_headline_without_its_marker() -> None:
+    answer = _items_result(GOOD, ("GPT-...（省略）", "GPT-6.1 Sol 以五分之一價格接近 Astra。", "降低成本。"))
+    answer["items"][1]["source_title"] = "GPT-6.1 SOL (WEBSITE)"  # type: ignore[index]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_chat(answer), _translation("GPT-6.1 Sol")])
+
+    result = OllamaClient().extract("tldr-dev", "News")
+
+    # The translator left the name as it was, so the summary's lead stands in.
+    assert result.items[1].title == "GPT-6.1 Sol 以五分之一價格接近 Astra"
+    assert json.loads(route.calls[1].request.content)["messages"][0]["content"].endswith("\n\n\nGPT-6.1 SOL")
+
+
 @pytest.mark.parametrize(
     "translation",
     ["詳見 https://evil.example/ 的說明", "很長的標題" * 50],
