@@ -77,16 +77,22 @@ def _comparable(url: str) -> str:
     """The URL as one spelling, so two that reach the same resource compare equal.
 
     What _validate_url and the server make the same: scheme and host in lower case, the host without
-    a trailing dot and in its ASCII (IDNA) form, an empty path as /, a default port and any fragment
-    left out, and percent-escapes as RFC 3986 normalises them.
+    a trailing dot, an IP literal in its canonical form and a name in its ASCII (IDNA) form, an empty
+    path as /, a default port and any fragment left out, and percent-escapes as RFC 3986 normalises
+    them.
     """
     try:
         parts = urlsplit(url.strip())
         scheme, host, port = parts.scheme.lower(), (parts.hostname or "").rstrip(".").lower(), parts.port
     except ValueError:
         return url
-    with contextlib.suppress(UnicodeError):
-        host = host.encode("idna").decode("ascii")
+    try:
+        # An IP literal in its one written form: [2606:4700::1111] and its expanded spelling are the
+        # address _validate_url connects to either way.
+        host = str(ipaddress.ip_address(host))
+    except ValueError:
+        with contextlib.suppress(UnicodeError):
+            host = host.encode("idna").decode("ascii")
     netloc = f"[{host}]" if ":" in host else host
     if port is not None and port != {"http": 80, "https": 443}.get(scheme):
         netloc = f"{netloc}:{port}"

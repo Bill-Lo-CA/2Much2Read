@@ -154,6 +154,8 @@ def test_a_listed_address_is_matched_in_any_spelling_of_its_default_port() -> No
     assert unsubscribe_url("https://publisher.example/%75s?uid=%61bc", {"https://publisher.example/us?uid=abc"})
     assert unsubscribe_url("https://publisher.example/us?to=a%2fb", {"https://publisher.example/us?to=a%2Fb"})
     assert not unsubscribe_url("https://publisher.example/us?to=a/b", {"https://publisher.example/us?to=a%2Fb"})
+    assert unsubscribe_url("https://[2606:4700:4700:0:0:0:0:1111]/us", {"https://[2606:4700:4700::1111]/us"})
+    assert unsubscribe_url("https://[2606:4700:4700::1111]:443/us", {"https://[2606:4700:4700:0::1111]/us"})
     # An empty path is requested as /.
     assert unsubscribe_url("https://publisher.example/?uid=abc", {"https://publisher.example?uid=abc"})
     assert unsubscribe_url("https://publisher.example?uid=abc", {"https://publisher.example/?uid=abc"})
