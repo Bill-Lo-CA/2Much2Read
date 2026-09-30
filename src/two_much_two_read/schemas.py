@@ -67,8 +67,6 @@ class ExtractedEmailContent(BaseModel):
     analysis_text: str = Field(min_length=1)
     original_characters: int | None = None
     link_candidates: list[LinkCandidate] = Field(default_factory=list)
-    # What the List-Unsubscribe header names, which no hop of a link's resolution may reach.
-    unsubscribe_urls: frozenset[str] = frozenset()
 
 
 class ItemAnalysis(BaseModel):

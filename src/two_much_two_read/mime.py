@@ -9,12 +9,11 @@ from email.message import Message
 from email.parser import BytesParser
 from functools import partial
 from typing import Literal
-from urllib.parse import urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 from bs4.element import Tag
 
-from .article_fetcher import unsubscribe_url
 from .schemas import HTTP_URL, ExtractedEmailContent, LinkCandidate
 
 MAX_MIME_DEPTH = 20
@@ -51,6 +50,11 @@ MARKDOWN_LINK_PATTERN = re.compile(r"\[([^\[\]]+)\]\((https?://[^\s()]+)\)")
 # Markdown link label is left to the link pass, which takes the brackets off.
 LITERAL_LINK_CODE = re.compile(r"\[(\s*L\s*\d{1,4}\s*)\](?!\()", re.IGNORECASE)
 URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
+# How an unsubscribe link names itself in its address. "unsub" anywhere - unsubscribe, unsub/ - but
+# inside a longer word such as "unsubtle"; the opt-out spellings only as a whole word, since an
+# article's slug is as likely to be about opting out as the link is to do it.
+UNSUBSCRIBE_WORD = re.compile(r"unsub(?:scri|(?![a-z]))")
+UNSUBSCRIBE_TOKENS = frozenset({"optout", "opt-out", "opt_out", "disable_email"})
 # Characters that print as nothing. Senders pad the preview text with them, alternating with no-break
 # spaces, so that a mail client shows no more of the body in the inbox: TLDR's four editions each
 # send 52 such pairs, 264 tokens of nothing. Only runs go: one such character alone is part of the
@@ -64,6 +68,24 @@ INVISIBLE_RUN = re.compile(rf"[{INVISIBLE}](?:[ \t\u00a0\u2007\u202f]*[{INVISIBL
 FOOTNOTE_TABLE = re.compile(r"\n[ \t]*Links:[ \t]*\n[ \t]*-{3,}[ \t]*\n((?:[ \t]*\[\d{1,4}\][ \t]+\S+[ \t]*(?:\n|\Z))+)\s*\Z")
 FOOTNOTE_ENTRY = re.compile(r"\[(\d{1,4})\][ \t]+(\S+)")
 FOOTNOTE_REFERENCE = re.compile(r"(?<!\[)\[(\d{1,4})\](?![\](])")
+
+
+def unsubscribe_link(url: str) -> bool:
+    """Whether the URL's own words say it unsubscribes: in its host, path, or query, decoded.
+
+    A newsletter's footer control is no story's link, whatever it is labelled. AlphaSignal ended an
+    issue with "Stop receiving emails here:" and labelled the same link "unsubscribe_me(): return
+    True"; neither is a label the footer filter knows, so it became a candidate, the only link code
+    in the text the extractor read, and the extractor gave it to a story.
+    """
+    try:
+        parts = urlsplit(url)
+        host = parts.hostname or ""
+    except ValueError:
+        return False
+    query = [value for pair in parse_qsl(parts.query, keep_blank_values=True) for value in pair]
+    text = " ".join([host, unquote(parts.path), *query]).casefold()
+    return bool(UNSUBSCRIBE_WORD.search(text)) or not UNSUBSCRIBE_TOKENS.isdisjoint(re.split(r"[^a-z0-9_-]+", text))
 
 
 class EmailExtractionError(ValueError):
@@ -153,9 +175,8 @@ def _link_candidates(plain: str, html: str, unsubscribe: frozenset[str] = frozen
     failed - AINews lost 11 of 25 issues that way - when the cost of a cut is only that items
     further down match no link.
 
-    No unsubscribe link is a candidate, whatever its label: the ones the email's List-Unsubscribe
-    header names (unsubscribe), and any whose address says it unsubscribes. A candidate is resolved,
-    which opens it.
+    No unsubscribe link is a candidate, whatever its label: those the email's List-Unsubscribe
+    header names (unsubscribe), and any whose address says it unsubscribes (unsubscribe_link).
     """
     candidates: list[LinkCandidate] = []
     seen: set[str] = set()
@@ -173,7 +194,7 @@ def _link_candidates(plain: str, html: str, unsubscribe: frozenset[str] = frozen
         nonlocal scanned
         scanned += 1
         safe_url = _safe_url(raw_url)
-        if safe_url is None or safe_url in seen or unsubscribe_url(safe_url, unsubscribe):
+        if safe_url is None or safe_url in seen or safe_url in unsubscribe or unsubscribe_link(safe_url):
             return
         if CONTROL_LABEL_PATTERN.fullmatch(anchor_text.strip()):
             return
@@ -336,7 +357,6 @@ def _content(plain: list[str], html: list[str], unsubscribe: frozenset[str] = fr
         analysis_text=analysis_text,
         original_characters=original_characters,
         link_candidates=candidates,
-        unsubscribe_urls=unsubscribe,
     )
 
 

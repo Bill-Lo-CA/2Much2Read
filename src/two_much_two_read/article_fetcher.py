@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 import html
 import http.client
 import ipaddress
@@ -9,12 +8,12 @@ import re
 import socket
 import ssl
 import time
-from collections.abc import Callable, Collection, Mapping
+from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FutureTimeoutError
 from dataclasses import dataclass
 from urllib import robotparser
-from urllib.parse import parse_qsl, unquote, urljoin, urlsplit, urlunsplit
+from urllib.parse import urljoin, urlsplit, urlunsplit
 
 from bs4 import BeautifulSoup
 
@@ -51,75 +50,9 @@ HUBSPOT_NEXT_HOP_PATH = r"/events/public/v1/encoded/track/tc/[^\s\"'<>\\]+"
 # A refresh this soon is the page redirecting; a longer one is a page reloading itself.
 MAX_META_REFRESH_SECONDS = 10
 META_REFRESH = re.compile(r"^\s*(\d+(?:\.\d+)?)\s*[;,]\s*url\s*=\s*['\"]?([^'\"\s]+)", re.IGNORECASE)
-# How an unsubscribe link names itself. "unsub" is matched anywhere - unsubscribe, unsub/ - except
-# inside a longer word such as "unsubtle"; the opt-out spellings only as a whole word, since an
-# article's slug is as likely to be about opting out as the link is to do it.
-UNSUBSCRIBE_WORD = re.compile(r"unsub(?:scri|(?![a-z]))")
-UNSUBSCRIBE_TOKENS = frozenset({"optout", "opt-out", "opt_out", "disable_email"})
-PERCENT_ESCAPE = re.compile(r"%([0-9A-Fa-f]{2})")
-UNRESERVED = frozenset("ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _DNS_EXECUTOR = ThreadPoolExecutor(max_workers=4, thread_name_prefix="article-dns")
 
 logger = logging.getLogger(__name__)
-
-
-def _unreserved(text: str) -> str:
-    """Percent-escapes as one spelling: an unreserved character decoded, any other in upper case."""
-    return PERCENT_ESCAPE.sub(
-        lambda match: (
-            chr(value) if (value := int(match.group(1), 16)) < 128 and chr(value) in UNRESERVED else match.group().upper()
-        ),
-        text,
-    )
-
-
-def _comparable(url: str) -> str:
-    """The URL as one spelling, so two that reach the same resource compare equal.
-
-    What _validate_url and the server make the same: scheme and host in lower case, the host without
-    a trailing dot, an IP literal in its canonical form and a name in its ASCII (IDNA) form, an empty
-    path as /, a default port and any fragment left out, and percent-escapes as RFC 3986 normalises
-    them.
-    """
-    try:
-        parts = urlsplit(url.strip())
-        scheme, host, port = parts.scheme.lower(), (parts.hostname or "").rstrip(".").lower(), parts.port
-    except ValueError:
-        return url
-    try:
-        # An IP literal in its one written form: [2606:4700::1111] and its expanded spelling are the
-        # address _validate_url connects to either way.
-        host = str(ipaddress.ip_address(host))
-    except ValueError:
-        with contextlib.suppress(UnicodeError):
-            host = host.encode("idna").decode("ascii")
-    netloc = f"[{host}]" if ":" in host else host
-    if port is not None and port != {"http": 80, "https": 443}.get(scheme):
-        netloc = f"{netloc}:{port}"
-    path = _unreserved(parts.path) or ("/" if scheme in {"http", "https"} else "")
-    return urlunsplit((scheme, netloc, path, _unreserved(parts.query), ""))
-
-
-def unsubscribe_url(url: str, listed: Collection[str] = ()) -> bool:
-    """Whether opening the URL may unsubscribe the reader: listed as such, or by the words it uses.
-
-    An unsubscribe link does its work when it is opened, and resolving a link opens it. AlphaSignal
-    ends an issue with "Stop receiving emails here:" and a one-click /unsubscribe/ link carrying the
-    subscriber's id; the extractor gave that link to a story, the resolver opened it, and the digest
-    showed it. The host, the path and the query are all read, so a tracker's encoded destination
-    counts too. listed is what the email's List-Unsubscribe header names, whose addresses need say
-    nothing of unsubscribing (AlphaSignal's is /us?uid=).
-    """
-    if listed and _comparable(url) in {_comparable(value) for value in listed}:
-        return True
-    try:
-        parts = urlsplit(url)
-        host = parts.hostname or ""
-    except ValueError:
-        return False
-    query = [value for pair in parse_qsl(parts.query, keep_blank_values=True) for value in pair]
-    text = " ".join([host, unquote(parts.path), *query]).casefold()
-    return bool(UNSUBSCRIBE_WORD.search(text)) or not UNSUBSCRIBE_TOKENS.isdisjoint(re.split(r"[^a-z0-9_-]+", text))
 
 
 class ArticleFetchError(ValueError):
@@ -238,7 +171,7 @@ class ArticleFetcher:
             return FetchedArticle(requested_url, current.url, content_type, response.body)
         raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
 
-    def resolve_url(self, requested_url: str, unsubscribe: Collection[str] = ()) -> ResolvedUrl:
+    def resolve_url(self, requested_url: str) -> ResolvedUrl:
         """Follow a newsletter link to the page it stands for, and name that page.
 
         HTTP redirects, and the two page-level hops trackers use in their place: HubSpot's click
@@ -247,13 +180,12 @@ class ArticleFetcher:
         chain arrives, the destination is the link even when its page will not serve a crawler (once
         the chain has left the link's own host), is too large to read whole, or is a PDF: the
         address is what the digest stores and shows. Any other download is refused, so a link never
-        leads a reader to an executable or an archive. unsubscribe is the email's List-Unsubscribe
-        addresses: a tracker in the body may redirect to one, and no hop to it is ever requested.
+        leads a reader to an executable or an archive.
         """
         deadline = self.clock() + URL_RESOLUTION_DEADLINE_SECONDS
         try:
             self._check_deadline(deadline)
-            current = self._validate_url(requested_url, redirect=False, deadline=deadline, unsubscribe=unsubscribe)
+            current = self._validate_url(requested_url, redirect=False, deadline=deadline)
             requested_host = current.hostname
             seen_urls = {current.url}
             for redirects in range(MAX_REDIRECTS + 1):
@@ -288,16 +220,14 @@ class ArticleFetcher:
                     self._check_deadline(deadline)
                     page_location = self._page_redirect(current, response.body, soup)
                     if page_location is None:
-                        return ResolvedUrl(requested_url, current.url, self._canonical_url(current, soup, deadline, unsubscribe))
+                        return ResolvedUrl(requested_url, current.url, self._canonical_url(current, soup, deadline))
                     location, page_hop = page_location, True
                 if redirects == MAX_REDIRECTS:
                     raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
-                next_url = self._validate_url(
-                    urljoin(current.url, location), redirect=True, deadline=deadline, unsubscribe=unsubscribe
-                )
+                next_url = self._validate_url(urljoin(current.url, location), redirect=True, deadline=deadline)
                 if page_hop and next_url.url == current.url:
                     # A page that refreshes to itself is the destination, not a hop.
-                    return ResolvedUrl(requested_url, current.url, self._canonical_url(current, soup, deadline, unsubscribe))
+                    return ResolvedUrl(requested_url, current.url, self._canonical_url(current, soup, deadline))
                 if next_url.url in seen_urls:
                     raise ArticleFetchError("ARTICLE_REDIRECT_BLOCKED")
                 seen_urls.add(next_url.url)
@@ -323,11 +253,7 @@ class ArticleFetcher:
                 return match.group(2)
         return None
 
-    def _canonical_url(
-        self, page: ValidatedURL, soup: BeautifulSoup, deadline: float, unsubscribe: Collection[str] = ()
-    ) -> str | None:
-        # unsubscribe as for a hop: a page may name the email's List-Unsubscribe address as its own,
-        # and the canonical is the link the digest shows first.
+    def _canonical_url(self, page: ValidatedURL, soup: BeautifulSoup, deadline: float) -> str | None:
         self._check_deadline(deadline)
         canonical = soup.find("link", rel=lambda value: value and "canonical" in value)
         value = str(canonical.get("href", "")) if canonical else ""
@@ -337,7 +263,7 @@ class ArticleFetcher:
         if not value:
             return None
         try:
-            candidate = self._validate_url(urljoin(page.url, value), redirect=False, deadline=deadline, unsubscribe=unsubscribe)
+            candidate = self._validate_url(urljoin(page.url, value), redirect=False, deadline=deadline)
         except ArticleFetchError:
             return None
         if page.url.startswith("https://") and candidate.url.startswith("http://"):
@@ -346,9 +272,7 @@ class ArticleFetcher:
             return None
         return candidate.url
 
-    def _validate_url(
-        self, value: str, *, redirect: bool, deadline: float | None = None, unsubscribe: Collection[str] | None = None
-    ) -> ValidatedURL:
+    def _validate_url(self, value: str, *, redirect: bool, deadline: float | None = None) -> ValidatedURL:
         if deadline is not None:
             self._check_deadline(deadline)
         code = "ARTICLE_REDIRECT_BLOCKED" if redirect else "ARTICLE_URL_BLOCKED"
@@ -364,11 +288,6 @@ class ArticleFetcher:
         if parsed.username is not None or parsed.password is not None:
             raise ArticleFetchError(code)
         if port not in {None, 80, 443}:
-            raise ArticleFetchError(code)
-        # Before any request, and for every hop: a tracker's link reaches the unsubscribe page only
-        # by redirect. Only for a newsletter's link, which carries its subscriber: a Hacker News story
-        # or an article about unsubscribe buttons unsubscribes nobody.
-        if unsubscribe is not None and unsubscribe_url(value, unsubscribe):
             raise ArticleFetchError(code)
         hostname = parsed.hostname.rstrip(".").lower()
         if not hostname or hostname == "localhost":

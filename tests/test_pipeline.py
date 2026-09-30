@@ -3,7 +3,7 @@ from __future__ import annotations
 import re
 import sqlite3
 from base64 import urlsafe_b64encode
-from collections.abc import Collection, Iterator, Sequence
+from collections.abc import Iterator, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from hashlib import sha256
@@ -133,8 +133,6 @@ TRACKER = "https://info.example.io/e3t/Ctc/L2+113/abc"
 ARTICLE = ("https://publisher.example/article", "https://publisher.example/canonical")
 RESOLVED = ("https://publisher.example/canonical", "https://publisher.example/article", "https://publisher.example/canonical")
 TAGGED = "https://publisher.example/post?mc_cid=1&utm_source=news"
-# The List-Unsubscribe address the test email carries, which says nothing of unsubscribing itself.
-LISTED_UNSUBSCRIBE = "https://example.com/us?uid=1"
 
 
 @pytest.mark.parametrize(
@@ -156,9 +154,6 @@ LISTED_UNSUBSCRIBE = "https://example.com/us?uid=1"
         # The sender's own front page: the newsletter describing itself, not a story it carries.
         ("https://short.example/go", None, ("https://www.example.com/", None), None),
         ("https://www.example.com/?ref=newsletter", None, None, None),
-        # Cached as reaching the email's List-Unsubscribe address, before the resolver refused one:
-        # resolved again, which now refuses it or, here, finds the article.
-        ("https://short.example/go", (LISTED_UNSUBSCRIBE, None), ARTICLE, RESOLVED),
     ],
     ids=[
         "fresh",
@@ -167,7 +162,6 @@ LISTED_UNSUBSCRIBE = "https://example.com/us?uid=1"
         "tagged-article-cache",
         "own-front-page",
         "failed-own-front-page",
-        "cached-unsubscribe",
     ],
 )
 def test_gmail_url_enrichment_owns_and_persists_resolved_url(
@@ -200,11 +194,7 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(
                 "threadId": "thread-1",
                 "internalDate": "1784786400000",
                 "payload": {
-                    "headers": [
-                        {"name": "Subject", "value": "Newsletter"},
-                        {"name": "From", "value": "news@example.com"},
-                        {"name": "List-Unsubscribe", "value": f"<mailto:leave@example.com>, <{LISTED_UNSUBSCRIBE}>"},
-                    ],
+                    "headers": [{"name": "Subject", "value": "Newsletter"}, {"name": "From", "value": "news@example.com"}],
                     "parts": [
                         {"mimeType": "text/plain", "body": {"data": encoded("A useful article")}},
                         {
@@ -237,10 +227,8 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(
     )
 
     class FakeFetcher:
-        def resolve_url(self, raw_url: str, unsubscribe: Collection[str] = ()) -> ResolvedUrl:
+        def resolve_url(self, raw_url: str) -> ResolvedUrl:
             assert raw_url == link
-            # A tracker in the body may redirect to it, so every hop is checked against it.
-            assert set(unsubscribe) == {LISTED_UNSUBSCRIBE}
             if fetched is None:
                 raise UrlResolutionError("URL_POLICY_BLOCKED")
             return ResolvedUrl(raw_url, *fetched)
@@ -2780,7 +2768,7 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
     monkeypatch.setattr(pipeline, "_reviewed_entries", reviewer_that_skips_security)
 
     class FakeFetcher:
-        def resolve_url(self, raw_url: str, unsubscribe: Collection[str] = ()) -> ResolvedUrl:
+        def resolve_url(self, raw_url: str) -> ResolvedUrl:
             return ResolvedUrl(raw_url, raw_url, None)
 
     monkeypatch.setattr(pipeline, "ArticleFetcher", FakeFetcher)

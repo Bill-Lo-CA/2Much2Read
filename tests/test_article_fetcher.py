@@ -16,7 +16,6 @@ from two_much_two_read.article_fetcher import (
     ArticleResponse,
     UrlResolutionError,
     ValidatedURL,
-    unsubscribe_url,
 )
 
 
@@ -77,113 +76,6 @@ def test_blocks_unsafe_urls_before_request() -> None:
     for url in ("http://127.0.0.1", "https://user:pass@example.com", "https://example.com:8080"):
         with pytest.raises(ArticleFetchError, match="ARTICLE_URL_BLOCKED"):
             fetcher.fetch(url)
-
-
-@pytest.mark.parametrize(
-    ("url", "unsubscribes"),
-    [
-        ("https://app.alphasignal.ai/unsubscribe/u/abc?cid=1", True),
-        ("https://unsubscribe.convertkit-mail.com/x", True),
-        ("https://example.com/unsub/abc", True),
-        ("https://example.substack.com/action/disable_email?token=x", True),
-        ("https://example.com/optout?id=1", True),
-        ("https://example.com/email?action=opt-out", True),
-        # A tracker's destination, percent-encoded in its query.
-        ("https://click.example/c?url=https%3A%2F%2Fexample.com%2Funsubscribe%3Fu%3D1", True),
-        # An article about opting out, or with a word that only starts like one, is still an article.
-        ("https://example.com/how-to-opt-out-of-ai-training", False),
-        ("https://example.com/an-unsubtle-change", False),
-        ("https://example.com/article", False),
-        ("https://[invalid", False),
-    ],
-)
-def test_an_unsubscribe_address_is_recognised_by_its_words(url: str, unsubscribes: bool) -> None:
-    assert unsubscribe_url(url) is unsubscribes
-
-
-def test_an_unsubscribe_link_is_never_opened_even_behind_a_tracker() -> None:
-    # Opening a one-click unsubscribe link is what unsubscribes; the tracker hop is as far as it goes.
-    requests: list[str] = []
-
-    def response_provider(request: ValidatedURL) -> ArticleResponse:
-        requests.append(request.target)
-        return ArticleResponse(302, {"location": "https://news.example/unsubscribe/u/abc"}, b"")
-
-    fetcher = ArticleFetcher(public_dns, response_provider)
-    with pytest.raises(UrlResolutionError, match="URL_POLICY_BLOCKED"):
-        fetcher.resolve_url("https://news.example/unsubscribe/u/abc")
-    with pytest.raises(UrlResolutionError, match="URL_REDIRECT_BLOCKED"):
-        fetcher.resolve_url("https://click.example/c/1")
-
-    assert requests == ["/c/1"]
-
-
-def test_a_tracker_is_not_followed_to_an_address_the_list_unsubscribe_header_names() -> None:
-    # The header's address says nothing of unsubscribing, so its words cannot catch it.
-    requests: list[str] = []
-
-    def response_provider(request: ValidatedURL) -> ArticleResponse:
-        requests.append(request.target)
-        return ArticleResponse(302, {"location": "https://Publisher.example/us?uid=abc#top"}, b"")
-
-    fetcher = ArticleFetcher(public_dns, response_provider)
-    with pytest.raises(UrlResolutionError, match="URL_REDIRECT_BLOCKED"):
-        fetcher.resolve_url("https://click.example/c/1", {"https://publisher.example/us?uid=abc"})
-
-    assert requests == ["/c/1"]
-
-
-def test_a_listed_address_is_matched_in_any_spelling_of_its_default_port() -> None:
-    # The header may write :443 where a redirect leaves it out, or the other way round.
-    requests: list[str] = []
-
-    def response_provider(request: ValidatedURL) -> ArticleResponse:
-        requests.append(request.target)
-        return ArticleResponse(302, {"location": "https://publisher.example/us?uid=abc"}, b"")
-
-    fetcher = ArticleFetcher(public_dns, response_provider)
-    with pytest.raises(UrlResolutionError, match="URL_REDIRECT_BLOCKED"):
-        fetcher.resolve_url("https://click.example/c/1", {"https://PUBLISHER.example:443/us?uid=abc"})
-
-    assert requests == ["/c/1"]
-    assert unsubscribe_url("http://publisher.example:80/us", {"http://publisher.example/us"})
-    assert not unsubscribe_url("https://publisher.example:8443/us", {"https://publisher.example/us"})
-    # A trailing dot, an IDNA host and percent-escapes of unreserved characters reach the same place.
-    assert unsubscribe_url("https://publisher.example./us?uid=abc", {"https://publisher.example/us?uid=abc"})
-    assert unsubscribe_url("https://xn--bcher-kva.example/us", {"https://bücher.example/us"})
-    assert unsubscribe_url("https://publisher.example/%75s?uid=%61bc", {"https://publisher.example/us?uid=abc"})
-    assert unsubscribe_url("https://publisher.example/us?to=a%2fb", {"https://publisher.example/us?to=a%2Fb"})
-    assert not unsubscribe_url("https://publisher.example/us?to=a/b", {"https://publisher.example/us?to=a%2Fb"})
-    assert unsubscribe_url("https://[2606:4700:4700:0:0:0:0:1111]/us", {"https://[2606:4700:4700::1111]/us"})
-    assert unsubscribe_url("https://[2606:4700:4700::1111]:443/us", {"https://[2606:4700:4700:0::1111]/us"})
-    # An empty path is requested as /.
-    assert unsubscribe_url("https://publisher.example/?uid=abc", {"https://publisher.example?uid=abc"})
-    assert unsubscribe_url("https://publisher.example?uid=abc", {"https://publisher.example/?uid=abc"})
-
-
-def test_a_page_naming_a_listed_address_as_its_canonical_keeps_its_own_address() -> None:
-    # The canonical is the link shown first, so a page claiming the unsubscribe address as its own
-    # is shown by where the chain arrived instead.
-    def response_provider(_: ValidatedURL) -> ArticleResponse:
-        return ArticleResponse(200, {"content-type": "text/html"}, b'<html><link rel="canonical" href="/us?uid=abc"></html>')
-
-    resolved = ArticleFetcher(public_dns, response_provider).resolve_url(
-        "https://publisher.example/story", {"https://publisher.example/us?uid=abc"}
-    )
-
-    assert (resolved.final_url, resolved.canonical_url) == ("https://publisher.example/story", None)
-
-
-def test_an_article_about_unsubscribing_is_still_fetched() -> None:
-    # Only a newsletter's link carries its subscriber; a story someone shared does not.
-    def response_provider(request: ValidatedURL) -> ArticleResponse:
-        if request.target == "/robots.txt":
-            return ArticleResponse(200, {"content-type": "text/plain"}, b"User-agent: *\nAllow: /")
-        return ArticleResponse(200, {"content-type": "text/html"}, article_body())
-
-    fetched = ArticleFetcher(public_dns, response_provider).fetch("https://example.com/blog/designing-the-unsubscribe-button")
-
-    assert fetched.final_url == "https://example.com/blog/designing-the-unsubscribe-button"
 
 
 def test_pins_validated_addresses_for_robots_redirects_and_article_requests() -> None:

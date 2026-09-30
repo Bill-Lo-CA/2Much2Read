@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Collection, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, TypeAlias, cast
@@ -9,8 +9,9 @@ from urllib.parse import parse_qsl, urlsplit
 
 from pydantic import HttpUrl, ValidationError
 
-from .article_fetcher import ArticleFetcher, ResolvedUrl, UrlResolutionError, unsubscribe_url
+from .article_fetcher import ArticleFetcher, ResolvedUrl, UrlResolutionError
 from .digest import canonical_url
+from .mime import unsubscribe_link
 from .schemas import HTTP_URL, DigestItem, ItemAnalysis, LinkCandidate, NewsletterItemAnalysis
 
 MatchedBy: TypeAlias = Literal["model_link", "exact_anchor", "heading_context", "fuzzy_anchor", "url_slug"]
@@ -84,16 +85,16 @@ def _tracking_url(value: str) -> bool:
     )
 
 
-def shown_url(resolved: ResolvedUrl, unsubscribe: Collection[str] = ()) -> str | None:
+def shown_url(resolved: ResolvedUrl) -> str | None:
     """The link a digest shows for a resolution, or None when all it has is a tracker.
 
     The page's name for itself first, then where the chain ended, each without campaign tags or the
     reader's identity. The tracker test runs on that cleaned link, not the raw one: Mailchimp tags
     the article's own address with mc_cid, which says nothing about the page, while a click page
-    that names itself as its canonical is still a click page. An unsubscribe page is never shown,
-    including one a cached resolution reached before the resolver refused them.
+    that names itself as its canonical is still a click page. Nor is an unsubscribe page ever shown
+    as an article: a tracker's link with an unknown label may still lead to one.
     """
-    if any(url and unsubscribe_url(url, unsubscribe) for url in (resolved.canonical_url, resolved.final_url)):
+    if any(url and unsubscribe_link(url) for url in (resolved.canonical_url, resolved.final_url)):
         return None
     for candidate in (resolved.canonical_url, resolved.final_url):
         shown = canonical_url(candidate)
@@ -146,19 +147,13 @@ class UrlEnricher:
             matches.append(UrlMatch(item, candidate, method, confidence))
         return matches
 
-    def resolved_item(self, match: UrlMatch, resolved: ResolvedUrl, unsubscribe: Collection[str] = ()) -> DigestItem:
-        return self._item(match, resolved=resolved, unsubscribe=unsubscribe)
+    def resolved_item(self, match: UrlMatch, resolved: ResolvedUrl) -> DigestItem:
+        return self._item(match, resolved=resolved)
 
     def failed_item(self, match: UrlMatch, error_code: str) -> DigestItem:
         return self._item(match, error_code=error_code)
 
-    def _item(
-        self,
-        match: UrlMatch,
-        resolved: ResolvedUrl | None = None,
-        error_code: str | None = None,
-        unsubscribe: Collection[str] = (),
-    ) -> DigestItem:
+    def _item(self, match: UrlMatch, resolved: ResolvedUrl | None = None, error_code: str | None = None) -> DigestItem:
         values = {name: getattr(match.item, name) for name in ItemAnalysis.model_fields}
         if match.candidate is None:
             match_status = cast(Literal["unmatched", "ambiguous"], match.method)
@@ -172,7 +167,7 @@ class UrlEnricher:
         if resolved is not None:
             return DigestItem(
                 **values,
-                source_url=_http_url(shown_url(resolved, unsubscribe)),
+                source_url=_http_url(shown_url(resolved)),
                 raw_url=HTTP_URL.validate_python(raw_url),
                 resolved_url=HTTP_URL.validate_python(resolved.final_url),
                 canonical_url=HTTP_URL.validate_python(resolved.canonical_url) if resolved.canonical_url else None,
@@ -195,7 +190,7 @@ class UrlEnricher:
         )
 
 
-def resolve_match(match: UrlMatch, fetcher: ArticleFetcher, unsubscribe: Collection[str] = ()) -> ResolvedUrl:
+def resolve_match(match: UrlMatch, fetcher: ArticleFetcher) -> ResolvedUrl:
     if match.candidate is None:
         raise UrlResolutionError("URL_MATCH_UNRESOLVED")
-    return fetcher.resolve_url(str(match.candidate.raw_url), unsubscribe)
+    return fetcher.resolve_url(str(match.candidate.raw_url))
