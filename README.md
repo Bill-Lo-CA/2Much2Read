@@ -117,6 +117,7 @@ Requirements: Gmail API desktop OAuth credentials, a Discord webhook or bot, and
 uv sync --all-groups
 ollama pull llama3.2:3b
 ollama pull qwen3:8b
+ollama pull translategemma:4b
 sh scripts/install-2much2read-user-service.sh \
   --gmail-client-secret ~/Downloads/gmail-client.json
 
@@ -280,10 +281,19 @@ wholly that script: run over correct Traditional text, they turn 機制作為 in
 text, and nothing else. Detection had needed volume it did not have - 11% of real Traditional
 titles read as Simplified, some with no character that differs at all.
 
-A title still outside the digest language after translation - echoed back, or failed twice - is
-replaced by the summary's lead, up to the last clause mark within 40 characters. No rule tells a
-title that is only names from an untranslated sentence (ALL-CAPS and Title Case sentences look like
-names), and a name-only title reads better as "Anthropic 發布 Claude Opus 5.5" anyway.
+A title outside the digest language is translated by `OLLAMA_TRANSLATE_MODEL` (default
+`translategemma:4b`, a model made for translation, given its own prompt), one title at a time. The
+extractor usually leaves an English headline as it is, and asked to translate it, the same model
+left 16 of 34 in English, cut one short, and changed a version number; TranslateGemma left only two
+names alone. Its translation is kept only when it says what the source does: a year the source
+never gave is removed where it only dates a month and day (it wrote "Aug 26" as 2023 年 8 月 26 日),
+and a lost version or figure, an added ellipsis, or text still outside the language rejects it. The
+translator is released with the extractor, before the reranker loads.
+
+A title the translator could not bring into the digest language is replaced by the summary's lead,
+up to the last clause mark within 40 characters. No rule tells a title that is only names from an
+untranslated sentence (ALL-CAPS and Title Case sentences look like names), and a name-only title
+reads better as "Anthropic 發布 Claude Opus 5.5" anyway.
 
 A headline
 with no article and no merged coverage is skipped outright rather than rewritten: the fallback would

@@ -12,6 +12,7 @@ from two_much_two_read.ollama import (
     OllamaClient,
     OllamaContextError,
     OllamaSchemaError,
+    _checked_title,
     _in_script,
     _language_instruction,
     _ollama_schema,
@@ -47,7 +48,7 @@ def valid_result() -> dict[str, object]:
 
 def valid_article_result() -> dict[str, object]:
     return {
-        "title": "Model release",
+        "title": "模型發布",
         "category": "AI_MODEL",
         "summary_zh_tw": "文章發布新模型。",
         "why_it_matters_zh_tw": "可改善團隊工作流程。",
@@ -773,6 +774,21 @@ def test_one_field_in_the_wrong_language_costs_that_item_a_translation_not_the_e
     assert '"index": 1' in translation[1]["content"] and "發布新模型" not in translation[1]["content"]
 
 
+@pytest.mark.parametrize("unused_title", ["詳見 https://example.com", "很長的標題" * 50], ids=["link", "too-long"])
+@respx.mock
+def test_a_bad_unused_field_translation_title_does_not_drop_valid_fields(unused_title: str) -> None:
+    answer = _items_result(GOOD, ("模型發布", "A new model is released.", "It improves speed."))
+    translation = _chat(
+        {"items": [{"index": 1, "title": unused_title, "summary": "新模型發布。", "why_it_matters": "可提升速度。"}]}
+    )
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_chat(answer), translation, translation])
+
+    result = OllamaClient().extract("alphasignal", "News")
+
+    assert (result.items[1].title, result.items[1].summary_zh_tw) == ("模型發布", "新模型發布。")
+    assert route.call_count == 2
+
+
 @pytest.mark.parametrize(
     "answer",
     [
@@ -798,17 +814,19 @@ def test_an_item_that_stays_outside_the_language_is_dropped_alone(answer: httpx.
     assert route.call_count == 3
 
 
+def _translation(text: str) -> httpx.Response:
+    return httpx.Response(200, json={"message": {"content": text}})
+
+
 @respx.mock
-def test_a_title_is_translated_and_one_left_untranslated_takes_the_summarys_lead() -> None:
+def test_a_title_is_translated_by_the_translator_and_one_left_untranslated_takes_the_summarys_lead() -> None:
     # "Claude Opus 5.5" is only names, but no rule tells that from an ALL-CAPS sentence; the lead of
     # the summary, which is in the digest language, stands in for both.
-    respx.post("http://127.0.0.1:11434/api/chat").mock(
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
         side_effect=[
             _chat(_items_result(("Viggle ships turbo image model", *GOOD[1:]), ("Claude Opus 5.5", *GOOD[1:]))),
-            _chat(
-                {"items": [{"index": 0, "title": "Viggle 推出 Turbo 影像模型", "summary": GOOD[1], "why_it_matters": GOOD[2]}]}
-            ),
-            _chat({"items": [{"index": 1, "title": "Claude Opus 5.5 release", "summary": GOOD[1], "why_it_matters": GOOD[2]}]}),
+            _translation("Viggle 推出 Turbo 影像模型。"),
+            _translation("Claude Opus 5.5"),
         ]
     )
 
@@ -816,10 +834,15 @@ def test_a_title_is_translated_and_one_left_untranslated_takes_the_summarys_lead
 
     assert [item.title for item in result.items] == ["Viggle 推出 Turbo 影像模型", "發布新模型"]
     assert result.dropped_for_language == 0
+    request = json.loads(route.calls[1].request.content)
+    assert request["model"] == "translategemma:4b" and "format" not in request
+    prompt = request["messages"][0]["content"]
+    assert "English (en) to Traditional Chinese (zh-Hant-TW)" in prompt
+    assert prompt.endswith("Traditional Chinese:\n\n\nViggle ships turbo image model")
 
 
 @respx.mock
-def test_a_title_whose_translation_fails_twice_never_reaches_the_digest() -> None:
+def test_a_title_whose_translation_fails_never_reaches_the_digest() -> None:
     # The summary and significance are Chinese, so the item stays; its English sentence of a title
     # used to stay with it.
     english_title = (
@@ -828,14 +851,184 @@ def test_a_title_whose_translation_fails_twice_never_reaches_the_digest() -> Non
         "縮短啟動時間。",
     )
     route = respx.post("http://127.0.0.1:11434/api/chat").mock(
-        side_effect=[_chat(_items_result(GOOD, english_title)), httpx.Response(500), _chat("not the schema")]
+        side_effect=[_chat(_items_result(GOOD, english_title)), httpx.Response(500)]
     )
 
     result = OllamaClient().extract("tldr-devops", "News")
 
     assert [item.title for item in result.items] == ["模型發布", "GKE 新增 Pod 快照，可在需要時還原工作負載"]
     assert result.items[1].source_title == "Google Kubernetes Engine adds Pod snapshots"
+    assert route.call_count == 2
+
+
+@respx.mock
+def test_the_translation_is_of_the_verbatim_headline_not_the_extractors_title() -> None:
+    # The extractor copied the headline wrong. Translating its copy, a faithful 2.5 would check out.
+    answer = _items_result(("Claude Sonnet 2.5 ships (4 minute read)", *GOOD[1:]))
+    answer["items"][0]["source_title"] = "Claude Sonnet 5.5 ships (4 minute read)"  # type: ignore[index]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[_chat(answer), _translation("Claude Sonnet 5.5 上線")]
+    )
+
+    result = OllamaClient().extract("tldr-ai", "News")
+
+    assert result.items[0].title == "Claude Sonnet 5.5 上線"
+    # Its reading-time marker is not the headline's, and not a figure it must keep.
+    assert json.loads(route.calls[1].request.content)["messages"][0]["content"].endswith("\n\n\nClaude Sonnet 5.5 ships")
+
+
+@respx.mock
+def test_a_substack_view_post_line_is_not_translated_as_the_headline() -> None:
+    answer = _items_result(("OpenRouter agent deployment", "OpenRouter 討論 AI 代理的部署方式。", "可改善部署流程。"))
+    answer["items"][0]["source_title"] = "View this post on the web at https://latent.space/p/openrouter"  # type: ignore[index]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_chat(answer), _translation("在網路上查看這篇文章")])
+
+    result = OllamaClient().extract("latent-space", "News")
+
+    assert result.items[0].title == "OpenRouter 討論 AI 代理的部署方式"
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_a_title_translated_with_its_fields_is_still_translated_from_the_verbatim_headline() -> None:
+    # The summary was English, so the whole item went to the field translator, which translated the
+    # extractor's wrong 2.5 faithfully. Only its fields are kept; the headline comes from 5.5.
+    answer = _items_result(GOOD, ("Claude Sonnet 2.5 ships", "Anthropic shipped a new model.", "It is cheaper."))
+    answer["items"][1]["source_title"] = "Claude Sonnet 5.5 ships"  # type: ignore[index]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[
+            _chat(answer),
+            _chat(
+                {
+                    "items": [
+                        {
+                            "index": 1,
+                            "title": "Claude Sonnet 2.5 上線",
+                            "summary": "Anthropic 推出新模型。",
+                            "why_it_matters": "價格更低。",
+                        }
+                    ]
+                }
+            ),
+            _translation("Claude Sonnet 5.5 上線"),
+        ]
+    )
+
+    result = OllamaClient().extract("tldr-ai", "News")
+
+    assert (result.items[1].title, result.items[1].summary_zh_tw) == ("Claude Sonnet 5.5 上線", "Anthropic 推出新模型。")
+    assert json.loads(route.calls[2].request.content)["messages"][0]["content"].endswith("\n\n\nClaude Sonnet 5.5 ships")
+
+
+@respx.mock
+def test_a_placeholder_is_no_text_in_the_digest_language() -> None:
+    # 2026-09-30: "GPT-...（省略）" filled all three fields of a TLDR Dev item, and its Chinese passed
+    # for the digest language. The fields go to the translator, and still a placeholder, the item goes.
+    placeholder = ("GPT-...（省略）", "GPT-...（省略）", "GPT-...（省略）")
+    answer = _items_result(GOOD, placeholder)
+    answer["items"][1]["source_title"] = "GPT-6.1 SOL (WEBSITE)"  # type: ignore[index]
+    still = _chat(
+        {"items": [{"index": 1, "title": "GPT-...（省略）", "summary": "GPT-...（省略）", "why_it_matters": "（省略）"}]}
+    )
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_chat(answer), still, still])
+
+    result = OllamaClient().extract("tldr-dev", "News")
+
+    assert [item.title for item in result.items] == ["模型發布"]
+    assert result.dropped_for_language == 1
     assert route.call_count == 3
+
+
+@respx.mock
+def test_an_ellipsis_with_a_normal_parenthetical_is_not_a_placeholder() -> None:
+    answer = _items_result(("OpenAI 發布新功能", "OpenAI 發布新功能…（詳見下文）", "可改善工作流程。"))
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_chat(answer))
+
+    result = OllamaClient().extract("alphasignal", "News")
+
+    assert result.items[0].summary_zh_tw == "OpenAI 發布新功能…（詳見下文）"
+    assert route.call_count == 1
+
+
+@respx.mock
+def test_a_placeholder_title_is_translated_from_the_headline_without_its_marker() -> None:
+    answer = _items_result(GOOD, ("GPT-...（省略）", "GPT-6.1 Sol 以五分之一價格接近 Astra。", "降低成本。"))
+    answer["items"][1]["source_title"] = "GPT-6.1 SOL (WEBSITE)"  # type: ignore[index]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_chat(answer), _translation("GPT-6.1 Sol")])
+
+    result = OllamaClient().extract("tldr-dev", "News")
+
+    # The translator left the name as it was, so the summary's lead stands in.
+    assert result.items[1].title == "GPT-6.1 Sol 以五分之一價格接近 Astra"
+    assert json.loads(route.calls[1].request.content)["messages"][0]["content"].endswith("\n\n\nGPT-6.1 SOL")
+
+
+@pytest.mark.parametrize(
+    "translation",
+    ["詳見 https://evil.example/ 的說明", "很長的標題" * 50],
+    ids=["link", "too-long"],
+)
+@respx.mock
+def test_a_translation_the_schema_refuses_takes_the_summarys_lead(translation: str) -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[_chat(_items_result(("Viggle ships turbo image model", *GOOD[1:]))), _translation(translation)]
+    )
+
+    result = OllamaClient().extract("alphasignal", "News")
+
+    assert [item.title for item in result.items] == ["發布新模型"]
+    assert route.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("source", "translated", "kept"),
+    [
+        (
+            "Anthropic launches Claude Sonnet 5.5 at half the price",
+            "Anthropic 推出 Claude Sonnet 5.5，價格減半。",
+            "Anthropic 推出 Claude Sonnet 5.5，價格減半",
+        ),
+        # A year the source never gave, dating a month and day, is taken out; the rest is sound.
+        (
+            "Quick thoughts on GitHub Actions Aug 26 incident",
+            "關於 2023 年 8 月 26 日 GitHub Actions 事件的看法",
+            "關於 8 月 26 日 GitHub Actions 事件的看法",
+        ),
+        ("TNS Episode - Sep 25 2026", "TNS 節目 - 2026年9月25日", "TNS 節目 - 2026年9月25日"),
+        ("Revenue crossed 65% of target", "營收達目標的 65%", "營收達目標的 65%"),
+        # Anything else it cannot vouch for is refused.
+        ("Anthropic launches Claude Sonnet 5.5", "Anthropic 推出 Claude Sonnet 2.5", None),
+        # A figure is a whole token: 5.5 is not in 15.5.
+        ("Anthropic launches Claude Sonnet 5.5", "Anthropic 推出 Claude Sonnet 15.5", None),
+        # A single digit that versions a name is kept as it is; another may become a word.
+        ("OpenAI ships GPT-5 to everyone", "OpenAI 向所有人推出 GPT-6", None),
+        ("Anthropic ships Opus 5 in 2 weeks", "Anthropic 將在兩週內推出 Opus 5", "Anthropic 將在兩週內推出 Opus 5"),
+        # A figure the source never gave is refused, but for the number of a month it named.
+        ("A new open model is released", "新的 70B 開源模型發布", None),
+        # A cut-off title ends in dots that closing punctuation must not take away first.
+        ("Anthropic launches a new Claude model", "Anthropic 推出新的 Claude...", None),
+        # A conversion cannot be told from a changed figure, so it is refused too.
+        ("Revenue crossed $65B ARR", "年收入超過 650 億美元", None),
+        ("Anthropic launches Claude Sonnet 5.5 with near-Opus performance", "Anthropic 推出 Claude Sonnet ...", None),
+        ("GitHub Actions incident review", "2023 年 GitHub Actions 事件回顧", None),
+        ("Q3 earnings improve", "2023年3月收益改善", None),
+        ("Market 26 grows", "市場於 2023 年 3 月 26 日成長", None),
+        ("March 26 revenue rises", "2023年3月26日營收上升", "3月26日營收上升"),
+        # A month named with its year may come back as its number; a year it did not give may not.
+        ("AI roundup, Aug 2026", "2026年8月AI綜述", "2026年8月AI綜述"),
+        ("State of AI: September 2026", "人工智慧現況：2026年9月", "人工智慧現況：2026年9月"),
+        ("AI roundup, Aug 2026", "2023年8月AI綜述", None),
+        ("March release notes", "3 月發行說明", "3 月發行說明"),
+        ("March release notes", "2023 年 3 月發行說明", None),
+        ("Market release notes", "3 月發行說明", None),
+        ("OpenAI may release notes", "OpenAI 將於 5 月發布說明", None),
+        ("OpenAI blocked its agent's web access", "OpenAI blocked its agent's web access", None),
+    ],
+)
+def test_a_translated_title_is_kept_only_when_it_says_what_the_source_does(
+    source: str, translated: str, kept: str | None
+) -> None:
+    assert _checked_title(source, translated, "zh-TW") == kept
 
 
 @pytest.mark.parametrize(
@@ -856,16 +1049,26 @@ def test_the_fallback_title_is_the_summarys_lead_up_to_a_clause_mark(summary: st
     assert _title_from_summary(summary) == title
 
 
+@pytest.mark.parametrize(
+    ("translation", "title"),
+    [
+        (_translation("Pod 快照登陸 GKE"), "Pod 快照登陸 GKE"),
+        (_translation("Pod snapshots arrive in GKE"), "GKE 新增 Pod 快照，可還原"),
+    ],
+    ids=["translated", "untranslated"],
+)
 @respx.mock
-def test_an_article_analysis_title_outside_the_language_takes_the_summarys_lead() -> None:
+def test_an_article_analysis_title_outside_the_language_is_translated_or_takes_the_summarys_lead(
+    translation: httpx.Response, title: str
+) -> None:
     answer = {**valid_article_result(), "title": "Pod snapshots arrive in GKE", "summary_zh_tw": "GKE 新增 Pod 快照，可還原。"}
-    respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_chat(answer))
+    respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_chat(answer), translation])
 
     result = OllamaClient().analyze_article(
         "hn-best", 1, "Pod snapshots arrive in GKE", 1, 1, "2026-07-24T00:00:00+00:00", "article", "x"
     )
 
-    assert result.title == "GKE 新增 Pod 快照，可還原"
+    assert result.title == title
 
 
 @respx.mock

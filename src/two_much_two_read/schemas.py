@@ -257,10 +257,10 @@ class EmailExtraction(BaseModel):
 
 
 class FieldTranslation(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # The title is input context only; ignore it if the model returns one.
+    model_config = ConfigDict(extra="ignore")
 
     index: int = Field(ge=0)
-    title: str = Field(min_length=1, max_length=200)
     summary: str = Field(min_length=1, max_length=800)
     why_it_matters: str = Field(min_length=1, max_length=800)
 
