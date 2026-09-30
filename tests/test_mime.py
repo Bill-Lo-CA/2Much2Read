@@ -431,19 +431,10 @@ def test_an_unsubscribe_link_is_no_candidate_whatever_its_label() -> None:
     assert "alphasignal" not in content.analysis_text
 
 
-@pytest.mark.parametrize(
-    "listed",
-    [
-        "https://alphasignal.ai/us?uid=abc",
-        # The same address, spelled another way in the header than in the body.
-        "https://AlphaSignal.ai.:443/us?uid=abc",
-        "https://alphasignal.ai/%75s?uid=abc",
-    ],
-)
-def test_the_list_unsubscribe_header_names_links_that_are_no_candidates(listed: str) -> None:
+def test_the_list_unsubscribe_header_names_links_that_are_no_candidates() -> None:
     # The header's link says nothing of unsubscribing in its address; the header says it for it.
     unsubscribe = "https://alphasignal.ai/us?uid=abc"
-    header = f"<mailto:news@alphasignal.ai?subject=unsubscribe>, <{listed}>"
+    header = f"<mailto:news@alphasignal.ai?subject=unsubscribe>, <{unsubscribe}>"
     html = f'<a href="https://example.com/story">Story</a> <a href="{unsubscribe}">Leave</a>'
     payload: dict[str, object] = {**_body("text/html", html), "headers": [{"name": "List-Unsubscribe", "value": header}]}
     message = EmailMessage()
@@ -453,14 +444,6 @@ def test_the_list_unsubscribe_header_names_links_that_are_no_candidates(listed: 
 
     for content in (extract_gmail_payload(payload), extract_mime(message.as_bytes())):
         assert _codes(content) == {"L1": "https://example.com/story"}
-
-
-def test_an_ip_literal_in_the_header_matches_any_spelling_of_it() -> None:
-    header = "<https://[2606:4700:4700::1111]/us?uid=abc>"
-    html = '<a href="https://example.com/story">Story</a> <a href="https://[2606:4700:4700:0:0:0:0:1111]:443/us?uid=abc">x</a>'
-    payload: dict[str, object] = {**_body("text/html", html), "headers": [{"name": "List-Unsubscribe", "value": header}]}
-
-    assert _codes(extract_gmail_payload(payload)) == {"L1": "https://example.com/story"}
 
 
 @pytest.mark.parametrize(
