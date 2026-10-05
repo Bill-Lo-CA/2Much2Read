@@ -82,7 +82,10 @@ def doctor(settings: Settings, send_test: bool) -> DoctorResult:
             available_models = {model_name(str(model)) for model in models}
             checks["ollama"] = (
                 "ok"
-                if all(model_name(model) in available_models for model in (settings.ollama_model, settings.ollama_review_model))
+                if all(
+                    model_name(model) in available_models
+                    for model in (settings.ollama_model, settings.ollama_review_model, settings.ollama_translate_model)
+                )
                 else "model_missing"
             )
         except (httpx.HTTPError, ValueError):

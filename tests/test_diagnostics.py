@@ -85,6 +85,7 @@ def test_doctor_accepts_default_model_tag_and_creatable_database_directory(
             "database_path": tmp_path / "new-directory" / "digest.sqlite3",
             "ollama_model": "mistral",
             "ollama_review_model": "mistral",
+            "ollama_translate_model": "mistral",
         }
     )
 
@@ -95,6 +96,8 @@ def test_doctor_accepts_default_model_tag_and_creatable_database_directory(
     assert diagnostics.doctor(tagged_settings, send_test=False).checks["ollama"] == "model_missing"
     missing_reviewer = settings.model_copy(update={"ollama_review_model": "qwen3:8b"})
     assert diagnostics.doctor(missing_reviewer, send_test=False).checks["ollama"] == "model_missing"
+    missing_translator = settings.model_copy(update={"ollama_translate_model": "translategemma:4b"})
+    assert diagnostics.doctor(missing_translator, send_test=False).checks["ollama"] == "model_missing"
     assert all(options == {"timeout": 5, "trust_env": False} for options in client_options)
 
 
@@ -160,7 +163,7 @@ def test_doctor_reports_safe_runtime_permissions(
     tmp_path: Path, newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     _, token_root, data_root, config_path, credentials_path, token_path = private_runtime_paths(tmp_path, monkeypatch)
-    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b"])
+    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b", "translategemma:4b"])
     monkeypatch.setattr(diagnostics, "token_status", lambda *args: "ok")
     settings = newsletter_settings.model_copy(
         update={
@@ -190,7 +193,7 @@ def test_doctor_reports_unsafe_runtime_permissions(
 ) -> None:
     config_root, token_root, data_root, config_path, credentials_path, token_path = private_runtime_paths(tmp_path, monkeypatch)
     config_root.chmod(0o755)
-    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b"])
+    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b", "translategemma:4b"])
     monkeypatch.setattr(diagnostics, "token_status", lambda *args: "ok")
     settings = newsletter_settings.model_copy(
         update={
@@ -216,7 +219,7 @@ def test_doctor_warns_for_custom_runtime_paths(
     _, _, _, config_path, credentials_path, _ = private_runtime_paths(tmp_path, monkeypatch)
     custom_root = tmp_path / "custom"
     custom_root.mkdir()
-    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b"])
+    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b", "translategemma:4b"])
     monkeypatch.setattr(diagnostics, "token_status", lambda *args: "ok")
     settings = newsletter_settings.model_copy(
         update={
@@ -239,7 +242,7 @@ def test_doctor_does_not_leak_sensitive_paths(
 ) -> None:
     _, _, data_root, _, credentials_path, token_path = private_runtime_paths(tmp_path, monkeypatch)
     secret_path = tmp_path / "secret-client-token-must-not-appear.json"
-    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b"])
+    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b", "translategemma:4b"])
     monkeypatch.setattr(diagnostics, "token_status", lambda *args: "ok")
     result = diagnostics.doctor(
         newsletter_settings.model_copy(
@@ -277,7 +280,7 @@ def test_doctor_names_misspelled_environment_keys_but_not_the_installer_ones(
         encoding="utf-8",
     )
     monkeypatch.setattr(diagnostics, "env_file", lambda _: env_path)
-    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b"])
+    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b", "translategemma:4b"])
 
     result = diagnostics.doctor(newsletter_settings, send_test=False)
 
@@ -292,7 +295,7 @@ def test_doctor_reports_no_unknown_keys_when_the_environment_file_is_clean(
     env_path = tmp_path / ".2much2read.env"
     env_path.write_text("DISCORD_WEBHOOK_URL=ignored\nDIGEST_SCHEDULE_TIME=08:00\nDIGEST_TIMEZONE=America/Montreal\n", "utf-8")
     monkeypatch.setattr(diagnostics, "env_file", lambda _: env_path)
-    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b"])
+    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b", "translategemma:4b"])
 
     result = diagnostics.doctor(newsletter_settings, send_test=False)
 

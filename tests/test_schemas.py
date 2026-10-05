@@ -1,6 +1,9 @@
+from datetime import UTC, datetime
+
 import pytest
 from pydantic import ValidationError
 
+from two_much_two_read.digest import render_digest
 from two_much_two_read.schemas import ArticleAnalysis, DigestItem, EmailExtraction, ItemAnalysis, NewsletterItemAnalysis
 
 
@@ -18,7 +21,6 @@ def item_values(**updates: object) -> dict[str, object]:
 
 
 def analysis_values(**updates: object) -> dict[str, object]:
-    """source_title lives on the extraction schema only; DigestItem forbids it."""
     return item_values(**{"source_title": "Model release", **updates})
 
 
@@ -100,13 +102,14 @@ def test_tags_are_normalized_and_bounded() -> None:
         NewsletterItemAnalysis.model_validate(analysis_values(tags=["[read](https://example.com)"]))
 
 
-def test_the_matcher_only_field_never_reaches_a_persisted_digest_item() -> None:
-    """source_title exists to match a translated item back to its link, and nothing renders it."""
-    assert "source_title" in NewsletterItemAnalysis.model_fields
-    assert "source_title" not in DigestItem.model_fields
+def test_the_verbatim_headline_is_kept_for_checking_but_never_rendered() -> None:
+    """source_title matches an item to its link, and later checks the shown title; nothing prints it."""
+    item = DigestItem.model_validate(analysis_values(source_title="Model release, verbatim"))
 
-    with pytest.raises(ValidationError):
-        DigestItem.model_validate(analysis_values())
+    rendered = render_digest([item], datetime(2026, 10, 5, tzinfo=UTC), "AI", "TLDR AI")
+
+    assert item.source_title == "Model release, verbatim"
+    assert rendered and "verbatim" not in rendered
 
 
 def test_a_url_in_the_verbatim_headline_is_stripped_rather_than_rejected() -> None:
