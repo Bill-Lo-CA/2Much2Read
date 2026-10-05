@@ -30,7 +30,7 @@ from .stages import StatusReporter, _unload_model
 
 
 class DeepensItems(Protocol):
-    def deepen_item(self, title: str, category: str, sources: str, basis: str, content: str) -> ItemDeepening: ...
+    def deepen_item(self, title: str, category: str, basis: str, content: str) -> ItemDeepening: ...
 
 
 class ChecksTitles(Protocol):
@@ -173,9 +173,8 @@ def _deepened_entries(
             deepened.append(entry)
             continue
         status(f"Expanding {entry.item.title}")
-        sources = ", ".join((entry.source_name or entry.source_id or "Unknown", *entry.also_from))
         try:
-            rewrite = ollama.deepen_item(entry.item.title, entry.item.category, sources, basis, content)
+            rewrite = ollama.deepen_item(entry.item.title, entry.item.category, basis, content)
         except (OllamaContextError, OllamaSchemaError, httpx.HTTPError) as error:
             # A headline with its original short summary still beats losing the digest.
             status(f"Warning: kept the original summary for {entry.item.title} ({type(error).__name__})")

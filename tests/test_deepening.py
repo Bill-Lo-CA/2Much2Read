@@ -47,12 +47,12 @@ def entry(title: str, url: str | None = None, review_score: int | None = 90) -> 
 
 class FakeOllama:
     def __init__(self, error: Exception | None = None, covers: bool = True) -> None:
-        self.calls: list[tuple[str, str, str]] = []
+        self.calls: list[tuple[str, str]] = []
         self.error = error
         self.covers = covers
 
-    def deepen_item(self, title: str, category: str, sources: str, basis: str, content: str) -> ItemDeepening:
-        self.calls.append((sources, basis, content))
+    def deepen_item(self, title: str, category: str, basis: str, content: str) -> ItemDeepening:
+        self.calls.append((basis, content))
         if self.error is not None:
             raise self.error
         return ItemDeepening(
@@ -78,7 +78,7 @@ def test_a_headline_is_rewritten_from_the_article_body(monkeypatch: pytest.Monke
 
     assert deepened[0].item.summary_zh_tw == "重寫後長很多的摘要內容。"
     assert deepened[0].item.why_it_matters_zh_tw == "重寫後的實務影響。"
-    sources, basis, content = ollama.calls[0]
+    basis, content = ollama.calls[0]
     assert basis == "article"
     assert "Cerebras hardware" in content
 
@@ -95,9 +95,8 @@ def test_a_headline_without_a_usable_link_falls_back_to_the_merged_newsletters(m
 
     headlines._deepened_entries(Settings(), ollama, [merged], lambda _: None)
 
-    sources, basis, content = ollama.calls[0]
+    basis, content = ollama.calls[0]
     assert basis == "newsletters"
-    assert sources == "AlphaSignal, TLDR Dev"
     assert "第一家的摘要。" in content and "第二家的摘要。" in content
 
 
@@ -194,7 +193,7 @@ def test_a_rewrite_in_the_wrong_language_is_rejected(monkeypatch: pytest.MonkeyP
         mock.post("/api/chat").respond(json={"message": {"content": json.dumps(english)}})
         client = create_ollama_client(settings)
         with pytest.raises(OllamaSchemaError, match="OLLAMA_DEEPEN_INVALID"):
-            client.deepen_item("標題", "AI_MODEL", "TLDR AI", "article", "some article text")
+            client.deepen_item("標題", "AI_MODEL", "article", "some article text")
         client.close()
 
 
@@ -209,7 +208,7 @@ def test_an_unexpected_parser_failure_falls_back_instead_of_ending_the_run(monke
 
     deepened = headlines._deepened_entries(Settings(), ollama, [merged], messages.append)
 
-    assert ollama.calls[0][1] == "newsletters"
+    assert ollama.calls[0][0] == "newsletters"
     assert deepened[0].item.summary_zh_tw == "重寫後長很多的摘要內容。"
     # Named, not swallowed: a silent fallback would hide the rewrite failing for a class of pages.
     assert [message for message in messages if message.startswith("Warning")] == [
@@ -227,7 +226,7 @@ def test_an_unreachable_page_falls_back_without_a_warning(monkeypatch: pytest.Mo
 
     headlines._deepened_entries(Settings(), ollama, [merged], messages.append)
 
-    assert ollama.calls[0][1] == "newsletters"
+    assert ollama.calls[0][0] == "newsletters"
     assert [message for message in messages if message.startswith("Warning")] == []
 
 
@@ -274,7 +273,7 @@ def test_a_hacker_news_story_with_a_real_article_is_still_rewritten(monkeypatch:
 
     headlines._deepened_entries(Settings(), ollama, [story], lambda _: None)
 
-    assert ollama.calls[0][1] == "article"
+    assert ollama.calls[0][0] == "article"
 
 
 def test_a_headline_with_nothing_fuller_than_its_own_summary_is_not_rewritten(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -309,9 +308,8 @@ def test_a_self_post_with_merged_coverage_is_still_rewritten_from_the_newsletter
 
     headlines._deepened_entries(Settings(), ollama, [self_post], lambda _: None)
 
-    sources, basis, content = ollama.calls[0]
+    basis, content = ollama.calls[0]
     assert basis == "newsletters"
-    assert sources == "AlphaSignal, TLDR AI"
     assert "另一家寫的較長內容。" in content
 
 
@@ -333,7 +331,7 @@ def test_no_room_for_source_text_is_refused_rather_than_asked(monkeypatch: pytes
     client._client = FakeClient()  # type: ignore[assignment]
 
     with pytest.raises(OllamaContextError, match="OLLAMA_DEEPEN_NO_ROOM"):
-        client.deepen_item("Headline", "AI_MODEL", "TLDR AI", "article", "很長的文章內容。" * 500)
+        client.deepen_item("Headline", "AI_MODEL", "article", "很長的文章內容。" * 500)
 
     assert posted == []
 

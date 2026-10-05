@@ -1123,7 +1123,7 @@ class OllamaClient:
                 f"OLLAMA_SAME_STORY_INVALID error={str(error)!r} response_preview={_preview(raw)!r}"
             ) from None
 
-    def deepen_item(self, title: str, category: str, sources: str, basis: str, content: str) -> ItemDeepening:
+    def deepen_item(self, title: str, category: str, basis: str, content: str) -> ItemDeepening:
         """Rewrite one headline item from an article body or its merged newsletter coverage.
 
         Runs on the review model, which is the strongest one loaded in a run. Selection hands it over
@@ -1135,9 +1135,12 @@ class OllamaClient:
         # nobody controls, so a hostile headline could otherwise sit outside every untrusted marker
         # and ahead of the source block - the most privileged position in the prompt - and tell this
         # model to set covers_the_item and invent a summary. It is data, and it is framed as data.
+        # The newsletters that carried the item are left out: given them, the model named one as the
+        # item's maker - "AlphaSignal 發佈了一款 1.58 位元的模型" (2026-10-03), "TLDR AI 發佈了一款新的
+        # 推理引擎" (2026-09-29) - and the digest names them under the item anyway.
         header = (
             "<untrusted_item>\n"
-            f"{json.dumps({'title': title, 'category': category, 'sources': sources}, ensure_ascii=False)}\n"
+            f"{json.dumps({'title': title, 'category': category}, ensure_ascii=False)}\n"
             "</untrusted_item>\n"
             f"content_basis={basis}\n"
         )
