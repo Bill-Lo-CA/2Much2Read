@@ -35,6 +35,7 @@ from .digest import (
     canonical_url,
     dedupe_entries,
     has_source_text,
+    merge_before_selection,
     merge_related_entries,
     render_digest,
     story_tokens,
@@ -235,7 +236,9 @@ def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[Di
                 "category": entry.item.category,
                 "summary": entry.item.summary_zh_tw,
                 "why_it_matters": entry.item.why_it_matters_zh_tw,
-                "source": entry.source_name,
+                # Every newsletter carrying the story, merged before the review: coverage by several
+                # is a sign it matters, as previous_days is.
+                "source": ", ".join(name for name in (entry.source_name, *entry.also_from) if name),
                 **({"previous_days": entry.previous_days} if entry.previous_days else {}),
             }
         )
@@ -353,20 +356,40 @@ class ReviewsAndJudges(ReviewsDigest, JudgesSameStory, Protocol):
 def _selected_entries(
     settings: Settings, ollama: ReviewsAndJudges, ranked: list[DigestEntry], mark_repeats: RepeatMarker, status: StatusReporter
 ) -> tuple[list[DigestEntry], SecurityFloorPromotion | None]:
-    """Review, merge, and apply the security floor, marking repeats on what the reviewer and reader see."""
-    reviewing = {
-        id(entry)
-        for entry in _review_candidates(
-            [entry for entry in ranked if has_source_text(entry)],
+    """Merge, review, and apply the security floor, marking repeats on what the reviewer and reader see.
+
+    Merging comes first, over what may be shown, so the reviewer picks among distinct stories. The
+    merge after the review still runs, on the same judge and budget; the pairs it asks were answered
+    before the review, so it is a safety net that costs nothing.
+    """
+    same_story = _story_judge(ollama, settings.digest_merge_judgements, status)
+
+    def reviewer_candidates(entries: list[DigestEntry]) -> list[DigestEntry]:
+        return _review_candidates(
+            [entry for entry in entries if has_source_text(entry)],
             settings.digest_review_candidate_limit,
             settings.digest_security_candidate_slots,
         )
-    }
+
+    def may_be_shown(entries: list[DigestEntry]) -> list[DigestEntry]:
+        # The reviewer's candidates, whose picks are the headlines and the rest mentions, and the
+        # entries without source text that lead the mentions.
+        bare = [entry for entry in entries if not has_source_text(entry)]
+        return reviewer_candidates(entries) + bare[: settings.digest_secondary_items]
+
+    # Marked before merging as well as after: a repeat found only through a report that folds into
+    # another would be lost, since the survivor's own words and link are all later marking reads.
+    # Folding keeps the larger count. The marker judges an entry once, so the second pass only
+    # reaches candidates a fold let in.
+    reviewing = {id(entry) for entry in reviewer_candidates(ranked)}
+    ranked = mark_repeats(ranked, lambda entry: id(entry) in reviewing)
+    ranked = merge_before_selection(ranked, may_be_shown, same_story)
+    reviewing = {id(entry) for entry in reviewer_candidates(ranked)}
     ranked = mark_repeats(ranked, lambda entry: id(entry) in reviewing)
     merged, security_floor = _merged_entries(
         _reviewed_entries(settings, ollama, ranked),
         settings.digest_secondary_items,
-        _story_judge(ollama, settings.digest_merge_judgements, status),
+        same_story,
         headline_limit=min(settings.digest_max_items, settings.digest_top_items),
         per_source=settings.digest_headlines_per_source,
         picks=settings.digest_max_items,
@@ -382,12 +405,14 @@ def _story_judge(ollama: JudgesSameStory, budget: int, status: StatusReporter) -
     rather than producing a wrong one. A model or transport failure is answered no for the same
     reason: not merging is the safe direction.
     """
-    answers: dict[tuple[int | None, int | None], bool] = {}
+    answers: dict[frozenset[int | None], bool] = {}
     spent = 0
 
     def judge(left: DigestEntry, right: DigestEntry) -> bool:
         nonlocal spent
-        key = (left.candidate_id, right.candidate_id)
+        # Either way round: merging before the review asks a pair one way, and the merge after it
+        # may ask the same pair the other way.
+        key = frozenset((left.candidate_id, right.candidate_id))
         identified = None not in key
         if identified and key in answers:
             return answers[key]
