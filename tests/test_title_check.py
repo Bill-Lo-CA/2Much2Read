@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from two_much_two_read import pipeline
+from two_much_two_read import headlines
 from two_much_two_read.config import Settings
 from two_much_two_read.digest import DigestEntry
 from two_much_two_read.schemas import DigestItem, HeadlineCheck
@@ -66,7 +66,7 @@ def test_a_title_that_says_what_the_headline_does_is_kept() -> None:
     ollama = fake()
     shown = [entry("OpenAI 阻止蒸餾攻擊")]
 
-    assert pipeline._checked_titles(Settings(), ollama, shown, lambda _: None) == shown
+    assert headlines._checked_titles(Settings(), ollama, shown, lambda _: None) == shown
 
 
 def test_a_title_read_back_as_another_fact_gives_way_to_the_translators() -> None:
@@ -74,7 +74,7 @@ def test_a_title_read_back_as_another_fact_gives_way_to_the_translators() -> Non
     ollama = fake(rejected=frozenset({"OpenAI's diffusion model attacks blocked"}))
     statuses: list[str] = []
 
-    checked = pipeline._checked_titles(Settings(), ollama, [entry("OpenAI 擴散模型攻擊被阻")], statuses.append)
+    checked = headlines._checked_titles(Settings(), ollama, [entry("OpenAI 擴散模型攻擊被阻")], statuses.append)
 
     assert [(value.item.title, value.review_score) for value in checked] == [("OpenAI 阻止蒸餾攻擊", 90)]
     assert "OpenAI 擴散模型攻擊被阻" in statuses[0] and "diffusion" in statuses[0]
@@ -86,7 +86,7 @@ def test_a_flagged_title_with_nothing_to_replace_it_stays_and_is_logged() -> Non
     statuses: list[str] = []
     shown = [entry("OpenAI 擴散模型攻擊被阻")]
 
-    assert pipeline._checked_titles(Settings(), ollama, shown, statuses.append) == shown
+    assert headlines._checked_titles(Settings(), ollama, shown, statuses.append) == shown
     assert "kept" in statuses[0] and "diffusion" in statuses[0]
 
 
@@ -94,7 +94,7 @@ def test_a_title_cut_short_is_replaced_without_reading_it_back() -> None:
     """GPT-...（需要翻譯） was shown on 2026-10-02; the review model had called its kind supported."""
     ollama = fake()
 
-    checked = pipeline._checked_titles(Settings(), ollama, [entry("GPT-...（需要翻譯）")], lambda _: None)
+    checked = headlines._checked_titles(Settings(), ollama, [entry("GPT-...（需要翻譯）")], lambda _: None)
 
     assert [value.item.title for value in checked] == ["OpenAI 阻止蒸餾攻擊"]
     # Neither model reads the title a rule already refused; only its replacement is read back.
@@ -105,7 +105,7 @@ def test_a_title_cut_short_is_replaced_without_reading_it_back() -> None:
 def test_a_year_the_headline_never_gave_is_ruled_out_like_a_cut() -> None:
     ollama = fake()
 
-    checked = pipeline._checked_titles(Settings(), ollama, [entry("OpenAI 於 2023 年阻止蒸餾攻擊")], lambda _: None)
+    checked = headlines._checked_titles(Settings(), ollama, [entry("OpenAI 於 2023 年阻止蒸餾攻擊")], lambda _: None)
 
     assert [value.item.title for value in checked] == ["OpenAI 阻止蒸餾攻擊"]
 
@@ -113,7 +113,7 @@ def test_a_year_the_headline_never_gave_is_ruled_out_like_a_cut() -> None:
 def test_a_title_cut_short_with_no_translation_takes_the_summarys_lead() -> None:
     ollama = fake(translation=None)
 
-    checked = pipeline._checked_titles(Settings(), ollama, [entry("GPT-...（需要翻譯）")], lambda _: None)
+    checked = headlines._checked_titles(Settings(), ollama, [entry("GPT-...（需要翻譯）")], lambda _: None)
 
     assert [value.item.title for value in checked] == ["摘要"]
 
@@ -124,14 +124,14 @@ def test_a_replacement_that_fails_the_same_check_is_not_shown() -> None:
     statuses: list[str] = []
     shown = [entry("OpenAI 擴散模型攻擊被阻")]
 
-    assert pipeline._checked_titles(Settings(), ollama, shown, statuses.append) == shown
+    assert headlines._checked_titles(Settings(), ollama, shown, statuses.append) == shown
     assert "kept" in statuses[0]
 
 
 def test_a_cut_title_whose_replacement_fails_takes_the_summarys_lead() -> None:
     ollama = fake(rejected=frozenset({"OpenAI blocks distillation attacks"}))
 
-    checked = pipeline._checked_titles(Settings(), ollama, [entry("GPT-...（需要翻譯）")], lambda _: None)
+    checked = headlines._checked_titles(Settings(), ollama, [entry("GPT-...（需要翻譯）")], lambda _: None)
 
     assert [value.item.title for value in checked] == ["摘要"]
 
@@ -147,8 +147,8 @@ def test_a_replacement_whose_check_cannot_run_is_not_shown() -> None:
     ollama = SilentOnReplacement(base.backs, base.translations, base.rejected)
     flagged = [entry("OpenAI 擴散模型攻擊被阻")]
 
-    assert pipeline._checked_titles(Settings(), ollama, flagged, lambda _: None) == flagged
-    cut = pipeline._checked_titles(Settings(), ollama, [entry("GPT-...（需要翻譯）")], lambda _: None)
+    assert headlines._checked_titles(Settings(), ollama, flagged, lambda _: None) == flagged
+    cut = headlines._checked_titles(Settings(), ollama, [entry("GPT-...（需要翻譯）")], lambda _: None)
     assert [value.item.title for value in cut] == ["摘要"]
 
 
@@ -160,14 +160,14 @@ def test_a_check_that_cannot_run_keeps_the_title() -> None:
     ollama = Silent({"OpenAI 擴散模型攻擊被阻": "OpenAI's diffusion model attacks blocked"}, {}, set())
     shown = [entry("OpenAI 擴散模型攻擊被阻")]
 
-    assert pipeline._checked_titles(Settings(), ollama, shown, lambda _: None) == shown
+    assert headlines._checked_titles(Settings(), ollama, shown, lambda _: None) == shown
 
 
 def test_each_model_loads_once_with_the_review_model_out_of_the_way() -> None:
     settings = Settings()
     ollama = fake()
 
-    pipeline._checked_titles(settings, ollama, [entry("OpenAI 阻止蒸餾攻擊"), entry("OpenAI 阻止蒸餾攻擊")], lambda _: None)
+    headlines._checked_titles(settings, ollama, [entry("OpenAI 阻止蒸餾攻擊"), entry("OpenAI 阻止蒸餾攻擊")], lambda _: None)
 
     unload_review, unload_translator = (
         ollama.calls.index(f"unload {settings.ollama_review_model}"),
@@ -186,7 +186,7 @@ def test_nothing_runs_for_titles_that_were_not_translated_or_have_no_headline() 
         entry("OpenAI 阻止蒸餾攻擊", source_title="View this post on the web at https://example.com"),
     ]
 
-    assert pipeline._checked_titles(Settings(), ollama, shown, lambda _: None) == shown
+    assert headlines._checked_titles(Settings(), ollama, shown, lambda _: None) == shown
     assert ollama.calls == []
 
 
@@ -194,5 +194,5 @@ def test_the_check_can_be_turned_off() -> None:
     ollama = fake(rejected=frozenset({"OpenAI's diffusion model attacks blocked"}))
     shown = [entry("OpenAI 擴散模型攻擊被阻")]
 
-    assert pipeline._checked_titles(Settings(digest_check_titles=False), ollama, shown, lambda _: None) == shown
+    assert headlines._checked_titles(Settings(digest_check_titles=False), ollama, shown, lambda _: None) == shown
     assert ollama.calls == []

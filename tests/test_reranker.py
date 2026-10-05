@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 
-from two_much_two_read import pipeline
+from two_much_two_read import selection, stages
 from two_much_two_read.command_models import SecurityFloorPromotion
 from two_much_two_read.config import Settings
 from two_much_two_read.digest import (
@@ -118,7 +118,7 @@ def test_ranked_entries_keeps_every_candidate_so_the_audit_covers_them_all() -> 
 
     entries = [entry(index, f"Story {index}", "TLDR AI") for index in range(1, 6)]
 
-    ranked = pipeline._ranked_entries(FakeReranker(), entries)
+    ranked = selection._ranked_entries(FakeReranker(), entries)
 
     assert [value.candidate_id for value in ranked] == [1, 2, 3, 4, 5]
 
@@ -132,7 +132,7 @@ def ranked_pair(security: int, general: int) -> list[DigestEntry]:
 def test_security_candidates_reach_the_reviewer_from_below_the_global_cutoff() -> None:
     ranked = ranked_pair(security=9, general=30)
 
-    kept = pipeline._review_candidates(ranked, 20, 7)
+    kept = selection._review_candidates(ranked, 20, 7)
 
     assert len(kept) == 20
     assert [value.candidate_id for value in kept if value.item.category == "SECURITY"] == list(range(100, 107))
@@ -142,7 +142,7 @@ def test_security_candidates_reach_the_reviewer_from_below_the_global_cutoff() -
 def test_unused_security_slots_go_to_the_other_categories() -> None:
     ranked = ranked_pair(security=2, general=30)
 
-    kept = pipeline._review_candidates(ranked, 20, 7)
+    kept = selection._review_candidates(ranked, 20, 7)
 
     assert len(kept) == 20
     assert sum(1 for value in kept if value.item.category == "SECURITY") == 2
@@ -151,7 +151,7 @@ def test_unused_security_slots_go_to_the_other_categories() -> None:
 def test_unused_general_slots_go_to_security() -> None:
     ranked = ranked_pair(security=30, general=5)
 
-    kept = pipeline._review_candidates(ranked, 20, 7)
+    kept = selection._review_candidates(ranked, 20, 7)
 
     assert len(kept) == 20
     assert sum(1 for value in kept if value.item.category == "SECURITY") == 15
@@ -160,7 +160,7 @@ def test_unused_general_slots_go_to_security() -> None:
 def test_the_quota_never_exceeds_the_reviewer_limit() -> None:
     ranked = ranked_pair(security=30, general=30)
 
-    assert len(pipeline._review_candidates(ranked, 20, 40)) == 20
+    assert len(selection._review_candidates(ranked, 20, 40)) == 20
 
 
 def test_kept_candidates_stay_in_reranker_order() -> None:
@@ -170,7 +170,7 @@ def test_kept_candidates_stay_in_reranker_order() -> None:
         entry(3, "Another release", "TLDR AI"),
     ]
 
-    assert [value.candidate_id for value in pipeline._review_candidates(ranked, 3, 1)] == [1, 2, 3]
+    assert [value.candidate_id for value in selection._review_candidates(ranked, 3, 1)] == [1, 2, 3]
 
 
 def test_security_slots_default_to_seven_of_the_twenty_reviewer_slots() -> None:
@@ -186,7 +186,7 @@ def test_unload_failure_is_reported_to_the_status_reporter() -> None:
 
     messages: list[str] = []
 
-    pipeline._unload_model(FakeOllama(), "qwen3:8b", messages.append)
+    stages._unload_model(FakeOllama(), "qwen3:8b", messages.append)
 
     assert messages == ["Warning: qwen3:8b did not unload and may still hold memory"]
 
@@ -206,7 +206,7 @@ def test_unwritten_reranker_scores_are_reported() -> None:
         replace(entry(2, "Second", "TLDR AI"), reranker_score=0.1),
     ]
 
-    pipeline._save_reranker_scores(FakeDatabase(), ranked, FakeReranker(), messages.append)
+    selection._save_reranker_scores(FakeDatabase(), ranked, FakeReranker(), messages.append)
 
     assert messages == ["Warning: recorded 1 of 2 reranker scores"]
 
@@ -232,7 +232,7 @@ def test_final_review_selects_scored_items_and_leaves_the_reviewer_loaded() -> N
         digest_max_items=1, digest_review_candidate_limit=2, digest_headlines_per_source=0, ollama_review_model="qwen3:8b"
     )
 
-    reviewed = pipeline._reviewed_entries(settings, ollama, [entry(2, "Release", "TLDR AI"), entry(1, "Trial", "AlphaSignal")])
+    reviewed = selection._reviewed_entries(settings, ollama, [entry(2, "Release", "TLDR AI"), entry(1, "Trial", "AlphaSignal")])
 
     assert [(value.candidate_id, value.review_score) for value in reviewed] == [(2, 90), (1, None)]
     assert ollama.candidates[0]["source"] == "TLDR AI"
@@ -256,7 +256,7 @@ def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None
     settings = Settings(digest_max_items=1, digest_review_candidate_limit=5, digest_secondary_items=2)
     ranked = [entry(index, f"Story {index}", "TLDR AI") for index in range(1, 6)]
 
-    reviewed = pipeline._reviewed_entries(settings, FakeOllama(), ranked)
+    reviewed = selection._reviewed_entries(settings, FakeOllama(), ranked)
 
     # Every passed-over candidate is returned; the secondary limit is applied after merging, so a
     # mention absorbed into a headline frees its slot for the next one rather than shrinking the list.
@@ -267,7 +267,7 @@ def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None
         (4, None),
         (5, None),
     ]
-    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 2, never_the_same)[0]] == [1, 2, 3]
+    assert [value.candidate_id for value in selection._merged_entries(reviewed, 2, never_the_same)[0]] == [1, 2, 3]
 
 
 def test_secondary_mentions_can_be_turned_off() -> None:
@@ -280,9 +280,9 @@ def test_secondary_mentions_can_be_turned_off() -> None:
 
     settings = Settings(digest_max_items=1, digest_secondary_items=0)
     ranked = [entry(index, f"Story {index}", "TLDR AI") for index in range(1, 4)]
-    reviewed = pipeline._reviewed_entries(settings, FakeOllama(), ranked)
+    reviewed = selection._reviewed_entries(settings, FakeOllama(), ranked)
 
-    assert [value.candidate_id for value in pipeline._merged_entries(reviewed, 0, never_the_same)[0]] == [1]
+    assert [value.candidate_id for value in selection._merged_entries(reviewed, 0, never_the_same)[0]] == [1]
 
 
 def _digest(headlines: Sequence[tuple[str, DigestCategory]], mentions: Sequence[tuple[str, DigestCategory]]) -> list[DigestEntry]:
@@ -299,7 +299,7 @@ def _digest(headlines: Sequence[tuple[str, DigestCategory]], mentions: Sequence[
 
 
 def _floored(entries: list[DigestEntry], headline_limit: int, secondary_items: int = 10) -> tuple[list[str], list[str]]:
-    result, _ = pipeline._merged_entries(entries, secondary_items, never_the_same, headline_limit=headline_limit)
+    result, _ = selection._merged_entries(entries, secondary_items, never_the_same, headline_limit=headline_limit)
     return (
         [value.item.title for value in result if value.review_score is not None],
         [value.item.title for value in result if value.review_score is None],
@@ -327,7 +327,7 @@ def test_the_promoted_story_renders_as_the_last_headline() -> None:
     )
 
     content = render_digest(
-        pipeline._merged_entries(entries, 10, never_the_same, headline_limit=2)[0], datetime(2026, 9, 24), "AI", "TLDR", 2
+        selection._merged_entries(entries, 10, never_the_same, headline_limit=2)[0], datetime(2026, 9, 24), "AI", "TLDR", 2
     )
 
     top, rest = content.split("🧰")
@@ -415,7 +415,7 @@ def test_the_promoted_story_renders_after_a_headline_the_reviewer_scored_zero() 
     ]
 
     content = render_digest(
-        pipeline._merged_entries(entries, 10, never_the_same, headline_limit=3)[0], datetime(2026, 9, 24), "AI", "TLDR", 3
+        selection._merged_entries(entries, 10, never_the_same, headline_limit=3)[0], datetime(2026, 9, 24), "AI", "TLDR", 3
     )
 
     top, rest = content.split("🧰")
@@ -436,7 +436,7 @@ def test_a_cve_is_recognised_however_the_summary_spaces_it(summary: str) -> None
     cve = entry(1, "Docker 沙盒漏洞", "TLDR", "SECURITY")
     cve = replace(cve, item=cve.item.model_copy(update={"summary_zh_tw": summary}))
 
-    assert pipeline._is_cve(cve)
+    assert selection._is_cve(cve)
 
 
 @pytest.mark.parametrize("title", ["XCVE-2026-77179 bundle", "CVE-2026-77179A patch", "CVE-2026-77179based scanner"])
@@ -444,7 +444,7 @@ def test_a_cve_like_token_inside_another_word_is_not_a_cve(title: str) -> None:
     # Either side: a lookalike in a shown mention would satisfy the floor and leave no security headline.
     lookalike = entry(1, title, "TLDR", "SECURITY")
 
-    assert not pipeline._is_cve(lookalike)
+    assert not selection._is_cve(lookalike)
 
 
 def test_the_floor_reports_what_it_promoted_and_what_made_room() -> None:
@@ -453,7 +453,7 @@ def test_the_floor_reports_what_it_promoted_and_what_made_room() -> None:
         [("Rune IDE", "DEV_TOOL"), ("Muse 0-day", "SECURITY")],
     )
 
-    _, promotion = pipeline._merged_entries(entries, 10, never_the_same, headline_limit=2)
+    _, promotion = selection._merged_entries(entries, 10, never_the_same, headline_limit=2)
 
     assert promotion == SecurityFloorPromotion(promoted="Muse 0-day", source="TLDR", displaced="GPT-6")
 
@@ -461,7 +461,7 @@ def test_the_floor_reports_what_it_promoted_and_what_made_room() -> None:
 def test_a_floor_that_only_filled_an_empty_slot_displaced_nothing() -> None:
     entries = _digest([("Opus 5.5", "AI_MODEL")], [("Muse 0-day", "SECURITY")])
 
-    _, promotion = pipeline._merged_entries(entries, 10, never_the_same, headline_limit=3)
+    _, promotion = selection._merged_entries(entries, 10, never_the_same, headline_limit=3)
 
     assert promotion == SecurityFloorPromotion(promoted="Muse 0-day", source="TLDR", displaced=None)
 
@@ -477,7 +477,7 @@ def test_a_floor_that_only_filled_an_empty_slot_displaced_nothing() -> None:
 def test_a_floor_that_did_not_act_reports_nothing(
     headlines: list[tuple[str, DigestCategory]], mentions: list[tuple[str, DigestCategory]]
 ) -> None:
-    _, promotion = pipeline._merged_entries(_digest(headlines, mentions), 10, never_the_same, headline_limit=1)
+    _, promotion = selection._merged_entries(_digest(headlines, mentions), 10, never_the_same, headline_limit=1)
 
     assert promotion is None
 
@@ -487,7 +487,7 @@ def test_a_digest_the_reviewer_chose_nothing_for_keeps_its_ranked_headlines() ->
     # ended that fallback: three headlines became one, and the other two were pushed into mentions.
     entries = _digest([], [("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL"), ("Rune IDE", "DEV_TOOL"), ("Muse 0-day", "SECURITY")])
 
-    merged, promotion = pipeline._merged_entries(entries, 10, never_the_same, headline_limit=3)
+    merged, promotion = selection._merged_entries(entries, 10, never_the_same, headline_limit=3)
     content = render_digest(merged, datetime(2026, 9, 24), "AI", "TLDR", 3)
 
     top = content.split("🧰")[0]
@@ -507,7 +507,7 @@ def test_the_promotion_record_carries_no_terminal_controls() -> None:
         replace(entry(2, "Muse\x9b2J 0-day‮", "Risky\x9bBiz", "SECURITY"), reranker_score=0.5),
     ]
 
-    _, promotion = pipeline._merged_entries(entries, 10, never_the_same, headline_limit=1)
+    _, promotion = selection._merged_entries(entries, 10, never_the_same, headline_limit=1)
 
     assert promotion == SecurityFloorPromotion(promoted="Muse 2J 0-day", source="Risky Biz", displaced="Opus 5.5")
 
@@ -544,7 +544,7 @@ def test_items_with_nothing_behind_them_are_kept_from_the_reviewer_but_stay_ment
 
     ranked = [_headline_only(1, "Grok 4.7"), entry(2, "Opus 5.5 pricing", "AlphaSignal"), _headline_only(3, "GPT-6 Sol")]
 
-    reviewed = pipeline._reviewed_entries(Settings(digest_max_items=1), FakeOllama(), ranked)
+    reviewed = selection._reviewed_entries(Settings(digest_max_items=1), FakeOllama(), ranked)
 
     assert seen == [2]
     assert [(value.candidate_id, value.review_score) for value in reviewed] == [(2, 90), (1, None), (3, None)]
@@ -557,7 +557,7 @@ def test_a_pool_of_only_headlines_skips_the_reviewer() -> None:
 
     ranked = [_headline_only(1, "Grok 4.7"), _headline_only(2, "GPT-6 Sol")]
 
-    assert pipeline._reviewed_entries(Settings(), Unused(), ranked) == ranked
+    assert selection._reviewed_entries(Settings(), Unused(), ranked) == ranked
 
 
 def test_the_security_floor_never_promotes_a_story_with_nothing_behind_it() -> None:
@@ -565,8 +565,8 @@ def test_the_security_floor_never_promotes_a_story_with_nothing_behind_it() -> N
     muse = replace(_headline_only(2, "Muse 0-day", "SECURITY"), reranker_score=0.6)
     clop = replace(entry(3, "Clop leak site", "TLDR", "SECURITY"), reranker_score=0.4)
 
-    promoted, _ = pipeline._merged_entries([*headlines, muse, clop], 10, never_the_same, headline_limit=2)
-    alone, promotion = pipeline._merged_entries([*headlines, muse], 10, never_the_same, headline_limit=2)
+    promoted, _ = selection._merged_entries([*headlines, muse, clop], 10, never_the_same, headline_limit=2)
+    alone, promotion = selection._merged_entries([*headlines, muse], 10, never_the_same, headline_limit=2)
 
     assert [value.item.title for value in promoted if value.review_score is not None] == ["Opus 5.5", "Clop leak site"]
     assert promotion is None
@@ -585,8 +585,8 @@ def test_the_security_floor_never_promotes_coverage_gained_after_the_review() ->
     def muse_is_muse(left: DigestEntry, right: DigestEntry) -> bool:
         return "Muse" in left.item.title and "Muse" in right.item.title
 
-    bare, bare_promotion = pipeline._merged_entries([*headlines, muse, muse_again], 10, muse_is_muse, headline_limit=2)
-    backed, backed_promotion = pipeline._merged_entries([*headlines, muse, muse_written], 10, muse_is_muse, headline_limit=2)
+    bare, bare_promotion = selection._merged_entries([*headlines, muse, muse_again], 10, muse_is_muse, headline_limit=2)
+    backed, backed_promotion = selection._merged_entries([*headlines, muse, muse_written], 10, muse_is_muse, headline_limit=2)
 
     assert bare_promotion is None
     assert [value.item.title for value in bare if value.review_score is not None] == ["Opus 5.5"]
@@ -772,7 +772,7 @@ def test_the_reviewer_is_told_how_many_previous_days_carried_a_story() -> None:
 
     ranked = [replace(entry(1, "Opus 5.5", "TLDR"), previous_days=2, previous_window=3), entry(2, "Rune IDE", "TLDR")]
 
-    pipeline._reviewed_entries(Settings(digest_max_items=1), FakeOllama(), ranked)
+    selection._reviewed_entries(Settings(digest_max_items=1), FakeOllama(), ranked)
 
     assert seen[0]["previous_days"] == 2
     assert "previous_days" not in seen[1]
@@ -822,7 +822,7 @@ def test_previous_coverage_comes_from_earlier_runs_within_the_window(tmp_path: P
             judged.append(right["title"])
             return True
 
-    mark = pipeline._repeat_marker(
+    mark = selection._repeat_marker(
         Settings(digest_timezone="America/Montreal"),
         database,
         Judge(),
@@ -848,7 +848,7 @@ def test_a_zero_window_turns_the_mark_off(tmp_path: Path) -> None:
     ranked = [entry(1, "Opus 5.5", "TLDR")]
     database = Database(tmp_path / "digest.sqlite3")
     try:
-        mark = pipeline._repeat_marker(
+        mark = selection._repeat_marker(
             Settings(digest_repeat_window_days=0), database, Unused(), datetime.now(UTC), [], {}, lambda _message: None
         )
         marked = mark(ranked, lambda _entry: True)
@@ -943,7 +943,7 @@ def test_repeats_are_checked_on_what_the_reviewer_and_the_reader_see(tmp_path: P
 
     settings = Settings(digest_review_candidate_limit=1, digest_secondary_items=1, digest_timezone="America/Montreal")
     messages: list[str] = []
-    mark = pipeline._repeat_marker(
+    mark = selection._repeat_marker(
         settings,
         database,
         RepeatJudge(),
@@ -957,7 +957,7 @@ def test_repeats_are_checked_on_what_the_reviewer_and_the_reader_see(tmp_path: P
         _headline_only(2, "Grok 4.7 pricing"),
         _headline_only(3, "Grok 4.7 benchmarks"),
     ]
-    shown, _ = pipeline._selected_entries(settings, Reviewer(), ranked, mark, lambda _message: None)
+    shown, _ = selection._selected_entries(settings, Reviewer(), ranked, mark, lambda _message: None)
     database.close()
 
     assert [value.item.title for value in shown] == ["Grok 4.7 pricing", "Grok 4.7 benchmarks"]
@@ -987,7 +987,7 @@ def test_the_reviewer_is_handed_each_story_once() -> None:
         entry(2, "What Jev will do to data engineering", "Data Engineering Weekly"),
         entry(3, "Grok 4.7 launch", "TLDR AI"),
     ]
-    shown, _ = pipeline._selected_entries(settings, Reviewer(), ranked, lambda entries, _wanted: entries, lambda _m: None)
+    shown, _ = selection._selected_entries(settings, Reviewer(), ranked, lambda entries, _wanted: entries, lambda _m: None)
 
     assert [(candidate["candidate_id"], candidate["source"]) for candidate in handed[0]] == [
         (1, "AlphaSignal, Data Engineering Weekly"),
@@ -1060,7 +1060,7 @@ def test_a_repeat_found_through_a_folded_report_is_kept() -> None:
 
     settings = Settings(digest_review_candidate_limit=2, digest_max_items=2, digest_repeat_window_days=0)
     ranked = [entry(1, "Grok 4.7 launch", "TLDR AI"), entry(2, "Grok 4.7 pricing", "AlphaSignal")]
-    shown, _ = pipeline._selected_entries(settings, Reviewer(), ranked, mark, lambda _m: None)
+    shown, _ = selection._selected_entries(settings, Reviewer(), ranked, mark, lambda _m: None)
 
     assert [(value.candidate_id, value.previous_days) for value in shown] == [(1, 2)]
 
@@ -1073,7 +1073,7 @@ def test_a_pair_is_judged_once_whichever_way_round_it_is_asked() -> None:
             asked.append(left["title"])
             return False
 
-    judge = pipeline._story_judge(Judge(), 10, lambda _m: None)
+    judge = selection._story_judge(Judge(), 10, lambda _m: None)
     first, second = entry(1, "Grok 4.7", "TLDR AI"), entry(2, "Grok 4.7 pricing", "AlphaSignal")
 
     assert not judge(first, second)
@@ -1096,8 +1096,8 @@ def test_one_newsletter_holds_at_most_its_share_of_the_headlines() -> None:
         _headline(5, "SANS", 60),
     ]
 
-    capped, _ = pipeline._merged_entries(picks, 10, never_the_same, headline_limit=3, per_source=2)
-    uncapped, _ = pipeline._merged_entries(picks, 10, never_the_same, headline_limit=3)
+    capped, _ = selection._merged_entries(picks, 10, never_the_same, headline_limit=3, per_source=2)
+    uncapped, _ = selection._merged_entries(picks, 10, never_the_same, headline_limit=3)
 
     assert [(value.candidate_id, value.review_score is not None) for value in capped] == [
         (1, True),
@@ -1130,7 +1130,7 @@ def test_hacker_news_stories_count_against_the_site_they_link_not_the_feed() -> 
         story(6, None, 90),
     ]
 
-    capped, _ = pipeline._merged_entries(picks, 10, never_the_same, headline_limit=6, per_source=2)
+    capped, _ = selection._merged_entries(picks, 10, never_the_same, headline_limit=6, per_source=2)
 
     # GitHub's third story is the only one over the cap; self posts count alone.
     assert [value.candidate_id for value in capped if value.review_score is not None] == [1, 2, 4, 5, 6]
@@ -1157,7 +1157,7 @@ def test_newsletter_cap_survives_hn_attribution_from_dedupe_and_merge() -> None:
         )
 
     first = dedupe_entries([picks[0], hn_copy(picks[0])])[0]
-    capped, _ = pipeline._merged_entries(
+    capped, _ = selection._merged_entries(
         [first, *picks[1:], hn_copy(picks[1]), hn_copy(picks[2])],
         10,
         lambda left, right: left.article_url == right.article_url,
@@ -1173,7 +1173,7 @@ def test_a_pick_the_cap_leaves_out_competes_for_the_mention_quota_like_any_menti
     picks = [_headline(1, "Console", 95), _headline(2, "Console", 94), _headline(3, "Console", 93)]
     passed_over = [replace(entry(4, "Other story", "TLDR"), reranker_score=0.99)]
 
-    merged, _ = pipeline._merged_entries([*picks, *passed_over], 1, never_the_same, headline_limit=5, per_source=2)
+    merged, _ = selection._merged_entries([*picks, *passed_over], 1, never_the_same, headline_limit=5, per_source=2)
 
     # One mention slot: the passed-over candidate ranks above the capped pick, so it is the one shown.
     assert [value.candidate_id for value in merged] == [1, 2, 4]
@@ -1200,7 +1200,7 @@ def test_picks_past_the_headlines_shown_keep_their_place_outside_the_mention_quo
             return False
 
     settings = Settings(digest_max_items=7, digest_top_items=5, digest_secondary_items=1, digest_review_candidate_limit=10)
-    shown, _ = pipeline._selected_entries(settings, Reviewer(), ranked, lambda values, _chosen: values, lambda _message: None)
+    shown, _ = selection._selected_entries(settings, Reviewer(), ranked, lambda values, _chosen: values, lambda _message: None)
 
     assert [(value.candidate_id, value.review_score is not None) for value in shown] == [
         *[(candidate_id, True) for candidate_id in (1, 2, 4, 5, 6, 7, 8)],
@@ -1219,7 +1219,7 @@ def test_the_reviewer_is_asked_for_picks_past_the_limit_only_while_the_cap_is_on
             return DigestReview.model_validate({"selected": []})
 
     ranked = [entry(1, "Opus 5.5", "TLDR")]
-    pipeline._reviewed_entries(Settings(digest_max_items=10), FakeOllama(), ranked)
-    pipeline._reviewed_entries(Settings(digest_max_items=10, digest_headlines_per_source=0), FakeOllama(), ranked)
+    selection._reviewed_entries(Settings(digest_max_items=10), FakeOllama(), ranked)
+    selection._reviewed_entries(Settings(digest_max_items=10, digest_headlines_per_source=0), FakeOllama(), ranked)
 
-    assert asked == [(10, pipeline.REVIEW_REFILL_PICKS), (10, 0)]
+    assert asked == [(10, selection.REVIEW_REFILL_PICKS), (10, 0)]
