@@ -44,9 +44,27 @@ from .digest import (
 from .gmail import GmailClient, credentials, message_headers
 from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
 from .mime import MAX_ANALYSIS_CHARS, EmailExtractionError, extract_gmail_payload
-from .ollama import OllamaClient, OllamaContextError, OllamaSchemaError, close_ollama_client, create_ollama_client
+from .ollama import (
+    OllamaClient,
+    OllamaContextError,
+    OllamaSchemaError,
+    checked_title,
+    close_ollama_client,
+    create_ollama_client,
+    source_headline,
+    title_from_summary,
+    translated_from,
+)
 from .reranker import RelevanceReranker
-from .schemas import ArticleAnalysis, DigestItem, DigestReview, ExtractedEmailContent, ItemDeepening, ResolvedContent
+from .schemas import (
+    ArticleAnalysis,
+    DigestItem,
+    DigestReview,
+    ExtractedEmailContent,
+    HeadlineCheck,
+    ItemDeepening,
+    ResolvedContent,
+)
 from .storage import Database
 from .url_enrichment import UrlEnricher, resolve_match, shown_url
 
@@ -84,6 +102,7 @@ def _items(database: Database, document_ids: list[int], limit: int, source_names
                 "importance": row["importance"],
                 "confidence": row["confidence"],
                 "tags": json.loads(str(row["tags_json"])),
+                "source_title": row.get("source_title"),
             }
         )
         result.append(
@@ -132,6 +151,13 @@ class DeepensItems(Protocol):
 
 
 class UnloadsModels(Protocol):
+    def unload(self, model: str) -> bool: ...
+
+
+class ChecksTitles(Protocol):
+    def back_translated(self, title: str, source_id: str = ...) -> str | None: ...
+    def translated_headline(self, headline: str, source_id: str = ...) -> str | None: ...
+    def headline_supported(self, headline: str, back: str) -> HeadlineCheck | None: ...
     def unload(self, model: str) -> bool: ...
 
 
@@ -639,6 +665,65 @@ def _headline_source(entry: DigestEntry, fetcher: ArticleFetcher, status: Status
     return "\n\n".join((*summaries, entry.item.why_it_matters_zh_tw)), "newsletters"
 
 
+def _checked_titles(
+    settings: Settings, ollama: ChecksTitles, entries: list[DigestEntry], status: StatusReporter
+) -> list[DigestEntry]:
+    """The shown entries with each translated title checked against the newsletter's own headline.
+
+    A title is read back into English by the translation model, which never sees the headline, and
+    the review model compares the two; see HEADLINE_CHECK_SYSTEM_PROMPT. A title that fails, or that
+    a rule can see is cut short, is replaced by the translation model's own translation of the
+    headline, which passed the same rules. Without one, a title cut short takes the summary's lead and
+    a flagged one stays, logged: about three flags in four are sound titles, so a flag is reason to
+    swap a title for a plainer one, never to lose an entry or move it.
+
+    The translation model runs for every title first and the review model after, so each loads once.
+    """
+    if not settings.digest_check_titles:
+        return entries
+    language = settings.digest_language
+    headlines: dict[int, str] = {}
+    for index, entry in enumerate(entries):
+        headline = source_headline(entry.item.source_title)
+        if headline is not None and translated_from(headline, entry.item.title, language):
+            headlines[index] = headline
+    if not headlines:
+        return entries
+    # The review model is still loaded from selection, and both do not fit beside each other.
+    _unload_model(ollama, settings.ollama_review_model, status)
+    readings: dict[int, tuple[str | None, str | None]] = {}
+    for index, headline in headlines.items():
+        source_id = entries[index].source_id or "digest"
+        cut_short = checked_title(headline, entries[index].item.title, language) is None
+        back = None if cut_short else ollama.back_translated(entries[index].item.title, source_id)
+        readings[index] = (back, ollama.translated_headline(headline, source_id))
+    _unload_model(ollama, settings.ollama_translate_model, status)
+
+    checked: list[DigestEntry] = []
+    for index, entry in enumerate(entries):
+        if index not in readings:
+            checked.append(entry)
+            continue
+        headline, title = headlines[index], entry.item.title
+        back, alternative = readings[index]
+        if checked_title(headline, title, language) is None:
+            reason = "cut short"
+        elif back is None or (check := ollama.headline_supported(headline, back)) is None or check.supported:
+            # A check that could not run is no evidence against the title.
+            checked.append(entry)
+            continue
+        else:
+            reason = check.reason
+        replacement = alternative or (title_from_summary(entry.item.summary_zh_tw) if reason == "cut short" else None)
+        if replacement is None:
+            status(f"Title check: kept {title!r} for {headline!r}, with nothing to replace it ({reason[:160]})")
+            checked.append(entry)
+            continue
+        status(f"Title check: {title!r} -> {replacement!r} for {headline!r} ({reason[:160]})")
+        checked.append(replace(entry, item=entry.item.model_copy(update={"title": replacement})))
+    return checked
+
+
 def _deepened_entries(
     settings: Settings, ollama: DeepensItems, entries: list[DigestEntry], status: StatusReporter
 ) -> list[DigestEntry]:
@@ -1073,6 +1158,7 @@ def _process_hackernews_source(
             [
                 DigestItem(
                     title=candidate.document.title,
+                    source_title=candidate.document.title,
                     category=analysis.category,
                     summary_zh_tw=analysis.summary_zh_tw,
                     why_it_matters_zh_tw=analysis.why_it_matters_zh_tw,
@@ -1249,6 +1335,7 @@ def run_pipeline(
                 reviewed_entries, security_floor = _selected_entries(settings, ollama, ranked_entries, mark_repeats, status)
                 if security_floor is not None:
                     status(f"Security floor: promoted {security_floor.promoted}")
+                reviewed_entries = _checked_titles(settings, ollama, reviewed_entries, status)
                 reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status)
             finally:
                 _unload_model(ollama, settings.ollama_review_model, status)

@@ -161,6 +161,8 @@ class Settings(BaseSettings):
     digest_repeat_window_days: int = Field(default=3, ge=0, le=14)
     digest_repeat_judgements: int = Field(default=60, ge=0)
     digest_deepen_headlines: bool = True
+    # Read each shown title back into English and compare it with the newsletter's headline.
+    digest_check_titles: bool = True
     digest_review_candidate_limit: int = Field(default=20, ge=1)
     digest_rerank_candidate_limit: int = Field(default=100, ge=1)
     digest_security_candidate_slots: int = Field(default=7, ge=0)

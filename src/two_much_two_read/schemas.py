@@ -170,6 +170,13 @@ class DigestItem(ItemAnalysis):
     url_resolution_status: Literal["not_applicable", "not_requested", "resolved", "failed", "blocked"] = "not_applicable"
     url_error_code: str | None = None
     url_checked_at: datetime | None = None
+    # The newsletter's own headline, verbatim, which the shown title is checked against.
+    source_title: str | None = None
+
+
+class HeadlineCheck(BaseModel):
+    supported: bool
+    reason: str = Field(default="", max_length=600)
 
 
 class DigestReviewSelection(BaseModel):

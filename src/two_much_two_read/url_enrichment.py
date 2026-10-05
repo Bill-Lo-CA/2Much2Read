@@ -154,7 +154,9 @@ class UrlEnricher:
         return self._item(match, error_code=error_code)
 
     def _item(self, match: UrlMatch, resolved: ResolvedUrl | None = None, error_code: str | None = None) -> DigestItem:
-        values = {name: getattr(match.item, name) for name in ItemAnalysis.model_fields}
+        values = {name: getattr(match.item, name) for name in ItemAnalysis.model_fields} | {
+            "source_title": match.item.source_title
+        }
         if match.candidate is None:
             match_status = cast(Literal["unmatched", "ambiguous"], match.method)
             return DigestItem(
