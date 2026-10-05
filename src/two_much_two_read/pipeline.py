@@ -702,11 +702,8 @@ def _checked_titles(
         readings[index] = (back, alternative, alternative_back)
     _unload_model(ollama, settings.ollama_translate_model, status)
 
-    def flagged(headline: str, back: str | None) -> str | None:
-        """Why the review model says the reading differs from the headline, or None; a check that
-        could not run is no evidence against a title."""
-        check = None if back is None else ollama.headline_supported(headline, back)
-        return None if check is None or check.supported else check.reason
+    def verdict(headline: str, back: str | None) -> HeadlineCheck | None:
+        return None if back is None else ollama.headline_supported(headline, back)
 
     checked: list[DigestEntry] = []
     for index, entry in enumerate(entries):
@@ -716,12 +713,17 @@ def _checked_titles(
         headline, title = headlines[index], entry.item.title
         back, alternative, alternative_back = readings[index]
         ruled_out = checked_title(headline, title, language) is None
-        reason = "fails the title rules" if ruled_out else flagged(headline, back)
-        if reason is None:
+        check = None if ruled_out else verdict(headline, back)
+        # A check that could not run is no evidence against the title.
+        if not ruled_out and (check is None or check.supported):
             checked.append(entry)
             continue
-        # The replacement is held to the same check: it is another model's reading of the headline.
-        if alternative is not None and flagged(headline, alternative_back) is not None:
+        reason = "fails the title rules" if check is None else check.reason
+        # The replacement is held to the same check, and needs it to pass: it is another model's
+        # reading of the headline, and one that could not be checked is no better than the title.
+        if alternative is not None and not (
+            (replacement_check := verdict(headline, alternative_back)) and replacement_check.supported
+        ):
             alternative = None
         replacement = alternative or (title_from_summary(entry.item.summary_zh_tw) if ruled_out else None)
         if replacement is None:
@@ -1166,7 +1168,9 @@ def _process_hackernews_source(
             document_id,
             [
                 DigestItem(
-                    title=candidate.document.title,
+                    # The analysis title is in the digest language, translated from the story's own if
+                    # the model left that as it was; the story's title stays as what it is checked against.
+                    title=analysis.title,
                     source_title=candidate.document.title,
                     category=analysis.category,
                     summary_zh_tw=analysis.summary_zh_tw,

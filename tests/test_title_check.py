@@ -136,6 +136,22 @@ def test_a_cut_title_whose_replacement_fails_takes_the_summarys_lead() -> None:
     assert [value.item.title for value in checked] == ["摘要"]
 
 
+def test_a_replacement_whose_check_cannot_run_is_not_shown() -> None:
+    """Failing open would put an unchecked translation in place of a title that was flagged."""
+
+    class SilentOnReplacement(FakeTitles):
+        def headline_supported(self, headline: str, back: str) -> HeadlineCheck | None:
+            return None if back == "OpenAI blocks distillation attacks" else super().headline_supported(headline, back)
+
+    base = fake(rejected=frozenset({"OpenAI's diffusion model attacks blocked"}))
+    ollama = SilentOnReplacement(base.backs, base.translations, base.rejected)
+    flagged = [entry("OpenAI 擴散模型攻擊被阻")]
+
+    assert pipeline._checked_titles(Settings(), ollama, flagged, lambda _: None) == flagged
+    cut = pipeline._checked_titles(Settings(), ollama, [entry("GPT-...（需要翻譯）")], lambda _: None)
+    assert [value.item.title for value in cut] == ["摘要"]
+
+
 def test_a_check_that_cannot_run_keeps_the_title() -> None:
     class Silent(FakeTitles):
         def headline_supported(self, headline: str, back: str) -> HeadlineCheck | None:
