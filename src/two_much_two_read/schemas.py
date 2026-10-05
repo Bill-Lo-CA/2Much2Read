@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-from typing import ClassVar, Literal
+from typing import Annotated, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PrivateAttr, TypeAdapter, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, HttpUrl, PrivateAttr, TypeAdapter, field_validator
 
 HTTP_URL = TypeAdapter(HttpUrl)
 MODEL_TEXT_INJECTION = re.compile(r"https?://|\[[^\]\r\n]*\]\([^)]*\)", re.IGNORECASE)
@@ -67,6 +67,17 @@ class ExtractedEmailContent(BaseModel):
     analysis_text: str = Field(min_length=1)
     original_characters: int | None = None
     link_candidates: list[LinkCandidate] = Field(default_factory=list)
+
+
+def _no_model_links(value: str) -> str:
+    if MODEL_TEXT_INJECTION.search(value):
+        raise ValueError("model-owned text must not contain URLs or Markdown links")
+    return value
+
+
+# A model-written title on its own, held to ItemAnalysis's rules for one; for a title that replaces
+# another after the item was stored, where the item itself is no longer model-owned.
+MODEL_TITLE: TypeAdapter[str] = TypeAdapter(Annotated[str, Field(min_length=1, max_length=200), AfterValidator(_no_model_links)])
 
 
 class ItemAnalysis(BaseModel):
@@ -170,6 +181,13 @@ class DigestItem(ItemAnalysis):
     url_resolution_status: Literal["not_applicable", "not_requested", "resolved", "failed", "blocked"] = "not_applicable"
     url_error_code: str | None = None
     url_checked_at: datetime | None = None
+    # The newsletter's own headline, verbatim, which the shown title is checked against.
+    source_title: str | None = None
+
+
+class HeadlineCheck(BaseModel):
+    supported: bool
+    reason: str = Field(default="", max_length=600)
 
 
 class DigestReviewSelection(BaseModel):
@@ -257,10 +275,10 @@ class EmailExtraction(BaseModel):
 
 
 class FieldTranslation(BaseModel):
-    model_config = ConfigDict(extra="forbid")
+    # The title is input context only; ignore it if the model returns one.
+    model_config = ConfigDict(extra="ignore")
 
     index: int = Field(ge=0)
-    title: str = Field(min_length=1, max_length=200)
     summary: str = Field(min_length=1, max_length=800)
     why_it_matters: str = Field(min_length=1, max_length=800)
 

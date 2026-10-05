@@ -431,7 +431,7 @@ def test_hacker_news_source_runs_without_gmail_and_skips_processed_items(tmp_pat
         def analyze_article(self, *args: object, **kwargs: object) -> ArticleAnalysis:
             self.calls += 1
             return ArticleAnalysis(
-                title="ignored model title",
+                title="模型標題",
                 category="AI_MODEL",
                 summary_zh_tw="摘要",
                 why_it_matters_zh_tw="原因",
@@ -439,6 +439,13 @@ def test_hacker_news_source_runs_without_gmail_and_skips_processed_items(tmp_pat
                 confidence=0.9,
                 tags=["ai"],
             )
+
+        # The shown title is checked; a check that cannot run keeps it.
+        def back_translated(self, title: str, source_id: str = "digest") -> str | None:
+            return None
+
+        def translated_headline(self, headline: str, source_id: str = "digest") -> str | None:
+            return None
 
     ollama = FakeOllamaClient()
     monkeypatch.setattr(pipeline, "credentials", lambda *args: pytest.fail("HN-only run must not initialize Gmail"))
@@ -467,11 +474,12 @@ def test_hacker_news_source_runs_without_gmail_and_skips_processed_items(tmp_pat
     assert ollama.calls == 1
     database = Database(settings.database_path)
     row = database.connection.execute(
-        """SELECT d.state,i.title,h.final_url FROM documents d JOIN items i ON i.document_id=d.id
+        """SELECT d.state,i.title,i.source_title,h.final_url FROM documents d JOIN items i ON i.document_id=d.id
         JOIN hackernews_document_state h ON h.document_id=d.id"""
     ).fetchone()
     database.close()
-    assert tuple(row) == ("processed", "HN article", "https://example.com/final")
+    # The title in the digest language is shown; the story's own is kept to check it against.
+    assert tuple(row) == ("processed", "模型標題", "HN article", "https://example.com/final")
 
 
 def test_hacker_news_force_retries_only_failed_documents(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -838,6 +846,7 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
         "extractor:load",
         "extractor:run",
         "unload:llama3.2:3b",
+        "unload:translategemma:4b",
         "reranker:load",
         "reranker:rank",
         "reranker:unload",

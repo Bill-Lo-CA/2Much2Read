@@ -19,7 +19,7 @@ from two_read_runtime.sqlite_snapshot import reading_connection
 from .digest import canonical_url, normalized_title
 from .schemas import DigestItem, EmailExtraction, ItemAnalysis, ResolvedContent, SourceDocument
 
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 # Deliberately carries no foreign key to items: store_items(replace=True) deletes and re-inserts
 # a document's items on every reprocess, and an audit log has to outlive the rows it describes.
 # document_id and normalized_title keep a scored row traceable after its item id is gone.
@@ -63,7 +63,8 @@ CREATE TABLE IF NOT EXISTS items(
   raw_url TEXT, resolved_url TEXT,
   url_match_status TEXT NOT NULL DEFAULT 'not_applicable', url_match_method TEXT, url_match_confidence REAL,
   url_resolution_status TEXT NOT NULL DEFAULT 'not_applicable', url_error_code TEXT, url_checked_at TEXT,
-  importance INTEGER NOT NULL, confidence REAL NOT NULL, tags_json TEXT NOT NULL, created_at TEXT NOT NULL
+  importance INTEGER NOT NULL, confidence REAL NOT NULL, tags_json TEXT NOT NULL, created_at TEXT NOT NULL,
+  source_title TEXT
 );
 CREATE TABLE IF NOT EXISTS url_resolution_cache(
   raw_url_hash TEXT PRIMARY KEY, raw_url_host TEXT NOT NULL, resolved_url TEXT, canonical_url TEXT,
@@ -162,6 +163,9 @@ class Database:
                 self.connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(10, datetime('now'))")
                 self.connection.commit()
                 version = 10
+            if version == 10:
+                self._migrate_v10_to_v11()
+                version = 11
             if version != SCHEMA_VERSION and (version is not None or self._has_user_tables()):
                 raise DatabaseSchemaResetRequiredError(
                     f"DATABASE_SCHEMA_RESET_REQUIRED: back up {path} and remove it before rerunning 2much2read"
@@ -255,6 +259,15 @@ class Database:
         with self.transaction() as connection:
             connection.executescript(RERANKER_SCORES_SCHEMA)
             connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(9, datetime('now'))")
+
+    def _migrate_v10_to_v11(self) -> None:
+        # Items stored before this keep no headline, and their titles go unchecked.
+        with self.transaction() as connection:
+            columns = {str(row["name"]) for row in connection.execute("PRAGMA table_info(items)")}
+            # An older database being migrated through may not have the table yet; SCHEMA makes it.
+            if columns and "source_title" not in columns:
+                connection.execute("ALTER TABLE items ADD COLUMN source_title TEXT")
+            connection.execute("INSERT OR IGNORE INTO schema_version(version, applied_at) VALUES(11, datetime('now'))")
 
     @contextmanager
     def transaction(self) -> Iterator[sqlite3.Connection]:
@@ -483,8 +496,9 @@ class Database:
                     """INSERT INTO items
                     (document_id,normalized_title,title,category,summary_zh_tw,why_it_matters_zh_tw,
                      source_url,canonical_url,raw_url,resolved_url,url_match_status,url_match_method,url_match_confidence,
-                     url_resolution_status,url_error_code,url_checked_at,importance,confidence,tags_json,created_at)
-                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     url_resolution_status,url_error_code,url_checked_at,importance,confidence,tags_json,created_at,
+                     source_title)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
                     (
                         document_id,
                         normalized_title(item.title),
@@ -506,6 +520,7 @@ class Database:
                         item.confidence,
                         json.dumps(item.tags),
                         now,
+                        item.source_title,
                     ),
                 )
             if finalize:
@@ -519,6 +534,7 @@ class Database:
             [
                 DigestItem(
                     **{name: getattr(item, name) for name in ItemAnalysis.model_fields},
+                    source_title=item.source_title,
                     url_match_status="unmatched",
                     url_resolution_status="not_requested",
                 )

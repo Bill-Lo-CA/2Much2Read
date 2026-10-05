@@ -13,6 +13,7 @@ from two_much_two_read.mime import (
     extract_gmail_payload,
     extract_mime,
     html_to_text,
+    unsubscribe_link,
 )
 from two_much_two_read.schemas import ExtractedEmailContent
 
@@ -410,6 +411,61 @@ def test_a_link_that_is_not_a_candidate_is_dropped_from_the_text() -> None:
     assert "example.com/unsub" not in content.analysis_text
     assert "Unsubscribe [L" not in content.analysis_text
     assert _codes(content) == {"L1": "https://example.com/story"}
+
+
+def test_an_unsubscribe_link_is_no_candidate_whatever_its_label() -> None:
+    # AlphaSignal's, 2026-09-28: a playful label in the HTML, "Stop receiving emails here:" in the
+    # plain part. It was the only code in the text the extractor read, and the extractor gave it to a
+    # story.
+    unsubscribe = "https://app.alphasignal.ai/unsubscribe/u/abc?cid=1"
+    plain = f"Story https://example.com/story\nStop receiving emails here: {unsubscribe}"
+    html = f'<a href="https://example.com/story">Story</a> <a href="{unsubscribe}">unsubscribe_me(): return True</a>'
+    payload: dict[str, object] = {
+        "mimeType": "multipart/alternative",
+        "parts": [_body("text/plain", plain), _body("text/html", html)],
+    }
+
+    content = extract_gmail_payload(payload)
+
+    assert _codes(content) == {"L1": "https://example.com/story"}
+    assert "alphasignal" not in content.analysis_text
+
+
+def test_the_list_unsubscribe_header_names_links_that_are_no_candidates() -> None:
+    # The header's link says nothing of unsubscribing in its address; the header says it for it.
+    unsubscribe = "https://alphasignal.ai/us?uid=abc"
+    header = f"<mailto:news@alphasignal.ai?subject=unsubscribe>, <{unsubscribe}>"
+    html = f'<a href="https://example.com/story">Story</a> <a href="{unsubscribe}">Leave</a>'
+    payload: dict[str, object] = {**_body("text/html", html), "headers": [{"name": "List-Unsubscribe", "value": header}]}
+    message = EmailMessage()
+    message["List-Unsubscribe"] = header
+    message.set_content("plain summary")
+    message.add_alternative(html, subtype="html")
+
+    for content in (extract_gmail_payload(payload), extract_mime(message.as_bytes())):
+        assert _codes(content) == {"L1": "https://example.com/story"}
+
+
+@pytest.mark.parametrize(
+    ("url", "unsubscribes"),
+    [
+        ("https://app.alphasignal.ai/unsubscribe/u/abc?cid=1", True),
+        ("https://unsubscribe.convertkit-mail.com/x", True),
+        ("https://example.com/unsub/abc", True),
+        ("https://example.substack.com/action/disable_email?token=x", True),
+        ("https://example.com/optout?id=1", True),
+        ("https://example.com/email?action=opt-out", True),
+        # A tracker's destination, percent-encoded in its query.
+        ("https://click.example/c?url=https%3A%2F%2Fexample.com%2Funsubscribe%3Fu%3D1", True),
+        # An article about opting out, or with a word that only starts like one, is still an article.
+        ("https://example.com/how-to-opt-out-of-ai-training", False),
+        ("https://example.com/an-unsubtle-change", False),
+        ("https://example.com/article", False),
+        ("https://[invalid", False),
+    ],
+)
+def test_an_unsubscribe_link_is_recognised_by_its_words(url: str, unsubscribes: bool) -> None:
+    assert unsubscribe_link(url) is unsubscribes
 
 
 def test_urls_no_longer_spend_the_character_budget() -> None:

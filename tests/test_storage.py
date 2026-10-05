@@ -378,6 +378,32 @@ def test_v9_schema_adds_gmail_cursor_without_losing_documents(tmp_path: Path) ->
         upgraded.close()
 
 
+def test_the_verbatim_headline_is_stored_with_the_item(tmp_path: Path) -> None:
+    database = Database(tmp_path / "test.sqlite3")
+    document_id, _ = stored_item_id(database, "gmail-1", "OpenAI blocks distillation attack")
+
+    assert database.items_for_documents([document_id], 10)[0]["source_title"] == "OpenAI blocks distillation attack"
+
+
+def test_v10_schema_adds_the_headline_column_and_keeps_the_items(tmp_path: Path) -> None:
+    path = tmp_path / "v10.sqlite3"
+    database = Database(path)
+    document_id, _ = stored_item_id(database, "gmail-1")
+    database.connection.executescript(
+        "ALTER TABLE items DROP COLUMN source_title; DELETE FROM schema_version; INSERT INTO schema_version VALUES(10,'now');"
+    )
+    database.close()
+
+    upgraded = Database(path)
+    try:
+        assert upgraded.connection.execute("SELECT MAX(version) FROM schema_version").fetchone()[0] == SCHEMA_VERSION
+        row = upgraded.items_for_documents([document_id], 10)[0]
+        # An item stored before the column has no headline, and its title goes unchecked.
+        assert row["title"] == "Title" and row["source_title"] is None
+    finally:
+        upgraded.close()
+
+
 def test_digest_checkpoint_is_reset_for_a_new_destination(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     digest_id = database.save_digest("daily:1", "start", "end", "UTC", "digest")
