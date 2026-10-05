@@ -1231,3 +1231,24 @@ def test_only_a_title_put_into_the_digest_language_is_a_translation() -> None:
     # Left in English, or a Chinese newsletter's own headline: nothing was translated.
     assert not translated_from("OpenAI blocks distillation attack", "OpenAI blocks distillation attack", "zh-TW")
     assert not translated_from("OpenAI 阻止蒸餾攻擊", "OpenAI 阻止蒸餾攻擊", "zh-TW")
+
+
+def test_in_an_english_digest_the_title_is_its_own_reading() -> None:
+    """There is nothing to read back into English; the check compares the title itself."""
+    with respx.mock(assert_all_called=False) as mock:
+        route = mock.post("http://127.0.0.1:11434/api/chat")
+        back = OllamaClient(digest_language="en").back_translated(" OpenAI blocks a distillation attack ")
+
+    assert back == "OpenAI blocks a distillation attack" and not route.called
+
+
+@pytest.mark.parametrize(
+    "answer",
+    ["請見 https://example.com 的蒸餾攻擊說明", "蒸餾攻擊" * 60],
+    ids=["link", "too-long"],
+)
+@respx.mock
+def test_a_headline_translation_is_held_to_the_title_schema(answer: str) -> None:
+    respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_translation(answer))
+
+    assert OllamaClient().translated_headline("OpenAI blocks distillation attack") is None

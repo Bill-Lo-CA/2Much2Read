@@ -2,9 +2,9 @@ from __future__ import annotations
 
 import re
 from datetime import date, datetime
-from typing import ClassVar, Literal
+from typing import Annotated, ClassVar, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, HttpUrl, PrivateAttr, TypeAdapter, field_validator
+from pydantic import AfterValidator, BaseModel, ConfigDict, Field, HttpUrl, PrivateAttr, TypeAdapter, field_validator
 
 HTTP_URL = TypeAdapter(HttpUrl)
 MODEL_TEXT_INJECTION = re.compile(r"https?://|\[[^\]\r\n]*\]\([^)]*\)", re.IGNORECASE)
@@ -67,6 +67,17 @@ class ExtractedEmailContent(BaseModel):
     analysis_text: str = Field(min_length=1)
     original_characters: int | None = None
     link_candidates: list[LinkCandidate] = Field(default_factory=list)
+
+
+def _no_model_links(value: str) -> str:
+    if MODEL_TEXT_INJECTION.search(value):
+        raise ValueError("model-owned text must not contain URLs or Markdown links")
+    return value
+
+
+# A model-written title on its own, held to ItemAnalysis's rules for one; for a title that replaces
+# another after the item was stored, where the item itself is no longer model-owned.
+MODEL_TITLE: TypeAdapter[str] = TypeAdapter(Annotated[str, Field(min_length=1, max_length=200), AfterValidator(_no_model_links)])
 
 
 class ItemAnalysis(BaseModel):

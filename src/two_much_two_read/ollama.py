@@ -17,6 +17,7 @@ from .chinese_script_table import SIMPLIFIED_ONLY, TRADITIONAL_ONLY
 from .config import Settings
 from .digest import STORY_BOILERPLATE, digest_language_code
 from .schemas import (
+    MODEL_TITLE,
     ArticleAnalysis,
     DigestReview,
     EmailExtraction,
@@ -763,11 +764,23 @@ class OllamaClient:
         # A title outside a Chinese digest is in a Latin script, nearly always English; one outside
         # an English digest is Chinese.
         answer = self._translated(headline, "zh" if expected == "en" else "en", expected, source_id)
-        return None if answer is None else checked_title(headline, _in_script(answer, self.digest_language), self.digest_language)
+        title = (
+            None if answer is None else checked_title(headline, _in_script(answer, self.digest_language), self.digest_language)
+        )
+        try:
+            return None if title is None else MODEL_TITLE.validate_python(title)
+        except ValidationError:
+            return None
 
     def back_translated(self, title: str, source_id: str = "digest") -> str | None:
-        """A digest title put back into English by the translation model, which never sees the newsletter."""
-        answer = self._translated(title, digest_language_code(self.digest_language), "en", source_id)
+        """A digest title put back into English by the translation model, which never sees the newsletter.
+
+        In an English digest the title already is that reading.
+        """
+        expected = digest_language_code(self.digest_language)
+        if expected == "en":
+            return title.strip() or None
+        answer = self._translated(title, expected, "en", source_id)
         return None if answer is None else answer.strip() or None
 
     def _translated(self, text: str, source: str, target: str, source_id: str) -> str | None:

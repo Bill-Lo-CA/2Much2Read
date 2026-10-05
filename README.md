@@ -292,7 +292,8 @@ Every title the digest shows is then checked against the newsletter's own headli
 item stores (`DIGEST_CHECK_TITLES`, default on). The translator reads the title back into English
 without seeing the headline, so a wrong word comes back as the wrong word (擴散 as "diffusion" where
 the headline said "distillation"), and the review model compares the two English headlines. A title
-that fails, or is cut short, is replaced by the translator's own translation of the headline. Over
+that fails, or is cut short, is replaced by the translator's own translation of the headline if that
+passes the same check. Over
 468 re-extracted titles the check flagged 39, about nine of them changed facts ("cybersecurity" as
 視覺安全, $3.8m as $3.8 萬); most other flags were sound titles, so a flag only swaps the title for a
 plainer one and never drops or moves an entry. The same rules apply first. With no translation to

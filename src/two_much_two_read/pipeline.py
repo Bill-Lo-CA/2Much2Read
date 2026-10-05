@@ -692,13 +692,21 @@ def _checked_titles(
         return entries
     # The review model is still loaded from selection, and both do not fit beside each other.
     _unload_model(ollama, settings.ollama_review_model, status)
-    readings: dict[int, tuple[str | None, str | None]] = {}
+    readings: dict[int, tuple[str | None, str | None, str | None]] = {}
     for index, headline in headlines.items():
         source_id = entries[index].source_id or "digest"
-        ruled_out = checked_title(headline, entries[index].item.title, language) is None
-        back = None if ruled_out else ollama.back_translated(entries[index].item.title, source_id)
-        readings[index] = (back, ollama.translated_headline(headline, source_id))
+        title = entries[index].item.title
+        back = None if checked_title(headline, title, language) is None else ollama.back_translated(title, source_id)
+        alternative = ollama.translated_headline(headline, source_id)
+        alternative_back = None if alternative is None else ollama.back_translated(alternative, source_id)
+        readings[index] = (back, alternative, alternative_back)
     _unload_model(ollama, settings.ollama_translate_model, status)
+
+    def flagged(headline: str, back: str | None) -> str | None:
+        """Why the review model says the reading differs from the headline, or None; a check that
+        could not run is no evidence against a title."""
+        check = None if back is None else ollama.headline_supported(headline, back)
+        return None if check is None or check.supported else check.reason
 
     checked: list[DigestEntry] = []
     for index, entry in enumerate(entries):
@@ -706,16 +714,15 @@ def _checked_titles(
             checked.append(entry)
             continue
         headline, title = headlines[index], entry.item.title
-        back, alternative = readings[index]
+        back, alternative, alternative_back = readings[index]
         ruled_out = checked_title(headline, title, language) is None
-        if ruled_out:
-            reason = "fails the title rules"
-        elif back is None or (check := ollama.headline_supported(headline, back)) is None or check.supported:
-            # A check that could not run is no evidence against the title.
+        reason = "fails the title rules" if ruled_out else flagged(headline, back)
+        if reason is None:
             checked.append(entry)
             continue
-        else:
-            reason = check.reason
+        # The replacement is held to the same check: it is another model's reading of the headline.
+        if alternative is not None and flagged(headline, alternative_back) is not None:
+            alternative = None
         replacement = alternative or (title_from_summary(entry.item.summary_zh_tw) if ruled_out else None)
         if replacement is None:
             status(f"Title check: kept {title!r} for {headline!r}, with nothing to replace it ({reason[:160]})")
