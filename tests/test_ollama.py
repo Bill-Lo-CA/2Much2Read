@@ -954,6 +954,18 @@ def test_a_placeholder_is_no_text_in_the_digest_language() -> None:
     assert route.call_count == 3
 
 
+@pytest.mark.parametrize(("max_items", "one_piece"), [(1, True), (10, False)])
+@respx.mock
+def test_a_cap_of_one_asks_for_the_whole_piece_rather_than_its_first_section(max_items: int, one_piece: bool) -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_chat(_items_result(GOOD)))
+
+    OllamaClient().extract("semianalysis", "Intel Panther Lake Teardown", max_items=max_items)
+
+    request = json.loads(route.calls[0].request.content)["messages"][1]["content"]
+    assert ("return exactly one item covering it as a whole" in request) is one_piece
+    assert request.index("max_items=") < request.index("Schema:")
+
+
 @respx.mock
 def test_an_ellipsis_with_a_normal_parenthetical_is_not_a_placeholder() -> None:
     answer = _items_result(("OpenAI 發布新功能", "OpenAI 發布新功能…（詳見下文）", "可改善工作流程。"))
