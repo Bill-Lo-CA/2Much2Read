@@ -285,8 +285,8 @@ A title outside the digest language is translated by `OLLAMA_TRANSLATE_MODEL` (d
 `translategemma:4b`, a model made for translation, given its own prompt), one title at a time. The
 extractor usually leaves an English headline as it is, and asked to translate it, the same model
 left 16 of 34 in English, cut one short, and changed a version number; TranslateGemma left only two
-names alone. An added ellipsis (a title cut short) or text still outside the language rejects its
-translation. The translator is released with the extractor, before the reranker loads.
+names alone. An added ellipsis (a title cut short), a year the headline never gave (it wrote "Aug
+26" as 2023 年 8 月 26 日), or text still outside the language rejects its translation. The translator is released with the extractor, before the reranker loads.
 
 Every title the digest shows is then checked against the newsletter's own headline, which each
 item stores (`DIGEST_CHECK_TITLES`, default on). The translator reads the title back into English
@@ -295,8 +295,8 @@ the headline said "distillation"), and the review model compares the two English
 that fails, or is cut short, is replaced by the translator's own translation of the headline. Over
 468 re-extracted titles the check flagged 39, about nine of them changed facts ("cybersecurity" as
 視覺安全, $3.8m as $3.8 萬); most other flags were sound titles, so a flag only swaps the title for a
-plainer one and never drops or moves an entry. With no translation to swap in, a title cut short
-takes the summary's lead and a flagged one stays, logged as `Title check: kept`. Items stored before
+plainer one and never drops or moves an entry. The same rules apply first. With no translation to
+swap in, a title a rule rejects takes the summary's lead and a flagged one stays, logged as `Title check: kept`. Items stored before
 the headline was kept are not checked.
 
 A title the translator could not bring into the digest language is replaced by the summary's lead,

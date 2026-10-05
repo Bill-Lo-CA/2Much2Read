@@ -672,10 +672,11 @@ def _checked_titles(
 
     A title is read back into English by the translation model, which never sees the headline, and
     the review model compares the two; see HEADLINE_CHECK_SYSTEM_PROMPT. A title that fails, or that
-    a rule can see is cut short, is replaced by the translation model's own translation of the
-    headline, which passed the same rules. Without one, a title cut short takes the summary's lead and
-    a flagged one stays, logged: about three flags in four are sound titles, so a flag is reason to
-    swap a title for a plainer one, never to lose an entry or move it.
+    a rule can see is wrong (cut short, or a year the headline never gave), is replaced by the
+    translation model's own translation of the headline, which passed the same rules. Without one, a
+    title a rule ruled out takes the summary's lead and a flagged one stays, logged: about three
+    flags in four are sound titles, so a flag is reason to swap a title for a plainer one, never to
+    lose an entry or move it.
 
     The translation model runs for every title first and the review model after, so each loads once.
     """
@@ -694,8 +695,8 @@ def _checked_titles(
     readings: dict[int, tuple[str | None, str | None]] = {}
     for index, headline in headlines.items():
         source_id = entries[index].source_id or "digest"
-        cut_short = checked_title(headline, entries[index].item.title, language) is None
-        back = None if cut_short else ollama.back_translated(entries[index].item.title, source_id)
+        ruled_out = checked_title(headline, entries[index].item.title, language) is None
+        back = None if ruled_out else ollama.back_translated(entries[index].item.title, source_id)
         readings[index] = (back, ollama.translated_headline(headline, source_id))
     _unload_model(ollama, settings.ollama_translate_model, status)
 
@@ -706,15 +707,16 @@ def _checked_titles(
             continue
         headline, title = headlines[index], entry.item.title
         back, alternative = readings[index]
-        if checked_title(headline, title, language) is None:
-            reason = "cut short"
+        ruled_out = checked_title(headline, title, language) is None
+        if ruled_out:
+            reason = "fails the title rules"
         elif back is None or (check := ollama.headline_supported(headline, back)) is None or check.supported:
             # A check that could not run is no evidence against the title.
             checked.append(entry)
             continue
         else:
             reason = check.reason
-        replacement = alternative or (title_from_summary(entry.item.summary_zh_tw) if reason == "cut short" else None)
+        replacement = alternative or (title_from_summary(entry.item.summary_zh_tw) if ruled_out else None)
         if replacement is None:
             status(f"Title check: kept {title!r} for {headline!r}, with nothing to replace it ({reason[:160]})")
             checked.append(entry)

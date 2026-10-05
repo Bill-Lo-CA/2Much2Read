@@ -151,6 +151,10 @@ TRANSLATION_LANGUAGES = {
 # A headline is short; the translator needs no more room than this, and a small window keeps it
 # small beside the extractor.
 TITLE_TRANSLATION_NUM_CTX = 2048
+# A year, which TranslateGemma sometimes invents for a headline that names only a month and day: it
+# wrote "Quick thoughts on GitHub Actions Aug 26 incident" as 2023 年 8 月 26 日. Read back, that is
+# "August 26, 2023", and the review model called it supported both times it was asked.
+YEAR = re.compile(r"(?<!\d)(?:19|20)\d{2}(?!\d)")
 # A note where text should be. qwen3:4b wrote "GPT-...（省略）" as the title, summary and
 # significance of a TLDR Dev item headed "GPT-6.1 SOL (WEBSITE)" on 2026-09-30, and ended a title
 # with "（需完整翻譯）" the day before; the Chinese in them passed for the digest language.
@@ -461,18 +465,22 @@ def title_from_summary(summary: str) -> str:
 
 
 def checked_title(source: str, translated: str, language: str) -> str | None:
-    """The headline cleaned of closing punctuation, or None when it is cut short or not in the digest's script.
+    """The headline cleaned of closing punctuation, or None when a rule can see it is wrong.
 
-    These are the faults a rule can see. A changed fact - a version, a date, a term - is left to the
-    check of the shown titles (headline_supported), which reads the title back in English: the rules
-    that tried to catch facts by their digits grew one exception a week (a month named before a day,
-    then with a year, then alone, then "May" the verb) and still passed GPT-4 and GPT-5 swapped.
+    Three faults: cut short (an ellipsis the source did not have), a year the source never gave, and
+    text outside the digest's script. Any other changed fact - a version, a term, a claim - is left
+    to the check of the shown titles (headline_supported), which reads the title back in English:
+    the rules that tried to catch facts by their digits grew one exception a week (a month named
+    before a day, then with a year, then alone, then "May" the verb) and still passed GPT-4 and
+    GPT-5 swapped.
     """
     title = translated.strip()
     # Before the closing punctuation goes, which would take a trailing "..." with it.
     if _has_ellipsis(title) and not _has_ellipsis(source):
         return None
     title = title.rstrip("。.")
+    if set(YEAR.findall(title)) - set(YEAR.findall(source)):
+        return None
     if not title or _wrong_script(title, digest_language_code(language)):
         return None
     return title

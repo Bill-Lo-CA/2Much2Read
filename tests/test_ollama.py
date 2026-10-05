@@ -996,6 +996,9 @@ def test_a_translation_the_schema_refuses_takes_the_summarys_lead(translation: s
         ("Anthropic launches a new Claude model", "Anthropic 推出新的 Claude...", None),
         ("Anthropic launches Claude Sonnet 5.5 with near-Opus performance", "Anthropic 推出 Claude Sonnet ...", None),
         ("GPT-6.1 Sol near-Astra for a fifth of the price", "GPT-...（需要翻譯）", None),
+        # A year the headline never gave, which the read-back passes as a plain date.
+        ("Quick thoughts on GitHub Actions Aug 26 incident", "關於 2023 年 8 月 26 日 GitHub Actions 事件的看法", None),
+        ("TNS Episode - Sep 25 2026", "TNS 節目 - 2026年9月25日", "TNS 節目 - 2026年9月25日"),
         # Dots the source has are its own.
         ("Wait... what?", "等等……什麼？", "等等……什麼？"),
         ("OpenAI blocked its agent's web access", "OpenAI blocked its agent's web access", None),

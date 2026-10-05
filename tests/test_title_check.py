@@ -100,6 +100,14 @@ def test_a_title_cut_short_is_replaced_without_asking_either_model_about_it() ->
     assert not any(call.startswith(("back", "check")) for call in ollama.calls)
 
 
+def test_a_year_the_headline_never_gave_is_ruled_out_like_a_cut() -> None:
+    ollama = fake()
+
+    checked = pipeline._checked_titles(Settings(), ollama, [entry("OpenAI 於 2023 年阻止蒸餾攻擊")], lambda _: None)
+
+    assert [value.item.title for value in checked] == ["OpenAI 阻止蒸餾攻擊"]
+
+
 def test_a_title_cut_short_with_no_translation_takes_the_summarys_lead() -> None:
     ollama = fake(translation=None)
 
