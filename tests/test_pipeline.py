@@ -16,7 +16,7 @@ import pytest
 from conftest import directory_digest, recorded
 from pydantic import HttpUrl
 
-from two_much_two_read import mail_operations, pipeline
+from two_much_two_read import headlines, ingestion, mail_operations, pipeline, selection
 from two_much_two_read.article_fetcher import ArticleFetchError, ResolvedUrl, UrlResolutionError
 from two_much_two_read.command_models import NewsletterRetryResult, NewsletterRunResult, SourceItemCounts
 from two_much_two_read.config import HackerNewsSource, Settings
@@ -120,7 +120,7 @@ def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(pipeline, "RelevanceReranker", FakeReranker)
     monkeypatch.setattr(pipeline, "_unload_model", lambda *_: None)
     monkeypatch.setattr(
-        pipeline,
+        selection,
         "_reviewed_entries",
         lambda settings, _ollama, entries: [
             replace(entry, review_score=100 - index) for index, entry in enumerate(entries[: settings.digest_max_items])
@@ -236,7 +236,8 @@ def test_gmail_url_enrichment_owns_and_persists_resolved_url(
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
-    monkeypatch.setattr(pipeline, "ArticleFetcher", FakeFetcher)
+    monkeypatch.setattr(ingestion, "ArticleFetcher", FakeFetcher)
+    monkeypatch.setattr(headlines, "ArticleFetcher", FakeFetcher)
 
     result = run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 24, tzinfo=UTC))
 
@@ -367,7 +368,7 @@ def test_pipeline_uses_original_analysis_length_for_truncation(
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllamaClient())
     monkeypatch.setattr(
-        pipeline,
+        ingestion,
         "extract_gmail_payload",
         lambda payload: ExtractedEmailContent(analysis_text=body[:45_000], original_characters=length),
     )
@@ -447,12 +448,15 @@ def test_hacker_news_source_runs_without_gmail_and_skips_processed_items(tmp_pat
         def translated_headline(self, headline: str, source_id: str = "digest") -> str | None:
             return None
 
+        def unload(self, model: str) -> bool:
+            return True
+
     ollama = FakeOllamaClient()
     monkeypatch.setattr(pipeline, "credentials", lambda *args: pytest.fail("HN-only run must not initialize Gmail"))
     monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
     monkeypatch.setattr(
-        pipeline,
+        ingestion,
         "resolve_hackernews_candidate",
         lambda candidate, fetcher: ResolvedHackerNewsContent(
             ResolvedContent(
@@ -540,7 +544,7 @@ def test_hacker_news_force_retries_only_failed_documents(tmp_path: Path, monkeyp
     monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
     monkeypatch.setattr(
-        pipeline,
+        ingestion,
         "resolve_hackernews_candidate",
         lambda candidate, fetcher: ResolvedHackerNewsContent(
             ResolvedContent(document=candidate.document, text="usable", basis="article", truncated=False), None
@@ -706,9 +710,9 @@ def test_hackernews_deadline_failure_does_not_abort_later_story(tmp_path: Path, 
         )
 
     database = Database(tmp_path / "digest.sqlite3")
-    monkeypatch.setattr(pipeline, "resolve_hackernews_candidate", resolve)
+    monkeypatch.setattr(ingestion, "resolve_hackernews_candidate", resolve)
 
-    result = pipeline._process_hackernews_source(
+    result = ingestion._process_hackernews_source(
         database,
         # Each fake here drives one of discover/retry_candidate; a Protocol honest about what the
         # function uses would need both, so the fakes would grow methods no test exercises.
@@ -828,7 +832,7 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
         lambda *args: recorded(events, "reranker:rank", []),
     )
     monkeypatch.setattr(
-        pipeline,
+        selection,
         "_reviewed_entries",
         lambda *args: recorded(events, "reviewer:run", []),
     )
@@ -1378,7 +1382,7 @@ def test_run_pipeline_limits_messages_across_sources(tmp_path: Path, monkeypatch
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda credentials: FakeGmailClient())
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllamaClient())
-    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+    monkeypatch.setattr(ingestion, "extract_gmail_payload", lambda payload: str(payload["body"]))
 
     result = run_pipeline(settings, max_messages=3, no_deliver=True)
 
@@ -1463,7 +1467,7 @@ def test_ollama_failure_marks_one_message_failed_and_continues(
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda credentials: gmail)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllamaClient())
-    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+    monkeypatch.setattr(ingestion, "extract_gmail_payload", lambda payload: str(payload["body"]))
 
     statuses: list[str] = []
     result = run_pipeline(settings, no_deliver=True, status=statuses.append)
@@ -1571,7 +1575,7 @@ def test_mime_failure_marks_one_message_failed_and_continues(
                 raise EmailExtractionError(error_code)
             return extract_gmail_payload(payload)
 
-        monkeypatch.setattr(pipeline, "extract_gmail_payload", extract)
+        monkeypatch.setattr(ingestion, "extract_gmail_payload", extract)
 
     assert run_pipeline(settings, no_deliver=True, dry_run=dry_run).model_dump() == {
         "status": "partial",
@@ -1637,7 +1641,7 @@ def test_digest_render_failure_leaves_extractions_retryable(tmp_path: Path, monk
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: StubOllamaClient(extraction))
-    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+    monkeypatch.setattr(ingestion, "extract_gmail_payload", lambda payload: str(payload["body"]))
     monkeypatch.setattr(pipeline, "render_digest", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("render failed")))
 
     with pytest.raises(RuntimeError, match="render failed"):
@@ -1675,7 +1679,7 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda credentials: gmail)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
-    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+    monkeypatch.setattr(ingestion, "extract_gmail_payload", lambda payload: str(payload["body"]))
 
     with pytest.raises(httpx.ConnectError, match="Ollama unavailable"):
         run_pipeline(settings, no_deliver=True)
@@ -1838,7 +1842,7 @@ def test_label_sync_failure_is_repaired_without_reextracting(tmp_path: Path, mon
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllama())
-    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+    monkeypatch.setattr(ingestion, "extract_gmail_payload", lambda payload: str(payload["body"]))
 
     assert (
         run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 22, tzinfo=ZoneInfo("America/Montreal"))).status
@@ -1910,7 +1914,7 @@ def test_stale_label_reconciliation_does_not_use_the_message_limit(tmp_path: Pat
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllama())
-    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+    monkeypatch.setattr(ingestion, "extract_gmail_payload", lambda payload: str(payload["body"]))
 
     assert run_pipeline(settings, max_messages=1, no_deliver=True).processed == 1
     assert fetched == ["new"]
@@ -1953,7 +1957,7 @@ def test_forced_recovery_clears_the_failure_and_remote_failed_label(tmp_path: Pa
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllama())
-    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+    monkeypatch.setattr(ingestion, "extract_gmail_payload", lambda payload: str(payload["body"]))
 
     assert run_pipeline(settings, force=True, no_deliver=True).processed == 1
     assert synced == [("gmail-1", "processed")]
@@ -1993,7 +1997,7 @@ def test_dry_run_skips_gmail_label_writes_and_persistent_database(tmp_path: Path
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllama())
-    monkeypatch.setattr(pipeline, "extract_gmail_payload", lambda payload: str(payload["body"]))
+    monkeypatch.setattr(ingestion, "extract_gmail_payload", lambda payload: str(payload["body"]))
 
     assert run_pipeline(settings, dry_run=True).processed == 1
     assert not settings.database_path.exists()
@@ -2068,7 +2072,7 @@ def test_the_model_is_sent_the_title_and_summary_of_both_items() -> None:
     left = judged_entry(1, "GPT-5.6 Sol 發表", "OpenAI 推出 GPT-5.6 Sol。")
     right = judged_entry(2, "OpenAI 加速 GPT-5.6 Sol", "Cerebras 硬體驅動 GPT-5.6 Sol。")
 
-    assert pipeline._story_judge(ollama, 10, lambda _: None)(left, right)
+    assert selection._story_judge(ollama, 10, lambda _: None)(left, right)
     assert ollama.seen == [
         (
             {"title": "GPT-5.6 Sol 發表", "summary": "OpenAI 推出 GPT-5.6 Sol。", "source": "TLDR AI"},
@@ -2081,7 +2085,7 @@ def test_one_pair_is_only_ever_asked_about_once() -> None:
     """The mention list is compared against headlines and then against itself."""
     ollama = CountingOllama([False])
     left, right = judged_entry(1, "甲", "甲摘要"), judged_entry(2, "乙", "乙摘要")
-    decide = pipeline._story_judge(ollama, 10, lambda _: None)
+    decide = selection._story_judge(ollama, 10, lambda _: None)
 
     assert decide(left, right) is False
     assert decide(left, right) is False
@@ -2091,7 +2095,7 @@ def test_one_pair_is_only_ever_asked_about_once() -> None:
 def test_the_budget_stops_the_run_from_spending_more_generations() -> None:
     """Past the budget nothing merges, which loses an attribution rather than inventing one."""
     ollama = CountingOllama()
-    decide = pipeline._story_judge(ollama, 2, lambda _: None)
+    decide = selection._story_judge(ollama, 2, lambda _: None)
     pairs = [(judged_entry(i, f"標題{i}", "摘要"), judged_entry(100 + i, f"其他{i}", "摘要")) for i in range(5)]
 
     answers = [decide(left, right) for left, right in pairs]
@@ -2104,7 +2108,7 @@ def test_a_failed_comparison_answers_no_and_is_reported() -> None:
     ollama = CountingOllama(error=OllamaSchemaError("bad json"))
     messages: list[str] = []
 
-    decided = pipeline._story_judge(ollama, 10, messages.append)(judged_entry(1, "甲", "摘要"), judged_entry(2, "乙", "摘要"))
+    decided = selection._story_judge(ollama, 10, messages.append)(judged_entry(1, "甲", "摘要"), judged_entry(2, "乙", "摘要"))
 
     assert decided is False
     assert messages == ["Warning: could not compare 甲 (OllamaSchemaError); left unmerged"]
@@ -2113,7 +2117,7 @@ def test_a_failed_comparison_answers_no_and_is_reported() -> None:
 def test_a_transport_failure_also_leaves_the_pair_unmerged() -> None:
     ollama = CountingOllama(error=httpx.ConnectError("ollama down"))
 
-    assert not pipeline._story_judge(ollama, 10, lambda _: None)(judged_entry(1, "甲", "摘要"), judged_entry(2, "乙", "摘要"))
+    assert not selection._story_judge(ollama, 10, lambda _: None)(judged_entry(1, "甲", "摘要"), judged_entry(2, "乙", "摘要"))
 
 
 def test_only_shortlisted_pairs_reach_the_model() -> None:
@@ -2123,7 +2127,7 @@ def test_only_shortlisted_pairs_reach_the_model() -> None:
     unrelated = judged_entry(2, "Rust 1.94 釋出", "Rust 團隊釋出 1.94 版。")
     related = judged_entry(3, "GPT-5.6 Sol 開放使用", "OpenAI 開放 GPT-5.6 Sol。")
 
-    merged, _ = pipeline._merged_entries([headline, unrelated, related], 10, pipeline._story_judge(ollama, 10, lambda _: None))
+    merged, _ = selection._merged_entries([headline, unrelated, related], 10, selection._story_judge(ollama, 10, lambda _: None))
 
     assert len(ollama.seen) == 1
     assert [entry.item.title for entry in merged] == ["GPT-5.6 Sol 發表", "Rust 1.94 釋出"]
@@ -2774,13 +2778,14 @@ def test_a_run_keeps_a_security_story_among_the_headlines(tmp_path: Path, monkey
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
-    monkeypatch.setattr(pipeline, "_reviewed_entries", reviewer_that_skips_security)
+    monkeypatch.setattr(selection, "_reviewed_entries", reviewer_that_skips_security)
 
     class FakeFetcher:
         def resolve_url(self, raw_url: str) -> ResolvedUrl:
             return ResolvedUrl(raw_url, raw_url, None)
 
-    monkeypatch.setattr(pipeline, "ArticleFetcher", FakeFetcher)
+    monkeypatch.setattr(ingestion, "ArticleFetcher", FakeFetcher)
+    monkeypatch.setattr(headlines, "ArticleFetcher", FakeFetcher)
 
     # The day before, another newsletter linked the same Muse article.
     earlier = Database(settings.database_path)
@@ -2868,9 +2873,9 @@ def test_a_run_never_headlines_what_the_reviewer_did_not_pick(tmp_path: Path, mo
     monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
     monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
     monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: StubOllamaClient(extraction))
-    monkeypatch.setattr(pipeline, "_reviewed_entries", lambda _settings, _ollama, entries: list(entries))
+    monkeypatch.setattr(selection, "_reviewed_entries", lambda _settings, _ollama, entries: list(entries))
     monkeypatch.setattr(
-        pipeline,
+        selection,
         "_merged_entries",
         lambda entries, *_args, **_kwargs: ([replace(entry, also_from=("TLDR AI",)) for entry in entries], None),
     )
@@ -2910,7 +2915,7 @@ def test_an_item_linking_the_senders_front_page_is_the_newsletter_itself(source_
         }
     )
 
-    assert pipeline._links_front_page_of(item, pipeline._sender_domain(sender)) is own
+    assert ingestion._links_front_page_of(item, ingestion._sender_domain(sender)) is own
 
 
 @pytest.mark.parametrize(
@@ -2935,4 +2940,4 @@ def test_the_front_page_is_judged_on_the_link_the_reader_is_given(destination: s
     link = LinkCandidate(candidate_id="link-0001", anchor_text="This week", raw_url=HttpUrl(raw), position=0)
     item = enricher.resolved_item(enricher.match([analysis], [link])[0], ResolvedUrl(raw, destination, None))
 
-    assert pipeline._links_front_page_of(item, pipeline._sender_domain("Console <hello@console.dev>")) is own
+    assert ingestion._links_front_page_of(item, ingestion._sender_domain("Console <hello@console.dev>")) is own
