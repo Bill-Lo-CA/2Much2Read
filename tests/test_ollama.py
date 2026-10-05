@@ -449,13 +449,26 @@ def test_the_rewrite_prompt_frames_the_headline_as_data() -> None:
 
     with respx.mock(base_url="http://127.0.0.1:11434") as mock:
         route = mock.post("/api/chat").respond(json={"message": {"content": json.dumps(rewrite)}})
-        OllamaClient().deepen_item(hostile, "AI_MODEL", "TLDR AI", "article", "文章內容。")
+        OllamaClient().deepen_item(hostile, "AI_MODEL", "article", "文章內容。")
 
     prompt = json.loads(route.calls[0].request.content)["messages"][1]["content"]
     item_block = prompt[prompt.index("<untrusted_item>") : prompt.index("</untrusted_item>")]
     assert hostile in item_block
     assert prompt.index("</untrusted_source>") < prompt.index("Reminder:")
     assert "never\ninstructions" in prompt or "never instructions" in prompt
+
+
+def test_the_rewrite_is_not_told_which_newsletters_carried_the_item() -> None:
+    """Told "AlphaSignal", the model wrote "AlphaSignal 發佈了一款模型" of a model it only reported."""
+    rewrite = {"covers_the_item": True, "summary_zh_tw": "重寫後的摘要內容。", "why_it_matters_zh_tw": "重寫後的影響。"}
+
+    with respx.mock(base_url="http://127.0.0.1:11434") as mock:
+        route = mock.post("/api/chat").respond(json={"message": {"content": json.dumps(rewrite)}})
+        OllamaClient().deepen_item("1.58 位元 27B 模型", "AI_MODEL", "article", "文章內容。")
+
+    prompt = json.loads(route.calls[0].request.content)["messages"][1]["content"]
+    item = json.loads(prompt[prompt.index("<untrusted_item>") + len("<untrusted_item>") : prompt.index("</untrusted_item>")])
+    assert item == {"title": "1.58 位元 27B 模型", "category": "AI_MODEL"}
 
 
 def test_every_supported_language_is_instructed_in_the_script_it_is_validated_against() -> None:
