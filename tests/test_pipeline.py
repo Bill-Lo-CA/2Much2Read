@@ -1741,7 +1741,11 @@ def test_the_reranker_model_is_checked_once_before_any_mail_is_read(tmp_path: Pa
         events.append("gmail")
         raise RuntimeError("stop here")
 
-    monkeypatch.setattr(pipeline, "ensure_reranker_model", lambda model: events.append(f"model:{model}") or False)
+    def ensure(model: str) -> bool:
+        events.append(f"model:{model}")
+        return False
+
+    monkeypatch.setattr(pipeline, "ensure_reranker_model", ensure)
     monkeypatch.setattr(pipeline, "credentials", no_gmail)
 
     with pytest.raises(RuntimeError, match="stop here"):
