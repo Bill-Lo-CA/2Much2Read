@@ -1731,6 +1731,25 @@ def test_ollama_transport_failure_remains_retryable(tmp_path: Path, monkeypatch:
     assert gmail.applied_labels == [("transient", "processed")]
 
 
+def test_the_reranker_model_is_checked_once_before_any_mail_is_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    settings = Settings(sources_config_path=sources_path, database_path=tmp_path / "d.sqlite3", lock_path=tmp_path / "d.lock")
+    events: list[str] = []
+
+    def no_gmail(*_args: object) -> object:
+        events.append("gmail")
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(pipeline, "ensure_reranker_model", lambda model: events.append(f"model:{model}") or False)
+    monkeypatch.setattr(pipeline, "credentials", no_gmail)
+
+    with pytest.raises(RuntimeError, match="stop here"):
+        run_pipeline(settings, now=datetime(2026, 10, 22, 10, tzinfo=ZoneInfo("America/Montreal")))
+
+    assert events == [f"model:{settings.reranker_model}", "gmail"]
+
+
 @pytest.mark.parametrize("state", ["pending", "failed", "delivered"])
 def test_existing_daily_digest_skips_before_gmail_access(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, state: str) -> None:
     sources_path = tmp_path / "sources.yaml"
@@ -1751,6 +1770,8 @@ def test_existing_daily_digest_skips_before_gmail_access(tmp_path: Path, monkeyp
     database.close()
 
     monkeypatch.setattr(pipeline, "credentials", lambda *args: pytest.fail("Gmail must not be accessed"))
+    # A skipped run asks nothing of the Hugging Face Hub either.
+    monkeypatch.setattr(pipeline, "ensure_reranker_model", lambda _model: pytest.fail("the model must not be checked"))
 
     assert run_pipeline(settings, now=now).model_dump() == {
         "status": "skipped",

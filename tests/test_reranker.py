@@ -30,6 +30,7 @@ from two_much_two_read.reranker import (
     RERANKER_PROMPT_NAME,
     RERANKER_PROMPT_VERSION,
     RelevanceReranker,
+    ensure_reranker_model,
 )
 from two_much_two_read.schemas import DigestCategory, DigestItem, DigestReview
 
@@ -99,6 +100,54 @@ def test_reranker_overrides_the_models_generic_search_prompt(monkeypatch: pytest
 
     RelevanceReranker("Qwen/test", "cuda")
     assert captured.get("device") == "cuda"
+
+
+def test_the_reranker_loads_from_disk_alone(monkeypatch: pytest.MonkeyPatch) -> None:
+    """ensure_reranker_model has put it there; asking the Hub again is what logged a warning every run."""
+    captured: dict[str, object] = {}
+
+    class FakeCrossEncoder:
+        def __init__(self, model_name_or_path: str, **kwargs: object) -> None:
+            captured.update(kwargs)
+
+    module = types.ModuleType("sentence_transformers")
+    module.CrossEncoder = FakeCrossEncoder  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "sentence_transformers", module)
+
+    RelevanceReranker("Qwen/test")
+
+    assert captured["local_files_only"] is True
+
+
+@pytest.mark.parametrize(("cached", "downloads"), [(True, []), (False, ["Qwen/test"])])
+def test_the_hub_is_asked_only_for_a_model_not_on_disk(
+    monkeypatch: pytest.MonkeyPatch, cached: bool, downloads: list[str]
+) -> None:
+    import huggingface_hub
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    fetched: list[str] = []
+
+    def snapshot_download(repo_id: str, *, local_files_only: bool = False) -> str:
+        if local_files_only:
+            if not cached:
+                raise LocalEntryNotFoundError("not cached")
+        else:
+            fetched.append(repo_id)
+        return "/cache/snapshot"
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+
+    assert ensure_reranker_model("Qwen/test") is (not cached)
+    assert fetched == downloads
+
+
+def test_a_local_model_directory_needs_no_hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    import huggingface_hub
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", lambda *a, **k: pytest.fail("no Hub for a directory"))
+
+    assert ensure_reranker_model(str(tmp_path)) is False
 
 
 def test_reranker_defaults_to_cpu_so_it_never_competes_with_the_reviewer() -> None:

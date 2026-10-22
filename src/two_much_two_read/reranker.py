@@ -4,6 +4,7 @@ import gc
 import hashlib
 from collections.abc import Sequence
 from dataclasses import replace
+from pathlib import Path
 
 from .digest import DigestEntry
 
@@ -27,6 +28,28 @@ RERANK_QUERY = "Is this a concrete technical development worth reading today?"
 RERANKER_PROMPT_VERSION = hashlib.sha256(f"{RERANK_INSTRUCTION}\n{RERANK_QUERY}".encode()).hexdigest()[:12]
 
 
+def ensure_reranker_model(model_name: str) -> bool:
+    """Have the reranker's files on disk before a run spends its time reading mail; True if fetched.
+
+    Loading a model by name asked the Hugging Face Hub, on every run, whether the cached copy was
+    current - "You are sending unauthenticated requests to the HF Hub" in the journal each morning -
+    though nothing changes it between runs. The Hub is now asked only when the model is not cached:
+    the first run downloads it here, before Gmail is read, so a failed download costs nothing, and
+    RelevanceReranker then loads from disk alone. A local directory needs neither.
+    """
+    if Path(model_name).expanduser().is_dir():
+        return False
+    from huggingface_hub import snapshot_download
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    try:
+        snapshot_download(model_name, local_files_only=True)
+    except LocalEntryNotFoundError:
+        snapshot_download(model_name)
+        return True
+    return False
+
+
 class RelevanceReranker:
     def __init__(self, model_name: str, device: str = "cpu") -> None:
         import torch
@@ -43,6 +66,8 @@ class RelevanceReranker:
             device=device,
             prompts={RERANKER_PROMPT_NAME: RERANK_INSTRUCTION},
             default_prompt_name=RERANKER_PROMPT_NAME,
+            # ensure_reranker_model put it on disk at the start of the run.
+            local_files_only=True,
         )
 
     def rank(self, entries: Sequence[DigestEntry]) -> list[DigestEntry]:

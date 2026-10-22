@@ -86,6 +86,14 @@ def calendar_database(calendar_settings: CalendarSettings) -> Iterator[CalendarD
 
 
 @pytest.fixture(autouse=True)
+def cached_reranker_model(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A run checks the reranker model is on disk before reading mail; a test has no network for it."""
+    from two_much_two_read import pipeline
+
+    monkeypatch.setattr(pipeline, "ensure_reranker_model", lambda _model: False)
+
+
+@pytest.fixture(autouse=True)
 def isolated_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
