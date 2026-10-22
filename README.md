@@ -281,6 +281,17 @@ wholly that script: run over correct Traditional text, they turn 機制作為 in
 text, and nothing else. Detection had needed volume it did not have - 11% of real Traditional
 titles read as Simplified, some with no character that differs at all.
 
+How many items an issue yields is counted, not capped. The extractor first lists the issue's
+stories, marking the sponsored ones, and is then asked for every story that is not sponsored; any
+entry the list marked is dropped from its answer, and the strongest `EXTRACT_KEEP_SHARE` (default
+0.7) of the rest are kept by importance. A fixed cap of ten used to keep the first ten of TLDR's 12
+to 21 stories and lose the rest, five security stories an issue from TLDR InfoSec; over 12 TLDR
+issues, counting first covered 147 of 165 stories against 91. Telling the extractor to skip
+sponsors let 20 of 36 through, while the list marked 34 of them and no story, so sponsors are
+dropped by the list. An issue whose list reaches 26 entries - a recap without headlines, such as
+AINews, listed paragraph by paragraph - is not counted, and up to ten items are taken as before, as
+they are when the list fails.
+
 A newsletter that sends one piece an issue - an article, essay, interview, or podcast episode - is
 given `max_items_per_email: 1` in `sources.yaml`. The extractor otherwise cuts such a piece into items
 by its sections: one Intel teardown became six digest lines, one interview six more. With a cap of

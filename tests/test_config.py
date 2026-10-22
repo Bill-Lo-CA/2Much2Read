@@ -289,3 +289,11 @@ def test_implausible_ollama_limits_are_rejected() -> None:
     for value in (0, -30):
         with pytest.raises(ValidationError):
             Settings(ollama_timeout_seconds=value)
+
+
+def test_a_source_without_a_cap_has_its_stories_counted_and_a_share_kept() -> None:
+    assert GmailSource(id="tldr-ai", name="TLDR AI", category="AI", gmail_query="from:tldr").max_items_per_email is None
+    assert Settings().extract_keep_share == 0.7
+    for share in (0, 1.5):
+        with pytest.raises(ValidationError):
+            Settings(extract_keep_share=share)

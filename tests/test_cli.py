@@ -400,8 +400,9 @@ def test_mails_inspect_outputs_parsed_text_and_extraction(newsletter_settings: S
         def __init__(self, *args: object) -> None:
             pass
 
-        def extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
-            assert (source_id, content, truncated, max_items) == ("alphasignal", "Parsed newsletter body", False, 10)
+        def extract(self, source_id: str, content: str, truncated: bool, max_items: int | None) -> EmailExtraction:
+            # No cap configured: the issue's stories are counted first.
+            assert (source_id, content, truncated, max_items) == ("alphasignal", "Parsed newsletter body", False, None)
             return EmailExtraction(
                 source_id=source_id,
                 newsletter_title="Test newsletter",

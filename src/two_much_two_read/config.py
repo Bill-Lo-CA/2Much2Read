@@ -69,7 +69,9 @@ class GmailSource(SourceBase):
     type: Literal["gmail"] = "gmail"
     gmail_query: str
     gmail_filter: GmailFilter | None = None
-    max_items_per_email: int = Field(default=10, ge=1, le=50)
+    # A fixed cap, for a source whose issue is one piece (1). Unset, an issue's stories are counted
+    # first and the strongest EXTRACT_KEEP_SHARE of them kept; see OllamaClient.extract.
+    max_items_per_email: int | None = Field(default=None, ge=1, le=50)
 
 
 class HackerNewsSource(SourceBase):
@@ -163,6 +165,8 @@ class Settings(BaseSettings):
     digest_deepen_headlines: bool = True
     # Read each shown title back into English and compare it with the newsletter's headline.
     digest_check_titles: bool = True
+    # The share of an issue's stories, sponsors aside, that extraction keeps, strongest first.
+    extract_keep_share: float = Field(default=0.7, gt=0, le=1)
     digest_review_candidate_limit: int = Field(default=20, ge=1)
     digest_rerank_candidate_limit: int = Field(default=100, ge=1)
     digest_security_candidate_slots: int = Field(default=7, ge=0)
