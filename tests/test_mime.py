@@ -13,6 +13,7 @@ from two_much_two_read.mime import (
     extract_gmail_payload,
     extract_mime,
     html_to_text,
+    person_link,
     unsubscribe_link,
 )
 from two_much_two_read.schemas import ExtractedEmailContent
@@ -466,6 +467,38 @@ def test_the_list_unsubscribe_header_names_links_that_are_no_candidates() -> Non
 )
 def test_an_unsubscribe_link_is_recognised_by_its_words(url: str, unsubscribes: bool) -> None:
     assert unsubscribe_link(url) is unsubscribes
+
+
+@pytest.mark.parametrize(
+    ("url", "person"),
+    [
+        # SANS NewsBites signs each editor's comment with the editor's profile.
+        ("https://www.sans.org/profiles/lee-neely", True),
+        ("https://thenewstack.io/author/paul-sawers/", True),
+        ("https://example.com/people/jane-doe", True),
+        # A header image's credit: the photographer, or the photo.
+        ("https://unsplash.com/@laughayette", True),
+        ("https://unsplash.com/photos/person-using-magnifying-glass-uAFjFsMS3YY", True),
+        ("https://www.gettyimages.co.uk/detail/news-photo/123", True),
+        # One name under a people path, not anything below it, and not an article that says profile.
+        ("https://example.com/author/paul-sawers/feed/2026", False),
+        ("https://example.com/2026/10/building-a-profile-service", False),
+        ("https://thenewstack.io/respan-rust-ai-gateway/", False),
+        ("https://[invalid", False),
+    ],
+)
+def test_a_link_to_a_person_is_recognised_by_its_address(url: str, person: bool) -> None:
+    assert person_link(url) is person
+
+
+def test_a_profile_or_photo_credit_is_no_candidate() -> None:
+    html = (
+        '<p><a href="https://example.com/story">PwnEscape lets a guest escape KVM</a></p>'
+        '<p>Photo by <a href="https://unsplash.com/@laughayette">Lafayette</a></p>'
+        '<p>[<a href="https://www.sans.org/profiles/lee-neely">Neely</a>] Patch now.</p>'
+    )
+
+    assert _codes(extract_gmail_payload(_body("text/html", html))) == {"L1": "https://example.com/story"}
 
 
 def test_urls_no_longer_spend_the_character_budget() -> None:
