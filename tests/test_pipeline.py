@@ -94,6 +94,9 @@ class StubGmailClient:
 
 
 class StubOllamaClient:
+    def new_facts(self, today: dict[str, str], earlier: list[str]) -> tuple[str, ...] | None:
+        return None
+
     def __init__(self, extraction: EmailExtraction | None = None, error: Exception | None = None) -> None:
         self.extraction = extraction
         self.error = error

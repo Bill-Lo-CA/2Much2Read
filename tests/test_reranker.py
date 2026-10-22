@@ -3,7 +3,7 @@ from __future__ import annotations
 import hashlib
 import sys
 import types
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from dataclasses import replace
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -19,6 +19,7 @@ from two_much_two_read.digest import (
     _entry_rank,
     dedupe_entries,
     has_source_text,
+    may_headline,
     merge_before_selection,
     merge_related_entries,
     render_digest,
@@ -717,6 +718,107 @@ def test_a_repeat_without_a_shared_link_needs_a_shortlist_and_the_models_yes() -
     assert refused[0].previous_days == 0
 
 
+def test_a_repeat_carries_what_the_earlier_reports_said() -> None:
+    def said(day: int, candidate_id: int, title: str, summary: str, url: str | None = None) -> tuple[date, DigestEntry]:
+        when, other = _earlier(day, candidate_id, title, url)
+        return when, replace(other, item=other.item.model_copy(update={"summary_zh_tw": summary}))
+
+    linked = replace(entry(1, "Opus 5.5 pricing", "TLDR AI"), article_url="https://anthropic.com/opus")
+    judged = entry(2, "Claude Opus 5.5 is 40% cheaper", "TLDR AI")
+    earlier = [
+        said(23, 100, "Anthropic releases Opus 5.5", "Anthropic 發布 Opus 5.5。", "https://anthropic.com/opus"),
+        said(24, 101, "Anthropic releases Claude Opus 5.5", "Opus 5.5 價格下降。"),
+    ]
+
+    marked = with_previous_coverage([linked, judged], earlier, lambda _l, _r: True, 3, [])
+
+    # The link settles the first on the 23rd; the second shares "opus 5.5" with both days, and the
+    # model's yes on each brings each day's report.
+    assert marked[0].earlier_summaries[0] == "Anthropic 發布 Opus 5.5。"
+    assert marked[1].earlier_summaries == ("Anthropic 發布 Opus 5.5。", "Opus 5.5 價格下降。")
+
+
+def test_a_repeat_with_nothing_new_may_not_headline() -> None:
+    fresh = entry(1, "GitLab patches a CVSS 10.0 flaw", "SANS")
+
+    assert may_headline(fresh)
+    assert may_headline(replace(fresh, previous_days=1, new_facts=None))  # not asked, or the check failed
+    assert may_headline(replace(fresh, previous_days=1, new_facts=("19.3.5 版也已修補",)))
+    assert not may_headline(replace(fresh, previous_days=1, new_facts=()))
+
+
+def test_merging_keeps_new_facts_from_either_report_and_a_repeat_only_when_both_are() -> None:
+    headline = replace(entry(1, "GitLab patches a CVSS 10.0 flaw", "SANS"), review_score=90, new_facts=())
+    update = replace(entry(2, "GitLab patches a CVSS 10.0 flaw", "TLDR InfoSec"), new_facts=("19.3.5 版也已修補",))
+    repeat = replace(entry(3, "GitLab patches a CVSS 10.0 flaw", "THN"), new_facts=())
+
+    with_update, _ = merge_related_entries([headline], [update], lambda _l, _r: True)
+    with_repeat, _ = merge_related_entries([headline], [repeat], lambda _l, _r: True)
+
+    assert with_update[0].new_facts == ("19.3.5 版也已修補",)
+    assert with_repeat[0].new_facts == ()
+
+
+def test_a_repeat_with_nothing_new_gives_its_reviewer_slot_to_the_next_candidate() -> None:
+    """GitLab's flaw led on 2026-10-14 and again on the 15th from a newsletter that added nothing."""
+    handed: list[list[dict[str, object]]] = []
+    asked: list[str] = []
+    repeats = {"GitLab patches a CVSS 10.0 flaw", "Ivanti patches the exploited VPN flaw"}
+
+    def mark(entries: list[DigestEntry], wanted: Callable[[DigestEntry], bool]) -> list[DigestEntry]:
+        return [
+            replace(value, previous_days=1, previous_window=3, earlier_summaries=("昨天的報導。",))
+            if wanted(value) and value.item.title in repeats and not value.previous_days
+            else value
+            for value in entries
+        ]
+
+    class Reviewer:
+        def new_facts(self, today: dict[str, str], earlier: list[str]) -> tuple[str, ...] | None:
+            asked.append(today["title"])
+            return () if today["title"].startswith("GitLab") else ("10 月 13 日已釋出修補",)
+
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
+            handed.append(candidates)
+            return DigestReview.model_validate(
+                {"selected": [{"candidate_id": c["candidate_id"], "score": 90, "reason_zh_tw": "具體"} for c in candidates]}
+            )
+
+        def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
+            return False
+
+    ranked = [
+        entry(1, "GitLab patches a CVSS 10.0 flaw", "SANS", "SECURITY"),
+        entry(2, "Ivanti patches the exploited VPN flaw", "THN", "SECURITY"),
+        entry(3, "PHP releases emergency fixes", "THN", "SECURITY"),
+    ]
+    settings = Settings(digest_review_candidate_limit=2, digest_secondary_items=5)
+
+    shown, _ = selection._selected_entries(settings, Reviewer(), ranked, mark, lambda _message: None)
+
+    assert asked == ["GitLab patches a CVSS 10.0 flaw", "Ivanti patches the exploited VPN flaw"]
+    assert [c["candidate_id"] for c in handed[0]] == [2, 3]
+    assert handed[0][0]["new_facts"] == ["10 月 13 日已釋出修補"] and "new_facts" not in handed[0][1]
+    headlines = [value.item.title for value in shown if value.review_score is not None]
+    mentions = [value.item.title for value in shown if value.review_score is None]
+    assert headlines == ["Ivanti patches the exploited VPN flaw", "PHP releases emergency fixes"]
+    assert mentions == ["GitLab patches a CVSS 10.0 flaw"]
+
+
+def test_an_update_says_so_beside_its_repeat_mark() -> None:
+    update = replace(
+        entry(1, "Ivanti patches the exploited VPN flaw", "THN"),
+        review_score=90,
+        previous_days=1,
+        previous_window=3,
+        new_facts=("10 月 13 日已釋出修補",),
+    )
+
+    rendered = render_digest([update], datetime(2026, 10, 17, tzinfo=UTC), "AI", "THN", reviewed=True)
+
+    assert "🔁 前 3 天中有 1 天也有報導，今天有新進展" in rendered
+
+
 def test_repeats_count_days_not_items_and_stop_at_the_window() -> None:
     today = entry(1, "GPT-6 Sol and Luna", "TLDR AI")
     earlier = [
@@ -935,6 +1037,9 @@ def test_repeats_are_checked_on_what_the_reviewer_and_the_reader_see(tmp_path: P
             return True
 
     class Reviewer:
+        def new_facts(self, today: dict[str, str], earlier: list[str]) -> tuple[str, ...] | None:
+            return None
+
         def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
             return DigestReview.model_validate({"selected": [{"candidate_id": 1, "score": 90, "reason_zh_tw": "具體"}]})
 
@@ -973,6 +1078,9 @@ def test_the_reviewer_is_handed_each_story_once() -> None:
     handed: list[list[dict[str, object]]] = []
 
     class Reviewer:
+        def new_facts(self, today: dict[str, str], earlier: list[str]) -> tuple[str, ...] | None:
+            return None
+
         def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
             handed.append(candidates)
             picks = [{"candidate_id": candidate["candidate_id"], "score": 90, "reason_zh_tw": "具體"} for candidate in candidates]
@@ -1051,6 +1159,9 @@ def test_a_repeat_found_through_a_folded_report_is_kept() -> None:
         return out
 
     class Reviewer:
+        def new_facts(self, today: dict[str, str], earlier: list[str]) -> tuple[str, ...] | None:
+            return None
+
         def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
             picks = [{"candidate_id": candidate["candidate_id"], "score": 90, "reason_zh_tw": "具體"} for candidate in candidates]
             return DigestReview.model_validate({"selected": picks})
@@ -1187,6 +1298,9 @@ def test_picks_past_the_headlines_shown_keep_their_place_outside_the_mention_quo
     ranked = [replace(entry(index, f"Story {index}", source), reranker_score=0.5) for index, source in enumerate(sources, 1)]
 
     class Reviewer:
+        def new_facts(self, today: dict[str, str], earlier: list[str]) -> tuple[str, ...] | None:
+            return None
+
         def review_digest(
             self, candidates: list[dict[str, object]], maximum: int, _category: str = "", _reserved: int = 0, refill: int = 0
         ) -> DigestReview:

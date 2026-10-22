@@ -224,6 +224,13 @@ class StoryIdentity(BaseModel):
     same_story: bool = Field(description="True only if both items report the same specific event")
 
 
+class NewFacts(BaseModel):
+    """What one report of a story adds to the earlier days' reports of it."""
+
+    new_facts: list[str] = Field(default_factory=list, max_length=8)
+    new_details: bool
+
+
 class ItemDeepening(BaseModel):
     """A headline item rewritten from fuller source text than the extractor ever saw.
 
