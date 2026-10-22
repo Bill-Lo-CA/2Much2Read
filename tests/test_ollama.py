@@ -1419,3 +1419,26 @@ def test_a_fixed_cap_skips_the_scan() -> None:
     OllamaClient().extract("latent-space", "News", max_items=1)
 
     assert route.call_count == 1
+
+
+@respx.mock
+def test_new_facts_are_asked_of_the_review_model_and_none_means_a_repeat() -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[
+            _chat({"new_facts": ["10 月 13 日已釋出修補"], "new_details": True}),
+            _chat({"new_facts": [], "new_details": False}),
+            _chat({"new_facts": ["改寫過的同一件事"], "new_details": False}),
+            _translation("not json"),
+        ]
+    )
+    client = OllamaClient()
+    today = {"title": "Ivanti 修補", "summary": "Ivanti 已修補。", "why_it_matters": "需更新。"}
+
+    assert client.new_facts(today, ["Ivanti 警告零日漏洞。"]) == ("10 月 13 日已釋出修補",)
+    assert client.new_facts(today, ["Ivanti 已修補。"]) == ()
+    # A verdict of nothing new outweighs a list the model wrote anyway.
+    assert client.new_facts(today, ["Ivanti 已修補。"]) == ()
+    # A check that could not run says nothing either way.
+    assert client.new_facts(today, ["Ivanti 已修補。"]) is None
+    request = json.loads(route.calls[0].request.content)
+    assert request["model"] == "qwen3:8b" and "<untrusted_reports>" in request["messages"][1]["content"]
