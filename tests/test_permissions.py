@@ -160,3 +160,14 @@ def test_runtime_permission_checks_reports_the_shared_data_root(tmp_path: Path, 
 
     assert checks["data_root"] == "unsafe"
     assert checks["data_dir"] == "ok"
+
+
+def test_a_path_that_cannot_be_resolved_is_within_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Python 3.12 raises RuntimeError for a symlink loop and 3.13 returns the path unresolved, so the
+    # failure is made directly rather than by a loop.
+    def unresolvable(self: Path, strict: bool = False) -> Path:
+        raise OSError("cannot resolve")
+
+    monkeypatch.setattr(Path, "resolve", unresolvable)
+
+    assert not path_within(tmp_path / "file", tmp_path)

@@ -164,6 +164,9 @@ def test_a_link_too_long_to_store_is_left_out_rather_than_failing_the_email() ->
         # A click link that ends on an editor's profile or a photo credit.
         ("https://www.sans.org/profiles/william-hugh-murray", None, None),
         ("https://unsplash.com/@laughayette", None, None),
+        # A tracker's own host, whatever its path.
+        ("https://track.hubspot.com/story", None, None),
+        ("https://us1.list-manage.mailchimp.com/track/click", None, None),
     ],
 )
 def test_the_link_shown_is_judged_after_its_tags_are_removed(final: str, canonical: str | None, shown: str | None) -> None:

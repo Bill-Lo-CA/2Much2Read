@@ -206,6 +206,14 @@ class TestConfig:
         with pytest.raises(ValueError, match="unique"):
             nudge(at=[time(9), time(9)])
 
+    def test_an_id_that_could_pass_for_a_flag_or_steer_a_terminal_is_rejected(self) -> None:
+        # The id is printed by status and typed back to reset.
+        assert nudge(id="water.daily-2_b").id == "water.daily-2_b"
+
+        for value in ("-all", "two words", "stretch\x1b[2J", ""):
+            with pytest.raises(ValueError):
+                nudge(id=value)
+
     def test_a_blank_message_is_rejected(self) -> None:
         with pytest.raises(ValueError, match="blank"):
             nudge(message="   ")
