@@ -1,0 +1,50 @@
+name: mutation
+
+permissions:
+  contents: read
+
+# Mutation testing changes the code under test one small way at a time and expects some test to
+# fail. It is too slow for every pull request - the whole tree is about 15,000 mutants - so this
+# runs weekly, and on demand, over the modules that guard a security boundary: endpoint and webhook
+# validation, Discord delivery and mention control, file permissions, OAuth tokens, the article
+# fetcher's network policy, and which email links may become a story's link.
+on:
+  workflow_dispatch:
+  schedule:
+    - cron: "17 6 * * 1"
+
+jobs:
+  mutation:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - uses: astral-sh/setup-uv@d0cc045d04ccac9d8b7881df0226f9e82c39688e # v6
+        with:
+          version: "0.11.22"
+          enable-cache: true
+
+      - name: Install dependencies
+        run: uv sync --all-groups --locked
+
+      - name: Run mutation testing
+        run: >-
+          uv run --with mutmut==3.8.0 mutmut run
+          "two_read_runtime.endpoint_policy.*"
+          "two_read_runtime.discord.*"
+          "two_read_runtime.permissions.*"
+          "two_read_runtime.oauth.*"
+          "two_much_two_read.article_fetcher.*"
+          "two_much_two_read.mime.*"
+          "two_much_two_read.url_enrichment.*"
+
+      - name: Report survivors, and fail on code no test reaches
+        run: |
+          uv run --with mutmut==3.8.0 mutmut results --all true > results.txt
+          grep -E ': (survived|no tests)$' results.txt || true
+          if grep -qE '^\s*two_(read_runtime\.(endpoint_policy|discord|permissions|oauth)|much_two_read\.(article_fetcher|mime|url_enrichment))\..*: no tests$' results.txt; then
+            echo "A security module has code no test reaches; see the 'no tests' lines above." >&2
+            exit 1
+          fi

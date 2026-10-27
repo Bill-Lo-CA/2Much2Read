@@ -689,3 +689,20 @@ uv build
 ```
 
 Live Gmail, Calendar, Ollama, and Discord checks require local secrets and are opt-in.
+
+The validation workflow runs these on the runner's Python, and the tests again on 3.11 and 3.13,
+the edges of the declared range. Mutation testing - changing the code one small way at a time and
+expecting a test to fail - runs weekly in `.github/workflows/mutation.yml` over the modules that
+guard a security boundary, and fails when one of them has code no test reaches. To run it locally,
+over the whole tree (about 15,000 mutants, 45 minutes on 14 workers) or named modules:
+
+```bash
+uv run --with mutmut==3.8.0 mutmut run --max-children 14 ["two_read_runtime.discord.*" ...]
+uv run --with mutmut==3.8.0 mutmut results
+```
+
+mutmut changes only the bodies of undecorated functions and methods. Pydantic validators, Typer
+commands, context managers such as `sqlite_snapshot.reading_connection`, module-level regexes and
+constants, and field bounds are never changed, so a clean report says nothing about them: each
+needs a test of its own, and a test of one of them is not redundant because mutmut finds another
+test that kills the same mutants.

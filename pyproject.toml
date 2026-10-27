@@ -66,3 +66,15 @@ follow_imports_for_stubs = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+# Mutation testing, run on demand rather than in the validation workflow:
+#   uv run --with mutmut==3.8.0 mutmut run [MODULE.*]...
+# .github/workflows/mutation.yml runs it weekly over the modules that guard security boundaries.
+[tool.mutmut]
+source_paths = ["src/"]
+# Generated data, not logic: scripts/generate_chinese_script_table.py writes it.
+do_not_mutate = ["src/two_much_two_read/chinese_script_table.py"]
+also_copy = ["config/", "scripts/", "deploy/", "README.md"]
+pytest_add_cli_args_test_selection = ["tests/"]
+# The installer tests run the shell scripts against the checkout's .venv, which mutants/ lacks.
+pytest_add_cli_args = ["--ignore=tests/test_installers.py", "-p", "no:cacheprovider"]
