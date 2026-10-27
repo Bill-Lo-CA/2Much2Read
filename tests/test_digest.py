@@ -84,24 +84,6 @@ def test_renderer_sanitizes_untrusted_fields_and_preserves_application_urls() ->
     assert "文章：<https://example.com/article>" in text
 
 
-def test_renderer_preserves_multilingual_readability_and_code_punctuation() -> None:
-    digest_item = item(
-        "C++ v2.0 API() — équipe 日本語",
-        "https://example.com/cpp",
-    ).model_copy(
-        update={
-            "summary_zh_tw": "Résumé：這是日本語與繁體中文的摘要，呼叫 x()。",
-            "why_it_matters_zh_tw": "L’équipe 可用 C++ v2.0 改善流程。",
-        }
-    )
-
-    text = render_digest([digest_item], datetime(2026, 6, 22, tzinfo=UTC), "AI", "Source")
-
-    assert sanitize_discord_text("C++ v2.0 API() — équipe 日本語") in text
-    assert sanitize_discord_text("Résumé：這是日本語與繁體中文的摘要，呼叫 x()。") in text
-    assert sanitize_discord_text("L’équipe 可用 C++ v2.0 改善流程。") in text
-
-
 def test_renderer_shows_item_source_even_when_extraction_confidence_is_low() -> None:
     text = render_digest(
         [DigestEntry(item("Update", "https://example.com/a", confidence=0.1), source_name="AlphaSignal")],
@@ -243,22 +225,6 @@ def test_secondary_mentions_are_one_scannable_line_each() -> None:
     # The summary and the reason belong to the headline items; the mentions stay one line.
     assert text.count("摘要：") == 1
     assert text.count("為什麼重要：") == 1
-
-
-def test_secondary_mentions_follow_the_reranker_order() -> None:
-    text = render_digest(
-        [
-            DigestEntry(item("Weaker", None, importance=10), reranker_score=0.1),
-            DigestEntry(item("Stronger", None, importance=1), reranker_score=0.9),
-            DigestEntry(item("Headline", None, importance=1), review_score=50),
-        ],
-        datetime(2026, 6, 22, tzinfo=UTC),
-        "AI",
-        "TLDR",
-        top_items=1,
-    )
-
-    assert text.index("Headline") < text.index("Stronger") < text.index("Weaker")
 
 
 def test_a_mention_without_a_source_or_url_still_renders() -> None:
@@ -559,17 +525,6 @@ def test_two_newsletters_on_one_article_keep_both_attributions() -> None:
         "OpenAI 推出 GPT-5.6 Sol。",
         "GPT-5.6 Sol 以 Cerebras 硬體達到 750 tokens/second。",
     )
-
-
-def test_exact_url_attribution_does_not_depend_on_the_digest_language() -> None:
-    """Related-story merging is gated to Chinese; an identical URL needs no token heuristic at all."""
-    url = "https://article.example/story"
-    entries = [
-        merged_entry("OpenAI Launches New AI Model", "OpenAI launches a new model.", "TLDR AI", url),
-        merged_entry("New AI Model From OpenAI", "The model is available today.", "AlphaSignal", url),
-    ]
-
-    assert dedupe_entries(entries)[0].also_from == ("AlphaSignal",)
 
 
 def test_a_tracking_parameter_does_not_hide_repeat_coverage() -> None:

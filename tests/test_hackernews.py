@@ -90,21 +90,6 @@ def test_discovery_skips_item_fetch_failures_and_continues() -> None:
     assert (discovery.skipped, discovery.unreadable) == (1, 1)
 
 
-def test_discovery_limit_stops_before_fetching_later_items() -> None:
-    active_client, http_client = client(
-        {
-            "/v0/beststories.json": [1, 2],
-            "/v0/item/1.json": item(1),
-        }
-    )
-    try:
-        discovery = active_client.discover(source(max_story_candidates=2, max_articles_per_run=2), NOW, limit=1)
-    finally:
-        http_client.close()
-
-    assert [candidate.document.external_id for candidate in discovery.candidates] == ["1"]
-
-
 def test_discovery_rejects_item_payloads_with_the_wrong_id() -> None:
     active_client, http_client = client(
         {

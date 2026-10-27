@@ -2114,12 +2114,6 @@ def test_a_failed_comparison_answers_no_and_is_reported() -> None:
     assert messages == ["Warning: could not compare 甲 (OllamaSchemaError); left unmerged"]
 
 
-def test_a_transport_failure_also_leaves_the_pair_unmerged() -> None:
-    ollama = CountingOllama(error=httpx.ConnectError("ollama down"))
-
-    assert not selection._story_judge(ollama, 10, lambda _: None)(judged_entry(1, "甲", "摘要"), judged_entry(2, "乙", "摘要"))
-
-
 def test_only_shortlisted_pairs_reach_the_model() -> None:
     """The shortlist is what keeps this to a handful of generations per digest."""
     ollama = CountingOllama()

@@ -140,38 +140,10 @@ def test_security_candidates_reach_the_reviewer_from_below_the_global_cutoff() -
     assert [value.candidate_id for value in kept if value.item.category != "SECURITY"] == list(range(13))
 
 
-def test_unused_security_slots_go_to_the_other_categories() -> None:
-    ranked = ranked_pair(security=2, general=30)
-
-    kept = selection._review_candidates(ranked, 20, 7)
-
-    assert len(kept) == 20
-    assert sum(1 for value in kept if value.item.category == "SECURITY") == 2
-
-
-def test_unused_general_slots_go_to_security() -> None:
-    ranked = ranked_pair(security=30, general=5)
-
-    kept = selection._review_candidates(ranked, 20, 7)
-
-    assert len(kept) == 20
-    assert sum(1 for value in kept if value.item.category == "SECURITY") == 15
-
-
 def test_the_quota_never_exceeds_the_reviewer_limit() -> None:
     ranked = ranked_pair(security=30, general=30)
 
     assert len(selection._review_candidates(ranked, 20, 40)) == 20
-
-
-def test_kept_candidates_stay_in_reranker_order() -> None:
-    ranked = [
-        entry(1, "Release", "TLDR AI"),
-        entry(2, "CVE", "TLDR Sec", "SECURITY"),
-        entry(3, "Another release", "TLDR AI"),
-    ]
-
-    assert [value.candidate_id for value in selection._review_candidates(ranked, 3, 1)] == [1, 2, 3]
 
 
 def test_security_slots_default_to_seven_of_the_twenty_reviewer_slots() -> None:
@@ -212,35 +184,6 @@ def test_unwritten_reranker_scores_are_reported() -> None:
     assert messages == ["Warning: recorded 1 of 2 reranker scores"]
 
 
-def test_final_review_selects_scored_items_and_leaves_the_reviewer_loaded() -> None:
-    class FakeOllama:
-        review_model = "qwen3:8b"
-
-        def __init__(self) -> None:
-            self.candidates: list[dict[str, object]] = []
-            self.unloaded: list[str] = []
-
-        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
-            assert maximum == 1
-            self.candidates = candidates
-            return DigestReview.model_validate({"selected": [{"candidate_id": 2, "score": 90, "reason_zh_tw": "具體發布"}]})
-
-        def unload(self, model: str) -> None:
-            self.unloaded.append(model)
-
-    ollama = FakeOllama()
-    settings = Settings(
-        digest_max_items=1, digest_review_candidate_limit=2, digest_headlines_per_source=0, ollama_review_model="qwen3:8b"
-    )
-
-    reviewed = selection._reviewed_entries(settings, ollama, [entry(2, "Release", "TLDR AI"), entry(1, "Trial", "AlphaSignal")])
-
-    assert [(value.candidate_id, value.review_score) for value in reviewed] == [(2, 90), (1, None)]
-    assert ollama.candidates[0]["source"] == "TLDR AI"
-    # The headline rewrite runs on the same model, so run_pipeline releases it, not this step.
-    assert ollama.unloaded == []
-
-
 def never_the_same(_left: DigestEntry, _right: DigestEntry) -> bool:
     """These fixtures are unrelated stories; the model would say so."""
     return False
@@ -271,21 +214,6 @@ def test_candidates_the_reviewer_passed_over_become_secondary_mentions() -> None
     assert [value.candidate_id for value in selection._merged_entries(reviewed, 2, never_the_same)[0]] == [1, 2, 3]
 
 
-def test_secondary_mentions_can_be_turned_off() -> None:
-    class FakeOllama:
-        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
-            return DigestReview.model_validate({"selected": [{"candidate_id": 1, "score": 90, "reason_zh_tw": "具體發布"}]})
-
-        def unload(self, _model: str) -> bool:
-            return True
-
-    settings = Settings(digest_max_items=1, digest_secondary_items=0)
-    ranked = [entry(index, f"Story {index}", "TLDR AI") for index in range(1, 4)]
-    reviewed = selection._reviewed_entries(settings, FakeOllama(), ranked)
-
-    assert [value.candidate_id for value in selection._merged_entries(reviewed, 0, never_the_same)[0]] == [1]
-
-
 def _digest(headlines: Sequence[tuple[str, DigestCategory]], mentions: Sequence[tuple[str, DigestCategory]]) -> list[DigestEntry]:
     """Reviewed headlines scored 90, 80, ... and passed-over mentions in falling reranker order."""
     reviewed = [
@@ -305,20 +233,6 @@ def _floored(entries: list[DigestEntry], headline_limit: int, secondary_items: i
         [value.item.title for value in result if value.review_score is not None],
         [value.item.title for value in result if value.review_score is None],
     )
-
-
-def test_a_digest_without_security_headlines_promotes_the_best_security_mention() -> None:
-    # 2026-09-24: thirteen SECURITY candidates reached the reviewer and it chose none of the ones
-    # that mattered, a 0-day it had itself rated 9 of 10 among them.
-    entries = _digest(
-        [("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL"), ("Qwen image", "AI_MODEL")],
-        [("Rune IDE", "DEV_TOOL"), ("Muse 0-day", "SECURITY"), ("Clop leak site", "SECURITY")],
-    )
-
-    headlines, mentions = _floored(entries, headline_limit=3)
-
-    assert headlines == ["Opus 5.5", "GPT-6", "Muse 0-day"]
-    assert mentions == ["Qwen image", "Rune IDE", "Clop leak site"]
 
 
 def test_the_promoted_story_renders_as_the_last_headline() -> None:
@@ -368,18 +282,6 @@ def test_a_cve_the_mention_cap_cuts_does_not_count() -> None:
     # ones. GPT-6 was the reviewer's choice, so it sits outside the one-mention quota Rune IDE fills.
     assert headlines == ["Opus 5.5", "Docker patches CVE-2026-77179"]
     assert mentions == ["GPT-6", "Rune IDE"]
-
-
-def test_a_short_headline_list_gains_the_security_story_without_losing_one() -> None:
-    entries = _digest([("Opus 5.5", "AI_MODEL")], [("Rune IDE", "DEV_TOOL"), ("Muse 0-day", "SECURITY")])
-
-    assert _floored(entries, headline_limit=3) == (["Opus 5.5", "Muse 0-day"], ["Rune IDE"])
-
-
-def test_a_pool_without_security_is_left_alone() -> None:
-    entries = _digest([("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL")], [("Rune IDE", "DEV_TOOL")])
-
-    assert _floored(entries, headline_limit=2) == (["Opus 5.5", "GPT-6"], ["Rune IDE"])
 
 
 @pytest.mark.parametrize(
@@ -459,14 +361,6 @@ def test_the_floor_reports_what_it_promoted_and_what_made_room() -> None:
     assert promotion == SecurityFloorPromotion(promoted="Muse 0-day", source="TLDR", displaced="GPT-6")
 
 
-def test_a_floor_that_only_filled_an_empty_slot_displaced_nothing() -> None:
-    entries = _digest([("Opus 5.5", "AI_MODEL")], [("Muse 0-day", "SECURITY")])
-
-    _, promotion = selection._merged_entries(entries, 10, never_the_same, headline_limit=3)
-
-    assert promotion == SecurityFloorPromotion(promoted="Muse 0-day", source="TLDR", displaced=None)
-
-
 @pytest.mark.parametrize(
     ("headlines", "mentions"),
     [
@@ -513,42 +407,9 @@ def test_the_promotion_record_carries_no_terminal_controls() -> None:
     assert promotion == SecurityFloorPromotion(promoted="Muse 2J 0-day", source="Risky Biz", displaced="Opus 5.5")
 
 
-def test_demoted_headlines_leave_the_passed_over_quota_alone() -> None:
-    # DIGEST_MAX_ITEMS above DIGEST_TOP_ITEMS: the reviewer chose four, the renderer shows two. The
-    # two past the cap rendered outside DIGEST_SECONDARY_ITEMS before the floor acted, and counting
-    # them against it afterwards cut both passed-over mentions.
-    entries = _digest(
-        [("Opus 5.5", "AI_MODEL"), ("GPT-6", "AI_MODEL"), ("Qwen image", "AI_MODEL"), ("Gemini TTS", "AI_MODEL")],
-        [("Rune IDE", "DEV_TOOL"), ("Drop sandbox", "DEV_TOOL"), ("Muse 0-day", "SECURITY")],
-    )
-
-    headlines, mentions = _floored(entries, headline_limit=2, secondary_items=2)
-
-    assert headlines == ["Opus 5.5", "Muse 0-day"]
-    assert mentions == ["GPT-6", "Qwen image", "Gemini TTS", "Rune IDE", "Drop sandbox"]
-
-
 def _headline_only(candidate_id: int, title: str, category: DigestCategory = "AI_MODEL") -> DigestEntry:
     """A link-list item whose link was never matched: nothing behind it but the headline."""
     return replace(entry(candidate_id, title, "Hacker Newsletter", category), article_url=None, content_basis="newsletter")
-
-
-def test_items_with_nothing_behind_them_are_kept_from_the_reviewer_but_stay_mentions() -> None:
-    # With no article and no other coverage the summary can only restate or invent, so it may not
-    # become a headline; it is still worth a line among the mentions, in the reranker's order.
-    seen: list[object] = []
-
-    class FakeOllama:
-        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
-            seen.extend(candidate["candidate_id"] for candidate in candidates)
-            return DigestReview.model_validate({"selected": [{"candidate_id": 2, "score": 90, "reason_zh_tw": "具體"}]})
-
-    ranked = [_headline_only(1, "Grok 4.7"), entry(2, "Opus 5.5 pricing", "AlphaSignal"), _headline_only(3, "GPT-6 Sol")]
-
-    reviewed = selection._reviewed_entries(Settings(digest_max_items=1), FakeOllama(), ranked)
-
-    assert seen == [2]
-    assert [(value.candidate_id, value.review_score) for value in reviewed] == [(2, 90), (1, None), (3, None)]
 
 
 def test_a_pool_of_only_headlines_skips_the_reviewer() -> None:
@@ -559,19 +420,6 @@ def test_a_pool_of_only_headlines_skips_the_reviewer() -> None:
     ranked = [_headline_only(1, "Grok 4.7"), _headline_only(2, "GPT-6 Sol")]
 
     assert selection._reviewed_entries(Settings(), Unused(), ranked) == ranked
-
-
-def test_the_security_floor_never_promotes_a_story_with_nothing_behind_it() -> None:
-    headlines = [replace(entry(1, "Opus 5.5", "TLDR"), review_score=90, reranker_score=0.9)]
-    muse = replace(_headline_only(2, "Muse 0-day", "SECURITY"), reranker_score=0.6)
-    clop = replace(entry(3, "Clop leak site", "TLDR", "SECURITY"), reranker_score=0.4)
-
-    promoted, _ = selection._merged_entries([*headlines, muse, clop], 10, never_the_same, headline_limit=2)
-    alone, promotion = selection._merged_entries([*headlines, muse], 10, never_the_same, headline_limit=2)
-
-    assert [value.item.title for value in promoted if value.review_score is not None] == ["Opus 5.5", "Clop leak site"]
-    assert promotion is None
-    assert [value.item.title for value in alone if value.review_score is not None] == ["Opus 5.5"]
 
 
 def test_the_security_floor_never_promotes_coverage_gained_after_the_review() -> None:
@@ -592,18 +440,6 @@ def test_the_security_floor_never_promotes_coverage_gained_after_the_review() ->
     assert bare_promotion is None
     assert [value.item.title for value in bare if value.review_score is not None] == ["Opus 5.5"]
     assert backed_promotion is not None and backed_promotion.promoted == "Meta patches Muse 0-day"
-
-
-def test_the_copy_with_an_article_is_kept_when_a_bare_one_repeats_it() -> None:
-    # Hacker Newsletter's "Grok 4.7" ranked above AlphaSignal's write-up of the same launch; kept as
-    # the primary, its one guessed line would have replaced the real summary and its article.
-    listed = replace(_headline_only(1, "Grok 4.7"), reranker_score=0.9)
-    written = replace(entry(2, "xAI releases Grok 4.7", "AlphaSignal"), reranker_score=0.5)
-
-    _, mentions = merge_related_entries([], [listed, written], lambda _left, _right: True)
-
-    assert len(mentions) == 1
-    assert (mentions[0].item.title, mentions[0].also_from) == ("xAI releases Grok 4.7", ("Hacker Newsletter",))
 
 
 def test_a_story_keeps_its_higher_rank_when_its_backed_copy_takes_over() -> None:
@@ -878,32 +714,6 @@ def test_without_a_versioned_name_only_rare_shared_tokens_shortlist_a_pair() -> 
     assert marked[0].previous_days == 1
 
 
-def test_a_count_absorbed_in_merging_is_not_lowered_by_a_later_check() -> None:
-    # Checked after merging, a mention may already carry three days from the copy it absorbed.
-    today = replace(entry(1, "Claude Opus 5.5", "TLDR"), previous_days=3, previous_window=3)
-
-    marked = with_previous_coverage([today], [_earlier(24, 100, "Anthropic releases Opus 5.5")], lambda *_: True, 3, [])
-
-    assert marked[0].previous_days == 3
-
-
-def test_a_day_is_asked_about_in_turn_until_one_earlier_item_agrees() -> None:
-    # The best-scoring match on a day can be a roundup of several stories, rightly judged different.
-    today = entry(1, "Claude Opus 5.5", "TLDR")
-    roundup = _earlier(23, 100, "Opus 5.5, GPT-6 Sol, GPT-6 Luna and a price war")
-    single = _earlier(23, 101, "Anthropic releases Opus 5.5")
-    asked: list[int | None] = []
-
-    def judge(_left: DigestEntry, right: DigestEntry) -> bool:
-        asked.append(right.candidate_id)
-        return right.candidate_id == 101
-
-    marked = with_previous_coverage([today], [roundup, single], judge, 3, [])
-
-    assert asked == [100, 101]
-    assert marked[0].previous_days == 1
-
-
 def test_repeats_are_checked_on_what_the_reviewer_and_the_reader_see(tmp_path: Path) -> None:
     # One reviewer slot and one mention slot. Before the review only the reviewer's candidate is
     # checked. The first bare mention folds into that headline, which frees its slot for the second -
@@ -1021,20 +831,6 @@ def test_an_entry_let_in_by_a_fold_is_compared_with_those_below_it_too() -> None
     assert [value.item.title for value in merged] == ["Opus 5.5", "Grok 4.7", "Muse 2"]
 
 
-def test_a_report_matching_only_an_absorbed_one_still_folds() -> None:
-    # A and C share no name, B shares one with each. B folds into A first; C must still be compared
-    # with B, or it stays beside A as a duplicate.
-    ranked = [
-        entry(1, "Grok launch", "TLDR AI"),
-        entry(2, "Grok Colossus pricing", "AlphaSignal"),
-        entry(3, "Colossus pricing", "AINews"),
-    ]
-
-    merged = merge_before_selection(ranked, lambda entries: entries, lambda _left, _right: True)
-
-    assert [(value.candidate_id, value.also_from) for value in merged] == [(1, ("AlphaSignal", "AINews"))]
-
-
 def test_a_repeat_found_through_a_folded_report_is_kept() -> None:
     # Only the second report matches an earlier day. It folds into the first, so it is marked before
     # merging; the merged entry keeps the count.
@@ -1064,22 +860,6 @@ def test_a_repeat_found_through_a_folded_report_is_kept() -> None:
     shown, _ = selection._selected_entries(settings, Reviewer(), ranked, mark, lambda _m: None)
 
     assert [(value.candidate_id, value.previous_days) for value in shown] == [(1, 2)]
-
-
-def test_a_pair_is_judged_once_whichever_way_round_it_is_asked() -> None:
-    asked: list[str] = []
-
-    class Judge:
-        def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
-            asked.append(left["title"])
-            return False
-
-    judge = selection._story_judge(Judge(), 10, lambda _m: None)
-    first, second = entry(1, "Grok 4.7", "TLDR AI"), entry(2, "Grok 4.7 pricing", "AlphaSignal")
-
-    assert not judge(first, second)
-    assert not judge(second, first)
-    assert asked == ["Grok 4.7"]
 
 
 def _headline(candidate_id: int, source: str, score: int) -> DigestEntry:

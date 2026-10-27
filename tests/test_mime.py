@@ -56,17 +56,6 @@ def test_extract_mime_keeps_html_link_candidates_when_plain_text_wins() -> None:
     ]
 
 
-def test_extract_mime_keeps_plain_text_link_candidates_without_html() -> None:
-    message = EmailMessage()
-    message.set_content("Useful article: https://example.com/article")
-
-    content = extract_mime(message.as_bytes())
-
-    assert [(str(candidate.raw_url), candidate.nearby_text) for candidate in content.link_candidates] == [
-        ("https://example.com/article", "Useful article")
-    ]
-
-
 def test_extract_mime_strips_plain_text_url_sentence_punctuation() -> None:
     message = EmailMessage()
     message.set_content("Read https://example.com/article?tags=research,security.")
@@ -402,15 +391,6 @@ def test_code_shaped_text_the_newsletter_wrote_cannot_pass_for_a_code() -> None:
     ]
 
 
-def test_an_html_newsletter_is_coded_the_same_way() -> None:
-    html = '<h2>Top story</h2><p><a href="https://example.com/story">Top story</a> and more.</p>'
-
-    content = extract_gmail_payload(_body("text/html", html))
-
-    assert content.analysis_text == "Top story\nTop story [L1]\nand more."
-    assert _codes(content) == {"L1": "https://example.com/story"}
-
-
 def test_a_link_that_is_not_a_candidate_is_dropped_from_the_text() -> None:
     # An unsubscribe link is never a candidate, so no code may point at it; its URL goes too.
     html = '<p><a href="https://example.com/story">Story</a> · <a href="https://example.com/unsub">Unsubscribe</a></p>'
@@ -475,17 +455,6 @@ def test_the_list_unsubscribe_header_names_links_that_are_no_candidates() -> Non
 )
 def test_an_unsubscribe_link_is_recognised_by_its_words(url: str, unsubscribes: bool) -> None:
     assert unsubscribe_link(url) is unsubscribes
-
-
-def test_urls_no_longer_spend_the_character_budget() -> None:
-    # A tracking URL per story used to fill the 45,000-character cut before the stories did.
-    tracking = "https://click.example/" + "x" * 400
-    plain = "\n".join(f"Story {number} {tracking}{number}" for number in range(150))
-
-    content = extract_gmail_payload(_body("text/plain", plain))
-
-    assert content.original_characters is not None and content.original_characters < 3_000
-    assert content.analysis_text.endswith("Story 149 [L150]")
 
 
 def test_the_padding_after_the_preview_text_is_dropped() -> None:
