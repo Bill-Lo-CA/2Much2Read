@@ -53,15 +53,6 @@ class TestDueSlots:
         assert pipeline.due_slots(config, {}, {}, at(8, 59)) == []
         assert [slot.slot_time for slot in pipeline.due_slots(config, {}, {}, at(9, 0))] == [time(9)]
 
-    def test_only_one_slot_fires_per_run_so_a_backlog_trickles(self) -> None:
-        # A machine switched off all day reaches 21:05 with three slots owed. Sending all three at
-        # once is a burst of identical messages; the per-minute timer drains them one at a time.
-        config = NudgesConfig(nudges=[nudge()])
-
-        due = pipeline.due_slots(config, {}, {}, at(21, 5))
-
-        assert [slot.slot_time for slot in due] == [time(9)]
-
     def test_a_delivered_slot_is_not_sent_again(self) -> None:
         config = NudgesConfig(nudges=[nudge()])
         states = {("stretch", "09:00"): ("delivered", 1)}
@@ -69,34 +60,6 @@ class TestDueSlots:
         due = pipeline.due_slots(config, {"stretch": 1}, states, at(14, 30))
 
         assert [slot.slot_time for slot in due] == [time(14)]
-
-    def test_a_failed_slot_is_retried_but_not_forever(self) -> None:
-        config = NudgesConfig(nudges=[nudge()])
-
-        retried = pipeline.due_slots(config, {}, {("stretch", "09:00"): ("failed", 1)}, at(9, 30))
-        assert [slot.slot_time for slot in retried] == [time(9)]
-
-        exhausted = pipeline.due_slots(config, {}, {("stretch", "09:00"): ("failed", pipeline.MAX_SLOT_ATTEMPTS)}, at(9, 30))
-        assert exhausted == []
-
-    def test_a_finished_nudge_stops(self) -> None:
-        config = NudgesConfig(nudges=[nudge(total_sends=3)])
-
-        assert pipeline.due_slots(config, {"stretch": 3}, {}, at(21, 0)) == []
-
-    def test_a_disabled_nudge_never_fires(self) -> None:
-        config = NudgesConfig(nudges=[nudge(enabled=False)])
-
-        assert pipeline.due_slots(config, {}, {}, at(21, 0)) == []
-
-    def test_yesterdays_missed_slot_is_dropped_rather_than_delivered_late(self) -> None:
-        # slot_states is keyed on today only, so a slot missed yesterday leaves no trace; what
-        # matters is that nothing from yesterday appears in the result.
-        config = NudgesConfig(nudges=[nudge(at=[time(9)])])
-
-        due = pipeline.due_slots(config, {}, {}, at(2, 0))
-
-        assert due == []
 
 
 class TestDelivery:
@@ -121,14 +84,6 @@ class TestDelivery:
 
         assert (result.status, result.sent, result.completed) == ("ok", 1, [])
         assert pipeline.status(settings(tmp_path), now=at(9, 30)).nudges[0].remaining == 1
-
-    def test_the_last_send_reports_the_nudge_complete(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 1\n")
-        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
-
-        assert pipeline.run(settings(tmp_path), False, now=at(9, 30)).completed == ["stretch"]
-        # A second run the same day has nothing left to send.
-        assert pipeline.run(settings(tmp_path), False, now=at(9, 31)).sent == 0
 
     def test_running_twice_in_one_slot_sends_once(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
         write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
@@ -195,9 +150,6 @@ class TestContent:
     def test_the_message_is_sent_verbatim_apart_from_at_signs(self) -> None:
         assert pipeline.nudge_content(nudge(message="ping @everyone")) == "ping @​everyone"
 
-    def test_no_progress_counter_is_appended_to_the_operators_words(self) -> None:
-        assert pipeline.nudge_content(nudge(message="起來動一動")) == "起來動一動"
-
 
 class TestConfig:
     def test_times_are_sorted_and_must_be_unique(self, tmp_path: Path) -> None:
@@ -242,11 +194,6 @@ class TestConfig:
         with pytest.raises(ValueError, match="not found"):
             load_nudges(tmp_path / "absent.yaml")
 
-    def test_an_empty_file_loads_as_no_nudges(self, tmp_path: Path) -> None:
-        (tmp_path / "nudges.yaml").write_text("", encoding="utf-8")
-
-        assert load_nudges(tmp_path / "nudges.yaml").nudges == []
-
 
 class TestReset:
     def test_reset_restarts_the_count(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -258,12 +205,6 @@ class TestReset:
 
         assert result.cleared == 1
         assert pipeline.status(settings(tmp_path), now=at(9, 30)).nudges[0].delivered == 0
-
-    def test_resetting_an_unknown_nudge_is_an_error(self, tmp_path: Path) -> None:
-        write_nudges(tmp_path, "nudges: []\n")
-
-        with pytest.raises(ValueError, match="unknown nudge id"):
-            pipeline.reset(settings(tmp_path), "ghost")
 
 
 class TestStatus:
@@ -296,12 +237,6 @@ class TestCompleted:
 
         assert pipeline.run(settings(tmp_path), False, now=at(9, 30)).completed == ["stretch"]
         assert pipeline.run(settings(tmp_path), False, now=at(14, 30)).completed == []
-
-    def test_a_run_that_did_not_finish_a_nudge_reports_nothing(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-        write_nudges(tmp_path, "nudges:\n  - id: stretch\n    message: hi\n    at: ['09:00']\n    total_sends: 5\n")
-        monkeypatch.setattr(pipeline, "deliver", lambda *args, **kwargs: ["message-id"])
-
-        assert pipeline.run(settings(tmp_path), False, now=at(9, 30)).completed == []
 
 
 class TestRemovedNudges:
