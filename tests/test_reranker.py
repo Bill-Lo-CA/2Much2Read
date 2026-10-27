@@ -10,6 +10,7 @@ from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import pytest
+from pydantic import HttpUrl
 
 from two_much_two_read import selection, stages
 from two_much_two_read.command_models import SecurityFloorPromotion
@@ -1223,3 +1224,74 @@ def test_the_reviewer_is_asked_for_picks_past_the_limit_only_while_the_cap_is_on
     selection._reviewed_entries(Settings(digest_max_items=10, digest_headlines_per_source=0), FakeOllama(), ranked)
 
     assert asked == [(10, selection.REVIEW_REFILL_PICKS), (10, 0)]
+
+
+def test_stored_items_come_back_with_everything_selection_and_rendering_read(tmp_path: Path) -> None:
+    """A field lost between the database and the entry fails nothing loudly: an HN story just renders without its thread."""
+    from two_much_two_read.schemas import DigestItem as StoredItem
+    from two_much_two_read.schemas import SourceDocument
+    from two_much_two_read.storage import Database
+
+    database = Database(tmp_path / "digest.sqlite3")
+    story = SourceDocument(
+        source_type="hackernews",
+        source_id="hn-best",
+        external_id="4242",
+        title="Show HN: A tiny inference server",
+        published_at=datetime(2026, 10, 1, 12, tzinfo=UTC),
+        source_url=HttpUrl("https://example.com/server"),
+        discussion_url=HttpUrl("https://news.ycombinator.com/item?id=4242"),
+    )
+    hn_id, _ = database.store_hackernews_metadata(story, "beststories", 1, 321, 45)
+    letter = database.discover_gmail_document(
+        "g1", "t1", "tldr-ai", datetime(2026, 10, 1, 9, tzinfo=UTC), "Subject", "f", "body", False
+    )
+    assert letter is not None
+    for document_id, url, headline in (
+        (hn_id, "https://example.com/server", "Show HN: A tiny inference server"),
+        (letter, None, "Model ships"),
+    ):
+        database.store_items(
+            document_id,
+            [
+                StoredItem(
+                    title="標題",
+                    source_title=headline,
+                    category="AI_MODEL",
+                    summary_zh_tw="摘要",
+                    why_it_matters_zh_tw="原因",
+                    source_url=HttpUrl(url) if url else None,
+                    importance=5,
+                    confidence=0.5,
+                )
+            ],
+        )
+
+    entries = {
+        entry.source_id: entry for entry in selection._items(database, [hn_id, letter], 10, {"hn-best": "Hacker News Best"})
+    }
+    database.close()
+
+    hn, gmail = entries["hn-best"], entries["tldr-ai"]
+    assert (hn.source_type, hn.source_name, hn.hn_item_id, hn.hn_score, hn.hn_comments) == (
+        "hackernews",
+        "Hacker News Best",
+        "4242",
+        321,
+        45,
+    )
+    assert (hn.article_url, hn.discussion_url, hn.item.source_title) == (
+        "https://example.com/server",
+        "https://news.ycombinator.com/item?id=4242",
+        "Show HN: A tiny inference server",
+    )
+    assert hn.published_at == datetime(2026, 10, 1, 12, tzinfo=UTC) and hn.candidate_id is not None
+    # A newsletter has no thread, and a source missing from the names is shown by its id.
+    assert (gmail.source_type, gmail.source_name, gmail.hn_item_id, gmail.hn_score, gmail.discussion_url) == (
+        "gmail",
+        "tldr-ai",
+        None,
+        None,
+        None,
+    )
+    assert (gmail.article_url, gmail.content_basis, gmail.item.source_title) == (None, "newsletter", "Model ships")

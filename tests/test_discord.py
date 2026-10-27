@@ -341,3 +341,89 @@ def test_rejects_invalid_webhook_destinations_without_leaking_tokens(webhook_url
         configured_destinations("webhook", webhook_url, "", "")
 
     assert "secret-token" not in str(error.value)
+
+
+WEBHOOK = "https://discord.com/api/webhooks/123456789012345678/test-webhook-token"
+
+
+@pytest.mark.parametrize(
+    ("allowed", "mentioned", "message"),
+    [
+        (["12a"], [], "digits only"),
+        (["１２３"], [], "digits only"),  # full-width digits are decimal but not ASCII
+        (["123"], ["456"], "must be allowed"),
+    ],
+)
+def test_only_ascii_digit_ids_the_allowlist_names_may_be_mentioned(
+    allowed: list[str], mentioned: list[str], message: str
+) -> None:
+    with pytest.raises(DiscordDeliveryError, match=message):
+        deliver(WEBHOOK, "hello", "2much2read", allowed_user_ids=allowed, mention_user_ids=mentioned)
+
+
+def test_stored_progress_past_the_last_chunk_is_refused() -> None:
+    with pytest.raises(DiscordDeliveryError, match="exceeds message chunks"):
+        deliver(WEBHOOK, "hello", "2much2read", message_ids=["1", "2"])
+
+
+@respx.mock
+def test_a_rate_limit_is_waited_out_for_as_long_as_discord_asks(monkeypatch: pytest.MonkeyPatch) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr("two_read_runtime.discord.time.sleep", slept.append)
+    respx.post(WEBHOOK).mock(
+        side_effect=[httpx.Response(429, headers={"Retry-After": "2.5"}), httpx.Response(200, json={"id": "7"})]
+    )
+
+    assert deliver(WEBHOOK, "hello", "2much2read") == ["7"]
+    assert slept == [2.5]
+
+
+@respx.mock
+def test_a_rate_limit_that_persists_fails_after_three_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr("two_read_runtime.discord.time.sleep", slept.append)
+    route = respx.post(WEBHOOK).mock(return_value=httpx.Response(429))
+
+    with pytest.raises(DiscordDeliveryError, match="DISCORD_RATE_LIMITED"):
+        deliver(WEBHOOK, "hello", "2much2read")
+
+    assert route.call_count == 4 and slept == [1, 1, 1]
+
+
+@respx.mock
+def test_server_errors_back_off_and_then_give_up(monkeypatch: pytest.MonkeyPatch) -> None:
+    slept: list[float] = []
+    monkeypatch.setattr("two_read_runtime.discord.time.sleep", slept.append)
+    respx.post(WEBHOOK).mock(side_effect=[httpx.Response(502), httpx.Response(503), httpx.Response(200, json={"id": "8"})])
+
+    assert deliver(WEBHOOK, "hello", "2much2read") == ["8"]
+    assert slept == [1, 2]
+
+    slept.clear()
+    respx.post(WEBHOOK).mock(return_value=httpx.Response(500))
+    with pytest.raises(DiscordDeliveryError):
+        deliver(WEBHOOK, "hello", "2much2read")
+    assert slept == [1, 2, 4]
+
+
+@pytest.mark.parametrize(("header", "wait"), [("3", 3.0), ("120", 30.0), ("-4", 0.0), ("soon", 1.0), (None, 1.0)])
+def test_retry_after_is_bounded_and_falls_back_on_nonsense(header: str | None, wait: float) -> None:
+    headers = {} if header is None else {"Retry-After": header}
+
+    assert discord._retry_after(httpx.Response(429, headers=headers), 1) == wait
+
+
+@pytest.mark.parametrize("webhook_url", ["https://evil.example/api/webhooks/1/token", ""])
+def test_a_destination_object_is_held_to_the_same_webhook_rules_as_a_url(webhook_url: str) -> None:
+    destination = DiscordDestination("webhook", "webhook:key", webhook_url=webhook_url)
+
+    with pytest.raises(DiscordDeliveryError):
+        deliver(destination, "hello", "2much2read")
+
+
+@respx.mock
+def test_a_delivery_already_complete_sends_nothing_more() -> None:
+    route = respx.post(WEBHOOK).mock(return_value=httpx.Response(200, json={"id": "9"}))
+
+    assert deliver(WEBHOOK, "hello", "2much2read", message_ids=["1"]) == ["1"]
+    assert route.call_count == 0

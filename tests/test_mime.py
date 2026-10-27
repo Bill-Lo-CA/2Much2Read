@@ -311,6 +311,15 @@ def test_repeats_still_count_toward_the_work_bound() -> None:
     assert [str(candidate.raw_url) for candidate in content.link_candidates] == ["https://example.com/article"]
 
 
+def test_the_work_bound_holds_for_plain_text_links_too() -> None:
+    # The HTML scan stops at the bound by itself (find_all's limit); the plain-text scan has only the count.
+    plain = "\n".join(["Story https://example.com/article"] * MAX_LINK_OCCURRENCES + ["Late https://example.com/past-the-bound"])
+
+    content = extract_gmail_payload(_body("text/plain", plain))
+
+    assert [str(candidate.raw_url) for candidate in content.link_candidates] == ["https://example.com/article"]
+
+
 def test_only_kept_links_pay_for_their_surrounding_text(monkeypatch: pytest.MonkeyPatch) -> None:
     # Finding a link's heading walks back through the document, so paying for it on every repeat
     # would make the work bound quadratic in practice.
@@ -596,3 +605,14 @@ def test_a_markdown_link_keeps_the_brackets_in_its_url() -> None:
 
     assert content.analysis_text == "Search [L1] and Local [L2]"
     assert _codes(content) == {"L1": "https://example.com/?filters[]=news", "L2": "http://[2001:db8::1]/page"}
+
+
+def test_a_link_carrying_credentials_is_no_candidate() -> None:
+    """A user name or password in a link is a credential the reader would hand to whoever hosts it."""
+    html = (
+        '<a href="https://example.com/story">Story</a> <a href="https://user:pw@example.com/a">A</a> '
+        '<a href="https://user@example.com/b">B</a> <a href="https://:pw@example.com/c">C</a> '
+        '<a href="ftp://example.com/d">D</a>'
+    )
+
+    assert _codes(extract_gmail_payload(_body("text/html", html))) == {"L1": "https://example.com/story"}

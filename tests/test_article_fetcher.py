@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import socket
+import ssl
 from threading import Event
 
 import pytest
@@ -440,3 +441,56 @@ def test_an_overlong_url_is_refused_before_any_request() -> None:
 
     with pytest.raises(UrlResolutionError, match="URL_POLICY_BLOCKED"):
         fetcher.resolve_url("https://example.com/" + "a" * article_fetcher.MAX_URL_LENGTH)
+
+
+class _Socket:
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+
+    def settimeout(self, value: float) -> None:
+        self.timeouts.append(value)
+
+
+@pytest.mark.parametrize("secure", [False, True])
+def test_a_connection_goes_to_the_address_that_was_validated_not_a_fresh_lookup(
+    monkeypatch: pytest.MonkeyPatch, secure: bool
+) -> None:
+    """DNS is answered once and checked; asking again at connect time could be answered with a private address."""
+    opened: list[tuple[tuple[str, int], float]] = []
+    wrapped: list[str | None] = []
+    plain = _Socket()
+
+    def create_connection(address: tuple[str, int], timeout: float) -> _Socket:
+        opened.append((address, timeout))
+        return plain
+
+    monkeypatch.setattr("two_much_two_read.article_fetcher.socket.create_connection", create_connection)
+    kind = article_fetcher._PinnedHTTPSConnection if secure else article_fetcher._PinnedHTTPConnection
+    connection = kind("news.example", 443 if secure else 80, "93.184.216.34", timeout=4)
+    if secure:
+        assert isinstance(connection, article_fetcher._PinnedHTTPSConnection)
+        assert connection.context.verify_mode is ssl.CERT_REQUIRED and connection.context.check_hostname
+
+        def wrap_socket(sock: _Socket, server_hostname: str | None = None) -> _Socket:
+            wrapped.append(server_hostname)
+            return sock
+
+        monkeypatch.setattr(connection.context, "wrap_socket", wrap_socket)
+
+    connection.connect()
+
+    assert opened == [(("93.184.216.34", 443 if secure else 80), 4)]
+    # The certificate is checked against the name the link gave, not the address dialled.
+    assert wrapped == (["news.example"] if secure else [])
+    assert plain.timeouts == [article_fetcher.READ_TIMEOUT_SECONDS]
+
+
+@pytest.mark.parametrize(("deadline", "timeout_deadline", "expected"), [(1000.0, None, 15), (103.0, None, 3), (103.0, 101.0, 1)])
+def test_a_socket_never_waits_past_either_deadline(deadline: float, timeout_deadline: float | None, expected: float) -> None:
+    connection = article_fetcher._PinnedHTTPConnection("news.example", 80, "93.184.216.34")
+    sock = _Socket()
+    connection.sock = sock
+
+    ArticleFetcher(clock=lambda: 100.0)._set_socket_timeout(connection, deadline, timeout_deadline)
+
+    assert sock.timeouts == [expected]
