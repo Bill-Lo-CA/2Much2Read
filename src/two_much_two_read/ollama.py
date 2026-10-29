@@ -602,7 +602,11 @@ def _headline_words(value: str) -> set[str]:
 
 
 def _sponsored(source_title: str, sponsored: list[str]) -> bool:
-    """Whether an item is one of the issue's sponsored entries: marked so, or a headline the scan flagged."""
+    """Whether an item is one of the issue's sponsored entries: marked so, or a headline the scan flagged.
+
+    Most words must be shared, counted against the longer headline. "Train with OpenAI GPT-5 at our
+    webinar" has every word of "OpenAI launches GPT-5" but one, and is still a different entry.
+    """
     if SPONSOR_MARK.search(source_title):
         return True
     words = _headline_words(source_title)
@@ -611,7 +615,7 @@ def _sponsored(source_title: str, sponsored: list[str]) -> bool:
         if not words or not other:
             if source_title.strip().casefold() == headline.strip().casefold():
                 return True
-        elif len(words & other) / min(len(words), len(other)) >= 0.6:
+        elif len(words & other) / max(len(words), len(other)) >= 0.6:
             return True
     return False
 
@@ -672,20 +676,22 @@ class OllamaClient:
 
         A source without a configured cap passes None. The issue is then scanned first
         (SCAN_SYSTEM_PROMPT): its stories are counted and its sponsored entries named. Extraction is
-        asked for the stories that are not sponsored, anything the scan flagged is dropped from its
-        answer, and keep_share of the rest are kept by importance. A scan that fails leaves the old
-        cap of UNSCANNED_ITEMS.
+        asked for every entry counted, anything the scan flagged is dropped from its answer, and
+        keep_share of the rest are kept by importance. Sponsors are asked for too: the extractor
+        cannot tell which they are, and one it took in a story's place pushed that story past the
+        cap. An issue cut to fit the scan has stories past those counted, so there the count is a
+        floor, never below the old cap of UNSCANNED_ITEMS. A scan that fails leaves that cap.
         """
         if max_items is not None:
             return self._extract(source_id, content, truncated, max_items)
-        scan = self.scan_stories(source_id, content)
+        scan, cut = self.scan_stories(source_id, content)
         if scan is None or not scan.stories or len(scan.stories) > SCAN_MAX_STORIES:
             # Nothing counted, or more than an issue's stories: a recap whose paragraphs were listed.
             if scan is not None and scan.stories:
                 logger.warning("extraction for %s: stories not countable; taking up to %d", source_id, UNSCANNED_ITEMS)
             return self._extract(source_id, content, truncated, UNSCANNED_ITEMS)
         sponsored = [story.headline for story in scan.stories if story.sponsored]
-        wanted = max(1, len(scan.stories) - len(sponsored))
+        wanted = max(len(scan.stories), UNSCANNED_ITEMS) if cut else len(scan.stories)
         result = self._extract(source_id, content, truncated, wanted)
         extracted = len(result.items)
         result.items = kept_stories(result.items, sponsored, self.keep_share)
@@ -699,8 +705,11 @@ class OllamaClient:
         )
         return result
 
-    def scan_stories(self, source_id: str, content: str) -> StoryScan | None:
-        """Every story the issue carries, with its sponsored entries marked, or None if the scan fails."""
+    def scan_stories(self, source_id: str, content: str) -> tuple[StoryScan | None, bool]:
+        """Every story the issue carries, its sponsored entries marked, or None if the scan fails.
+
+        Also whether the issue was cut to fit, which leaves the stories past the cut uncounted.
+        """
         schema = _ollama_schema(StoryScan.model_json_schema())
         head = f"Schema: {json.dumps(schema)}\n<newsletter_content>\n"
         tail = "\n</newsletter_content>"
@@ -708,6 +717,9 @@ class OllamaClient:
         output = 2 * SCAN_MAX_STORIES * SCAN_RESERVED_TOKENS_PER_STORY
         overhead = _estimated_tokens(SCAN_SYSTEM_PROMPT + head + tail) + ESTIMATE_SPLICE_TOKENS + CHAT_TEMPLATE_TOKENS
         sent = _cut_to(content, self.num_ctx - overhead - output)
+        cut = len(sent) < len(content)
+        if cut:
+            logger.warning("story scan for %s: reading %d of %d characters", source_id, len(sent), len(content))
         raw = ""
         try:
             response = self._client.post(
@@ -728,10 +740,10 @@ class OllamaClient:
             )
             response.raise_for_status()
             raw = response.json()["message"]["content"]
-            return StoryScan.model_validate_json(raw)
+            return StoryScan.model_validate_json(raw), cut
         except (httpx.HTTPError, ValidationError, ValueError, KeyError, TypeError) as error:
             logger.warning("story scan for %s failed: %s response_preview=%r", source_id, type(error).__name__, _preview(raw))
-            return None
+            return None, cut
 
     def _extract(self, source_id: str, content: str, truncated: bool, max_items: int) -> EmailExtraction:
         # Ollama's grammar parser rejects large maxLength values such as HttpUrl's 2083-character limit.

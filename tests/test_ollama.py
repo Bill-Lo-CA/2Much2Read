@@ -1306,6 +1306,12 @@ def test_kept_stories_drop_the_sponsors_and_keep_the_strongest_share_in_issue_or
     ]
 
 
+def test_a_story_sharing_some_words_with_a_sponsor_is_not_taken_for_it() -> None:
+    items = [_story("OpenAI launches GPT-5", 9)]
+
+    assert kept_stories(items, ["Train with OpenAI GPT-5 at our webinar"], 1.0) == items
+
+
 @pytest.mark.parametrize(("stories", "kept"), [(10, 7), (20, 14), (3, 3), (1, 1), (0, 0)])
 def test_the_share_kept_rounds_up_to_whole_stories(stories: int, kept: int) -> None:
     items = [_story(f"Story number {index}", 5) for index in range(stories)]
@@ -1318,7 +1324,7 @@ def _scan(*stories: tuple[str, bool]) -> httpx.Response:
 
 
 @respx.mock
-def test_an_issue_without_a_cap_is_scanned_and_asked_for_its_stories_only() -> None:
+def test_an_issue_without_a_cap_is_scanned_and_asked_for_every_entry_it_counted() -> None:
     scan = _scan(
         ("Model release", False), ("GET MORE FROM YOUR GPUS (SPONSOR)", True), ("Second release", False), ("Third release", False)
     )
@@ -1336,22 +1342,39 @@ def test_an_issue_without_a_cap_is_scanned_and_asked_for_its_stories_only() -> N
     scan_request = json.loads(route.calls[0].request.content)
     extract_prompt = json.loads(route.calls[1].request.content)["messages"][1]["content"]
     assert "sponsored" in json.dumps(scan_request["format"]) and scan_request["model"] == "llama3.2:3b"
-    # Four entries, one sponsored: three stories asked for, and 60% of three (1.8) rounds up to two.
-    assert "max_items=3\n" in extract_prompt
+    # Four entries asked for, the sponsor too; it goes, and 60% of three stories (1.8) rounds up to two.
+    assert "max_items=4\n" in extract_prompt
     assert [item.source_title for item in result.items] == ["Model release", "Second release"]
 
 
 @respx.mock
-def test_a_sponsor_the_extractor_kept_anyway_is_dropped_by_the_scans_word() -> None:
-    scan = _scan(("Model release", False), ("Vector search can't tell which memory is current", True))
-    answer = _items_result(GOOD, ("向量搜尋", "向量搜尋無法區分記憶體。", "可改善代理。"))
-    answer["items"][0]["source_title"] = "Model release"  # type: ignore[index]
-    answer["items"][1]["source_title"] = "VECTOR SEARCH CAN'T TELL WHICH MEMORY IS CURRENT"  # type: ignore[index]
+def test_a_sponsor_the_extractor_kept_anyway_is_dropped_by_the_scans_word_and_costs_no_story() -> None:
+    scan = _scan(("Vector search can't tell which memory is current", True), ("Model release", False))
+    answer = _items_result(("向量搜尋", "向量搜尋無法區分記憶體。", "可改善代理。"), GOOD)
+    answer["items"][0]["source_title"] = "VECTOR SEARCH CAN'T TELL WHICH MEMORY IS CURRENT"  # type: ignore[index]
+    answer["items"][1]["source_title"] = "Model release"  # type: ignore[index]
     respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[scan, _chat(answer)])
 
     result = OllamaClient(keep_share=1.0).extract("tldr-dev", "News", max_items=None)
 
     assert [item.source_title for item in result.items] == ["Model release"]
+
+
+@respx.mock
+def test_an_issue_cut_to_fit_the_scan_is_asked_for_at_least_the_old_cap() -> None:
+    """The stories past the cut were never counted, so three counted may be three of twenty."""
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[
+            _scan(("Model release", False), ("Second release", False), ("Third release", False)),
+            _chat(_items_result(GOOD)),
+        ]
+    )
+
+    OllamaClient(num_ctx=8192).extract("tldr-ai", "A long story. " * 3000, max_items=None)
+
+    scanned = json.loads(route.calls[0].request.content)["messages"][1]["content"]
+    assert len(scanned) < 3000 * len("A long story. ")
+    assert "max_items=10\n" in json.loads(route.calls[1].request.content)["messages"][1]["content"]
 
 
 @respx.mock
