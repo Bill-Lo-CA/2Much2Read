@@ -480,6 +480,11 @@ def test_an_unsubscribe_link_is_recognised_by_its_words(url: str, unsubscribes: 
         ("https://unsplash.com/@laughayette", True),
         ("https://unsplash.com/photos/person-using-magnifying-glass-uAFjFsMS3YY", True),
         ("https://www.gettyimages.co.uk/detail/news-photo/123", True),
+        ("https://www.shutterstock.com/g/jane-doe", True),
+        ("https://images.unsplash.com/photo-1550751827-4bd374c3f58b", True),
+        # The rest of a stock-photo site can be the story.
+        ("https://newsroom.gettyimages.com/en/getty-images/getty-images-statement-on-stability-ai", False),
+        ("https://www.shutterstock.com/press/20453", False),
         # One name under a people path, not anything below it, and not an article that says profile.
         ("https://example.com/author/paul-sawers/feed/2026", False),
         ("https://example.com/2026/10/building-a-profile-service", False),

@@ -56,12 +56,23 @@ URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
 UNSUBSCRIBE_WORD = re.compile(r"unsub(?:scri|(?![a-z]))")
 UNSUBSCRIBE_TOKENS = frozenset({"optout", "opt-out", "opt_out", "disable_email"})
 # Where a link leads to a person rather than a story: a writer's or editor's profile, one name under a
-# people path, or a stock-photo site, whose pages are the photographer and the photo a header image
-# credits. SANS NewsBites signs each editor's comment with a link to the editor's profile, and the
-# extractor gave six items of one issue those links; Risky Business credits its images on Unsplash,
-# and two items took the photo's page.
+# people path, or the photo and photographer a header image credits. SANS NewsBites signs each
+# editor's comment with a link to the editor's profile, and the extractor gave six items of one issue
+# those links; Risky Business credits its images on Unsplash, and two items took the photo's page.
 PROFILE_PATH = re.compile(r"/(?:authors?|profiles?|people|contributors?|staff)/[^/]+/?", re.IGNORECASE)
-STOCK_PHOTO_SITES = frozenset({"unsplash", "pexels", "pixabay", "shutterstock", "istockphoto", "gettyimages"})
+# A stock-photo site's pages for one photo or one photographer, by the path's first part; an @name is
+# a photographer on any of them, and each serves its images from a host of their own. The rest of the
+# site can be the story: Getty's newsroom on its suit against Stability AI, Shutterstock's on selling
+# its library to OpenAI for training.
+STOCK_PHOTO_PAGES = {
+    "unsplash": frozenset({"photos", "illustrations"}),
+    "pexels": frozenset({"photo", "video"}),
+    "pixabay": frozenset({"photos", "illustrations", "vectors", "videos", "users"}),
+    "shutterstock": frozenset({"image-photo", "image-vector", "image-illustration", "editorial", "video", "g"}),
+    "istockphoto": frozenset({"photo", "vector", "video", "portfolio"}),
+    "gettyimages": frozenset({"detail"}),
+}
+STOCK_PHOTO_IMAGE_HOSTS = frozenset({"images", "image", "plus", "media", "cdn"})
 # Characters that print as nothing. Senders pad the preview text with them, alternating with no-break
 # spaces, so that a mail client shows no more of the body in the inbox: TLDR's four editions each
 # send 52 such pairs, 264 tokens of nothing. Only runs go: one such character alone is part of the
@@ -102,7 +113,15 @@ def person_link(url: str) -> bool:
         host = (parts.hostname or "").casefold()
     except ValueError:
         return False
-    return bool(PROFILE_PATH.fullmatch(unquote(parts.path))) or not STOCK_PHOTO_SITES.isdisjoint(host.split("."))
+    path = unquote(parts.path)
+    if PROFILE_PATH.fullmatch(path):
+        return True
+    labels = host.split(".")
+    pages = next((STOCK_PHOTO_PAGES[label] for label in labels if label in STOCK_PHOTO_PAGES), None)
+    if pages is None:
+        return False
+    first = path.strip("/").split("/")[0].casefold()
+    return labels[0] in STOCK_PHOTO_IMAGE_HOSTS or first.startswith("@") or first in pages
 
 
 class EmailExtractionError(ValueError):
