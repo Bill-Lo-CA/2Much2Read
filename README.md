@@ -180,8 +180,7 @@ A story newsletters keep returning to over several days is one that matters, so 
 checked against the items of the previous `DIGEST_REPEAT_WINDOW_DAYS` (default 3) calendar days - not
 today, even when another run already stored some of today's newsletters - and
 one found there is marked in the digest - "🔁 前 3 天中有 2 天也有報導" on a headline, "🔁 2/3 天" on a
-mention - and handed to the reviewer as `previous_days`, which it is told to weigh as a sign of
-importance. The same article link settles a match outright. Otherwise the review model decides, as it
+mention. The same article link settles a match outright. Otherwise the review model decides, as it
 does for same-day merging, but only for a shortlisted pair: one sharing a versioned product name
 ("Opus 5.5", "GPT-6", "Qwen-Image-2.1"), or tokens rare across the last 30 days of items. Rarity has
 to be measured over the longer period, because a story that repeats makes its own name common - within
@@ -190,6 +189,19 @@ of its best matches, asked in turn, and only entries that can be shown are check
 candidates before the review, and the mentions after merging, which frees slots for ones further down.
 Each is judged once, under a shared budget of `DIGEST_REPEAT_JUDGEMENTS` (default 60). On the 2026-09-25 candidates that took 26 judgements and 14
 seconds and marked Claude Opus 5.5, GPT-6 Sol and Luna, and Grok 4.7, with no false matches.
+
+A repeated candidate is then compared with what the latest six of those earlier reports said: the
+review model lists the concrete facts of today's reports, every newsletter's that merged into it,
+and keeps those no earlier report states, in any wording. A story with new facts has moved on; they
+go to the reviewer with `previous_days`, which it is told to weigh as more important, and its mark
+reads "🔁 前 3 天中有 1 天也有報導，今天有新進展". A story with none repeats what the reader already
+had, and may be a mention but not a headline; the next candidate takes its reviewer slot, and is
+checked in turn, until a check finds no repeat. Asked for a verdict alone, the model found new
+details in all 19 repeated headlines of 2026-10-15 to 10-22; made to list and check the facts, it
+found none in 9, each a repeat (the GitLab flaw of the 14th, retold on the 15th), and about half of
+the other ten were plain updates (a patch released, a model in production). A check that fails, or
+that would not fit `OLLAMA_NUM_CTX` even with the latest earlier report alone, leaves the story as
+it was.
 
 Several newsletters cover the same story, and the reviewer drops the copies from its own selection,
 which used to land them in the secondary section under the headline they duplicate. Repeat coverage
