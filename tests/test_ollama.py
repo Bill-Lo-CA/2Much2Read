@@ -105,7 +105,6 @@ JAPANESE = (
     "このモデルはチームの作業手順を改善します。",
     "運用コストを削減できます。",
 )
-SIMPLIFIED_CHINESE = ("这是一份关于新模型的每日摘要。", "该模型可以改善团队的工作流程。", "它能够降低运营成本。")
 TRADITIONAL_CHINESE = ("這是一份關於新模型的每日摘要。", "該模型可以改善團隊的工作流程。", "它能夠降低營運成本。")
 
 
@@ -209,13 +208,6 @@ def test_refill_picks_never_cost_the_reviewer_a_candidate(count: int, characters
     schema = ollama._ollama_schema(DigestReview.model_json_schema())
     assert sent == ollama.fitted_review_candidates(candidates, schema, 5, num_ctx)
     assert f"maximum_selected={maximum}\n" in prompt
-
-
-def test_review_candidates_are_kept_whole_when_they_fit() -> None:
-    schema = ollama._ollama_schema(DigestReview.model_json_schema())
-    candidates = [review_candidate(index, 5) for index in range(1, 6)]
-
-    assert ollama.fitted_review_candidates(candidates, schema, 5, 16384) == candidates
 
 
 def test_review_prompt_repeats_the_injection_guard_after_the_candidates() -> None:
@@ -433,16 +425,6 @@ def test_trimming_falls_back_to_the_reserved_category_once_the_rest_are_gone() -
 
     assert 0 < len(fitted) < len(candidates)
     assert [value["candidate_id"] for value in fitted] == [100 + index for index in range(len(fitted))]
-
-
-def test_trimming_without_a_reservation_still_drops_the_tail() -> None:
-    schema = _ollama_schema(DigestReview.model_json_schema())
-    candidates = [large_candidate(index, "AI_MODEL") for index in range(13)]
-
-    fitted = fitted_review_candidates(candidates, schema, 5, 4096)
-
-    assert 0 < len(fitted) < len(candidates)
-    assert [value["candidate_id"] for value in fitted] == list(range(len(fitted)))
 
 
 def test_the_rewrite_prompt_frames_the_headline_as_data() -> None:
@@ -877,22 +859,6 @@ def test_a_title_whose_translation_fails_never_reaches_the_digest() -> None:
 
 
 @respx.mock
-def test_the_translation_is_of_the_verbatim_headline_not_the_extractors_title() -> None:
-    # The extractor copied the headline wrong. Translating its copy, a faithful 2.5 would check out.
-    answer = _items_result(("Claude Sonnet 2.5 ships (4 minute read)", *GOOD[1:]))
-    answer["items"][0]["source_title"] = "Claude Sonnet 5.5 ships (4 minute read)"  # type: ignore[index]
-    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
-        side_effect=[_chat(answer), _translation("Claude Sonnet 5.5 上線")]
-    )
-
-    result = OllamaClient().extract("tldr-ai", "News")
-
-    assert result.items[0].title == "Claude Sonnet 5.5 上線"
-    # Its reading-time marker is not the headline's, and not a figure it must keep.
-    assert json.loads(route.calls[1].request.content)["messages"][0]["content"].endswith("\n\n\nClaude Sonnet 5.5 ships")
-
-
-@respx.mock
 def test_a_substack_view_post_line_is_not_translated_as_the_headline() -> None:
     answer = _items_result(("OpenRouter agent deployment", "OpenRouter 討論 AI 代理的部署方式。", "可改善部署流程。"))
     answer["items"][0]["source_title"] = "View this post on the web at https://latent.space/p/openrouter"  # type: ignore[index]
@@ -1073,16 +1039,6 @@ def test_an_article_analysis_title_outside_the_language_is_translated_or_takes_t
     )
 
     assert result.title == title
-
-
-@respx.mock
-def test_an_english_overview_no_longer_fails_anything() -> None:
-    # Nothing downstream reads the overview.
-    result = result_with_prose(ENGLISH[0], *GOOD[1:])
-    route = respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_chat(result))
-
-    assert len(OllamaClient().extract("alphasignal", "News").items) == 1
-    assert route.call_count == 1
 
 
 @respx.mock

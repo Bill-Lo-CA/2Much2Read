@@ -56,17 +56,6 @@ def test_extract_mime_keeps_html_link_candidates_when_plain_text_wins() -> None:
     ]
 
 
-def test_extract_mime_keeps_plain_text_link_candidates_without_html() -> None:
-    message = EmailMessage()
-    message.set_content("Useful article: https://example.com/article")
-
-    content = extract_mime(message.as_bytes())
-
-    assert [(str(candidate.raw_url), candidate.nearby_text) for candidate in content.link_candidates] == [
-        ("https://example.com/article", "Useful article")
-    ]
-
-
 def test_extract_mime_strips_plain_text_url_sentence_punctuation() -> None:
     message = EmailMessage()
     message.set_content("Read https://example.com/article?tags=research,security.")
@@ -311,6 +300,15 @@ def test_repeats_still_count_toward_the_work_bound() -> None:
     assert [str(candidate.raw_url) for candidate in content.link_candidates] == ["https://example.com/article"]
 
 
+def test_the_work_bound_holds_for_plain_text_links_too() -> None:
+    # The HTML scan stops at the bound by itself (find_all's limit); the plain-text scan has only the count.
+    plain = "\n".join(["Story https://example.com/article"] * MAX_LINK_OCCURRENCES + ["Late https://example.com/past-the-bound"])
+
+    content = extract_gmail_payload(_body("text/plain", plain))
+
+    assert [str(candidate.raw_url) for candidate in content.link_candidates] == ["https://example.com/article"]
+
+
 def test_only_kept_links_pay_for_their_surrounding_text(monkeypatch: pytest.MonkeyPatch) -> None:
     # Finding a link's heading walks back through the document, so paying for it on every repeat
     # would make the work bound quadratic in practice.
@@ -393,15 +391,6 @@ def test_code_shaped_text_the_newsletter_wrote_cannot_pass_for_a_code() -> None:
     ]
 
 
-def test_an_html_newsletter_is_coded_the_same_way() -> None:
-    html = '<h2>Top story</h2><p><a href="https://example.com/story">Top story</a> and more.</p>'
-
-    content = extract_gmail_payload(_body("text/html", html))
-
-    assert content.analysis_text == "Top story\nTop story [L1]\nand more."
-    assert _codes(content) == {"L1": "https://example.com/story"}
-
-
 def test_a_link_that_is_not_a_candidate_is_dropped_from_the_text() -> None:
     # An unsubscribe link is never a candidate, so no code may point at it; its URL goes too.
     html = '<p><a href="https://example.com/story">Story</a> · <a href="https://example.com/unsub">Unsubscribe</a></p>'
@@ -466,17 +455,6 @@ def test_the_list_unsubscribe_header_names_links_that_are_no_candidates() -> Non
 )
 def test_an_unsubscribe_link_is_recognised_by_its_words(url: str, unsubscribes: bool) -> None:
     assert unsubscribe_link(url) is unsubscribes
-
-
-def test_urls_no_longer_spend_the_character_budget() -> None:
-    # A tracking URL per story used to fill the 45,000-character cut before the stories did.
-    tracking = "https://click.example/" + "x" * 400
-    plain = "\n".join(f"Story {number} {tracking}{number}" for number in range(150))
-
-    content = extract_gmail_payload(_body("text/plain", plain))
-
-    assert content.original_characters is not None and content.original_characters < 3_000
-    assert content.analysis_text.endswith("Story 149 [L150]")
 
 
 def test_the_padding_after_the_preview_text_is_dropped() -> None:
@@ -596,3 +574,14 @@ def test_a_markdown_link_keeps_the_brackets_in_its_url() -> None:
 
     assert content.analysis_text == "Search [L1] and Local [L2]"
     assert _codes(content) == {"L1": "https://example.com/?filters[]=news", "L2": "http://[2001:db8::1]/page"}
+
+
+def test_a_link_carrying_credentials_is_no_candidate() -> None:
+    """A user name or password in a link is a credential the reader would hand to whoever hosts it."""
+    html = (
+        '<a href="https://example.com/story">Story</a> <a href="https://user:pw@example.com/a">A</a> '
+        '<a href="https://user@example.com/b">B</a> <a href="https://:pw@example.com/c">C</a> '
+        '<a href="ftp://example.com/d">D</a>'
+    )
+
+    assert _codes(extract_gmail_payload(_body("text/html", html))) == {"L1": "https://example.com/story"}

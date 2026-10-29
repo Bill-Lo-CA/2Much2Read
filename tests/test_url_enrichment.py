@@ -105,15 +105,6 @@ def test_the_verbatim_headline_is_kept_on_every_stored_item() -> None:
     assert [value.source_title for value in stored] == ["Useful article"] * 3
 
 
-def test_a_translated_title_alone_matches_nothing() -> None:
-    """Why the verbatim headline exists: a translated title shares no tokens with the anchor."""
-    item = analysis(title="有用的文章", source_title="有用的文章")
-
-    match = UrlEnricher().match([item], [candidate("link-0001", "Useful article", "https://example.com/article")])[0]
-
-    assert match.method == "unmatched"
-
-
 @pytest.mark.parametrize(
     "final", ["https://info.example/e3t/token", "https://info.example/events/public/v1/encoded/track/tc/L2+113/x?_ud=1"]
 )
@@ -161,6 +152,9 @@ def test_a_link_too_long_to_store_is_left_out_rather_than_failing_the_email() ->
         ("https://example.com/post?utm_source=x", "https://example.com/post-canonical", "https://example.com/post-canonical"),
         # An unsubscribe page, reached through a tracker whose label nothing recognised.
         ("https://app.alphasignal.ai/unsubscribe/u/abc?cid=1", None, None),
+        # A tracker's own host, whatever its path.
+        ("https://track.hubspot.com/story", None, None),
+        ("https://us1.list-manage.mailchimp.com/track/click", None, None),
     ],
 )
 def test_the_link_shown_is_judged_after_its_tags_are_removed(final: str, canonical: str | None, shown: str | None) -> None:

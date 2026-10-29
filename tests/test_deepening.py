@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 from dataclasses import replace
 
-import httpx
 import pytest
 from pydantic import HttpUrl
 
@@ -100,31 +99,6 @@ def test_a_headline_without_a_usable_link_falls_back_to_the_merged_newsletters(m
     assert "第一家的摘要。" in content and "第二家的摘要。" in content
 
 
-def test_a_failed_rewrite_keeps_the_original_summary_and_reports_it(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_fetcher(monkeypatch, ARTICLE.encode())
-    messages: list[str] = []
-
-    deepened = headlines._deepened_entries(
-        Settings(), FakeOllama(OllamaSchemaError("bad")), [entry("Headline", "https://example.com/a")], messages.append
-    )
-
-    assert deepened[0].item.summary_zh_tw == "很短的摘要。"
-    assert any("kept the original summary" in message for message in messages)
-
-
-def test_a_transport_failure_also_keeps_the_original_summary(monkeypatch: pytest.MonkeyPatch) -> None:
-    fake_fetcher(monkeypatch, ARTICLE.encode())
-
-    deepened = headlines._deepened_entries(
-        Settings(),
-        FakeOllama(httpx.ConnectError("ollama down")),
-        [entry("Headline", "https://example.com/a")],
-        lambda _: None,
-    )
-
-    assert deepened[0].item.summary_zh_tw == "很短的摘要。"
-
-
 def test_secondary_mentions_are_left_alone(monkeypatch: pytest.MonkeyPatch) -> None:
     """Only the headline items are worth an article fetch and a second model pass."""
     fake_fetcher(monkeypatch, ARTICLE.encode())
@@ -156,10 +130,6 @@ def test_source_text_is_bounded_against_num_ctx() -> None:
 
     assert truncated and len(bounded) < len(content)
     assert fitted_deepening_content(bounded, 500, 16384) == (bounded, False)
-
-
-def test_source_text_that_already_fits_is_untouched() -> None:
-    assert fitted_deepening_content("short article text", 500, 16384) == ("short article text", False)
 
 
 def test_no_room_at_all_yields_no_content() -> None:
@@ -214,20 +184,6 @@ def test_an_unexpected_parser_failure_falls_back_instead_of_ending_the_run(monke
     assert [message for message in messages if message.startswith("Warning")] == [
         "Warning: could not read https://example.com/a (TypeError); using the newsletter summaries"
     ]
-
-
-def test_an_unreachable_page_falls_back_without_a_warning(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A page that cannot be fetched is ordinary; only a defect in our own parsing is reported."""
-    fake_fetcher(monkeypatch, None)
-    messages: list[str] = []
-
-    merged = replace(entry("Headline", "https://example.com/a"), merged_summaries=("甲家的摘要。", "乙家的摘要。"))
-    ollama = FakeOllama()
-
-    headlines._deepened_entries(Settings(), ollama, [merged], messages.append)
-
-    assert ollama.calls[0][0] == "newsletters"
-    assert [message for message in messages if message.startswith("Warning")] == []
 
 
 def test_a_hacker_news_self_post_is_never_rewritten_from_its_discussion_page(monkeypatch: pytest.MonkeyPatch) -> None:

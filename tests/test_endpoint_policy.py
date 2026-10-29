@@ -12,6 +12,15 @@ from two_read_runtime.endpoint_policy import (
 )
 
 
+def test_an_endpoint_is_stored_without_its_trailing_slash() -> None:
+    assert validate_ollama_endpoint("http://127.0.0.1:11434/").url == "http://127.0.0.1:11434"
+
+
+@pytest.mark.parametrize("port", [1, 65535])
+def test_the_whole_port_range_is_accepted(port: int) -> None:
+    assert validate_ollama_endpoint(f"http://127.0.0.1:{port}").url == f"http://127.0.0.1:{port}"
+
+
 @pytest.mark.parametrize(
     "value",
     ["http://127.0.0.1:11434", "http://[::1]:11434", "http://localhost", "https://localhost:11434"],
@@ -39,7 +48,12 @@ def test_remote_ollama_requires_https_and_opt_in() -> None:
     [
         "not a URL",
         "http://user:password@127.0.0.1:11434",
+        # A user name alone, or a password alone, is a credential in the URL all the same.
+        "http://user@127.0.0.1:11434",
+        "http://:secret@127.0.0.1:11434",
         "http://127.0.0.1:99999",
+        "http://127.0.0.1:0",
+        " http://127.0.0.1:11434",
         "http://127.0.0.1:11434#fragment",
     ],
 )
@@ -64,6 +78,14 @@ def test_allows_official_discord_webhooks(host: str) -> None:
         "http://discord.com/api/webhooks/123/secret-token",
         "https://example.com/api/webhooks/123/secret-token",
         "https://user:password@discord.com/api/webhooks/123/secret-token",
+        "https://user@discord.com/api/webhooks/123/secret-token",
+        "https://:pw@discord.com/api/webhooks/123/secret-token",
+        " https://discord.com/api/webhooks/123/secret-token",
+        "https://discord.com/api/webhooks/abc/secret-token",
+        "https://discord.com/api/webhooks/１２３/secret-token",
+        "https://discord.com/api/webhooks/123/sécret-token",
+        "https://discord.com/api/webhooks/123/secret+token",
+        "https://discord.com/api/webhooks/123/",
         "https://discord.com:444/api/webhooks/123/secret-token",
         "https://discord.com/api/webhooks/123",
         "https://discord.com/api/webhooks/123/secret-token#fragment",

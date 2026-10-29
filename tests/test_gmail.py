@@ -185,3 +185,48 @@ def test_ensure_source_filter_reuses_existing_filter() -> None:
     assert client.ensure_source_filters([source]) == [FilterStatus("news", "ai-newsPaper", "Filter_1", "exists")]
     service.users().labels().create.assert_not_called()
     service.users().settings().filters().create.assert_not_called()
+
+
+def _client_with_labels() -> tuple[GmailClient, MagicMock]:
+    client = object.__new__(GmailClient)
+    client.service = MagicMock()
+    client.labels = {"INBOX": "INBOX", "Work": "Label_9", "NewsletterBot/Processed": "Label_P", "NewsletterBot/Failed": "Label_F"}
+    return client, client.service.users.return_value.messages.return_value.modify
+
+
+@pytest.mark.parametrize("method", ["add_labels", "remove_labels"])
+def test_only_the_bots_own_labels_are_ever_added_or_removed(method: str) -> None:
+    """The mailbox is the user's: a label outside NewsletterBot/ is never touched, even beside an owned one."""
+    client, modify = _client_with_labels()
+
+    for names in (["INBOX"], ["Work"], ["NewsletterBot/Processed", "INBOX"]):
+        with pytest.raises(ValueError, match="non-NewsletterBot"):
+            getattr(client, method)("m1", names)
+
+    modify.assert_not_called()
+
+
+def test_owned_labels_are_added_and_removed_by_their_ids() -> None:
+    client, modify = _client_with_labels()
+
+    client.add_labels("m1", ["NewsletterBot/Processed"])
+    client.labels["NewsletterBot/failed"] = client.labels.pop("NewsletterBot/Failed")
+    client.remove_labels("m1", ["NewsletterBot/Failed", "NewsletterBot/Unknown"])
+    client.remove_labels("m1", ["NewsletterBot/Unknown"])
+
+    assert [call.kwargs for call in modify.call_args_list] == [
+        {"userId": "me", "id": "m1", "body": {"addLabelIds": ["Label_P"]}},
+        # Found however Gmail cases it; one that does not exist is skipped, and none at all asks nothing.
+        {"userId": "me", "id": "m1", "body": {"removeLabelIds": ["Label_F"]}},
+    ]
+
+
+@pytest.mark.parametrize(("state", "added", "removed"), [("processed", "Label_P", "Label_F"), ("failed", "Label_F", "Label_P")])
+def test_a_processing_label_replaces_the_other_one(state: str, added: str, removed: str) -> None:
+    client, modify = _client_with_labels()
+
+    client.sync_processing_label("m1", state)
+
+    modify.assert_called_once_with(userId="me", id="m1", body={"addLabelIds": [added], "removeLabelIds": [removed]})
+    with pytest.raises(ValueError, match="unknown processing state"):
+        client.sync_processing_label("m1", "archived")
