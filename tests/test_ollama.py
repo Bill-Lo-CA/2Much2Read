@@ -19,11 +19,12 @@ from two_much_two_read.ollama import (
     checked_title,
     create_ollama_client,
     fitted_review_candidates,
+    kept_stories,
     source_headline,
     title_from_summary,
     translated_from,
 )
-from two_much_two_read.schemas import DigestReview
+from two_much_two_read.schemas import DigestReview, NewsletterItemAnalysis
 
 
 def valid_result() -> dict[str, object]:
@@ -1277,3 +1278,132 @@ def test_a_headline_translation_is_held_to_the_title_schema(answer: str) -> None
     respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_translation(answer))
 
     assert OllamaClient().translated_headline("OpenAI blocks distillation attack") is None
+
+
+def _story(title: str, importance: int) -> NewsletterItemAnalysis:
+    values = {**_items_result((title, "發布新模型。", "可改善工作流程。"))["items"][0], "importance": importance}  # type: ignore[index]
+    return NewsletterItemAnalysis.model_validate(values)
+
+
+def test_kept_stories_drop_the_sponsors_and_keep_the_strongest_share_in_issue_order() -> None:
+    items = [
+        _story("Critical GitLab flaw lets anyone run code", 9),
+        _story("GET 25% MORE FROM YOUR TRAINING GPUS (SPONSOR)", 8),
+        _story("A minor CSS release", 3),
+        _story("Plex flaw exploited to drop a cryptominer", 7),
+        _story("See what happens when security becomes part of the AI SDLC", 6),
+        _story("Nikkei discloses a third breach in a month", 6),
+    ]
+    sponsored = ["TOMORROW: SEE WHAT HAPPENS WHEN SECURITY BECOMES PART OF THE AI SDLC"]
+
+    kept = kept_stories(items, sponsored, 0.7)
+
+    # Four stories once the two sponsors go; 70% of four is 2.8, so three, the weakest one left out.
+    assert [item.source_title for item in kept] == [
+        "Critical GitLab flaw lets anyone run code",
+        "Plex flaw exploited to drop a cryptominer",
+        "Nikkei discloses a third breach in a month",
+    ]
+
+
+def test_a_story_sharing_some_words_with_a_sponsor_is_not_taken_for_it() -> None:
+    items = [_story("OpenAI launches GPT-5", 9)]
+
+    assert kept_stories(items, ["Train with OpenAI GPT-5 at our webinar"], 1.0) == items
+
+
+@pytest.mark.parametrize(("stories", "kept"), [(10, 7), (20, 14), (3, 3), (1, 1), (0, 0)])
+def test_the_share_kept_rounds_up_to_whole_stories(stories: int, kept: int) -> None:
+    items = [_story(f"Story number {index}", 5) for index in range(stories)]
+
+    assert len(kept_stories(items, [], 0.7)) == kept
+
+
+def _scan(*stories: tuple[str, bool]) -> httpx.Response:
+    return _chat({"stories": [{"headline": headline, "sponsored": sponsored} for headline, sponsored in stories]})
+
+
+@respx.mock
+def test_an_issue_without_a_cap_is_scanned_and_asked_for_every_entry_it_counted() -> None:
+    scan = _scan(
+        ("Model release", False), ("GET MORE FROM YOUR GPUS (SPONSOR)", True), ("Second release", False), ("Third release", False)
+    )
+    answer = _items_result(
+        GOOD, ("第二個發布", "第二個模型發布。", "可改善速度。"), ("第三個發布", "第三個模型發布。", "可降低成本。")
+    )
+    answer["items"][0]["source_title"] = "Model release"  # type: ignore[index]
+    answer["items"][1]["source_title"] = "Second release"  # type: ignore[index]
+    answer["items"][2]["source_title"] = "Third release"  # type: ignore[index]
+    answer["items"][2]["importance"] = 4  # type: ignore[index]
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[scan, _chat(answer)])
+
+    result = OllamaClient(keep_share=0.6).extract("tldr-ai", "News", max_items=None)
+
+    scan_request = json.loads(route.calls[0].request.content)
+    extract_prompt = json.loads(route.calls[1].request.content)["messages"][1]["content"]
+    assert "sponsored" in json.dumps(scan_request["format"]) and scan_request["model"] == "llama3.2:3b"
+    # Four entries asked for, the sponsor too; it goes, and 60% of three stories (1.8) rounds up to two.
+    assert "max_items=4\n" in extract_prompt
+    assert [item.source_title for item in result.items] == ["Model release", "Second release"]
+
+
+@respx.mock
+def test_a_sponsor_the_extractor_kept_anyway_is_dropped_by_the_scans_word_and_costs_no_story() -> None:
+    scan = _scan(("Vector search can't tell which memory is current", True), ("Model release", False))
+    answer = _items_result(("向量搜尋", "向量搜尋無法區分記憶體。", "可改善代理。"), GOOD)
+    answer["items"][0]["source_title"] = "VECTOR SEARCH CAN'T TELL WHICH MEMORY IS CURRENT"  # type: ignore[index]
+    answer["items"][1]["source_title"] = "Model release"  # type: ignore[index]
+    respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[scan, _chat(answer)])
+
+    result = OllamaClient(keep_share=1.0).extract("tldr-dev", "News", max_items=None)
+
+    assert [item.source_title for item in result.items] == ["Model release"]
+
+
+@respx.mock
+def test_an_issue_cut_to_fit_the_scan_is_asked_for_at_least_the_old_cap() -> None:
+    """The stories past the cut were never counted, so three counted may be three of twenty."""
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        side_effect=[
+            _scan(("Model release", False), ("Second release", False), ("Third release", False)),
+            _chat(_items_result(GOOD)),
+        ]
+    )
+
+    OllamaClient(num_ctx=8192).extract("tldr-ai", "A long story. " * 3000, max_items=None)
+
+    scanned = json.loads(route.calls[0].request.content)["messages"][1]["content"]
+    assert len(scanned) < 3000 * len("A long story. ")
+    assert "max_items=10\n" in json.loads(route.calls[1].request.content)["messages"][1]["content"]
+
+
+@respx.mock
+def test_a_failed_scan_falls_back_to_the_old_cap() -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_translation("not json"), _chat(_items_result(GOOD))])
+
+    result = OllamaClient().extract("tldr-ai", "News", max_items=None)
+
+    assert len(result.items) == 1
+    assert "max_items=10\n" in json.loads(route.calls[1].request.content)["messages"][1]["content"]
+
+
+@respx.mock
+def test_an_issue_listed_past_the_most_stories_is_not_counted() -> None:
+    """AINews, a recap without headlines, came back as one "story" per paragraph."""
+    scan = _scan(*((f"Paragraph {index} of the recap", False) for index in range(26)))
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[scan, _chat(_items_result(GOOD))])
+
+    result = OllamaClient(keep_share=0.5).extract("swyx-substack-com", "News", max_items=None)
+
+    # The old cap, and no share taken of what it returns.
+    assert "max_items=10\n" in json.loads(route.calls[1].request.content)["messages"][1]["content"]
+    assert len(result.items) == 1
+
+
+@respx.mock
+def test_a_fixed_cap_skips_the_scan() -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_chat(_items_result(GOOD)))
+
+    OllamaClient().extract("latent-space", "News", max_items=1)
+
+    assert route.call_count == 1

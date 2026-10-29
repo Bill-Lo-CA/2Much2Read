@@ -100,7 +100,7 @@ def inspect_mail(settings: Settings, selector: MailSelector, message_id: str, li
             )
             if source is not None and not isinstance(source, GmailSource):
                 raise ValueError(f"source {source_id!r} is not a Gmail source")
-            max_items = source.max_items_per_email if source else 10
+            max_items = source.max_items_per_email if source else None
             ollama = create_ollama_client(settings)
             try:
                 extraction = ollama.extract(source_id, llm_input, truncated, max_items).model_dump(mode="json")
