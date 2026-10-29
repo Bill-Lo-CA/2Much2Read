@@ -190,16 +190,18 @@ candidates before the review, and the mentions after merging, which frees slots 
 Each is judged once, under a shared budget of `DIGEST_REPEAT_JUDGEMENTS` (default 60). On the 2026-09-25 candidates that took 26 judgements and 14
 seconds and marked Claude Opus 5.5, GPT-6 Sol and Luna, and Grok 4.7, with no false matches.
 
-A repeated candidate is then compared with what those earlier reports said: the review model lists
-the concrete facts of today's report and keeps those no earlier report states, in any wording. A
-story with new facts has moved on; they go to the reviewer with `previous_days`, which it is told to
-weigh as more important, and its mark reads "🔁 前 3 天中有 1 天也有報導，今天有新進展". A story
-with none repeats what the reader already had, and may be a mention but not a headline; the next
-candidate takes its reviewer slot, and is checked in turn. Asked for a verdict alone, the model found
-new details in all 19 repeated headlines of 2026-10-15 to 10-22; made to list and check the facts, it
+A repeated candidate is then compared with what the latest six of those earlier reports said: the
+review model lists the concrete facts of today's reports, every newsletter's that merged into it,
+and keeps those no earlier report states, in any wording. A story with new facts has moved on; they
+go to the reviewer with `previous_days`, which it is told to weigh as more important, and its mark
+reads "🔁 前 3 天中有 1 天也有報導，今天有新進展". A story with none repeats what the reader already
+had, and may be a mention but not a headline; the next candidate takes its reviewer slot, and is
+checked in turn, until a check finds no repeat. Asked for a verdict alone, the model found new
+details in all 19 repeated headlines of 2026-10-15 to 10-22; made to list and check the facts, it
 found none in 9, each a repeat (the GitLab flaw of the 14th, retold on the 15th), and about half of
-the other ten were plain updates (a patch released, a model in production). A check that fails leaves
-the story as it was.
+the other ten were plain updates (a patch released, a model in production). A check that fails, or
+that would not fit `OLLAMA_NUM_CTX` even with the latest earlier report alone, leaves the story as
+it was.
 
 Several newsletters cover the same story, and the reviewer drops the copies from its own selection,
 which used to land them in the secondary section under the headline they duplicate. Repeat coverage

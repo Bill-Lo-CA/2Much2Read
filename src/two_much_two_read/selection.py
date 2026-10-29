@@ -169,9 +169,7 @@ def _review_candidates(ranked: list[DigestEntry], limit: int, security_slots: in
 # rather than staying empty. Beyond the limit they are ordinary mentions. The reviewer asks for fewer,
 # or none, when they would cost it a candidate; see OllamaClient.review_digest.
 REVIEW_REFILL_PICKS = 5
-# Rounds of asking what a repeat adds, each over the candidates a repeat's departure let in.
-NEW_FACTS_ROUNDS = 3
-# How many earlier reports a repeat is compared with.
+# How many earlier reports a repeat is compared with: the latest, which carry the most facts.
 NEW_FACTS_EARLIER_REPORTS = 6
 
 
@@ -353,12 +351,13 @@ def _selected_entries(
     ranked = mark_repeats(ranked, lambda entry: id(entry) in reviewing)
     ranked = merge_before_selection(ranked, may_be_shown, same_story)
     # A repeat with nothing new leaves the reviewer's candidates, and the next entry takes its place,
-    # so that one is marked and asked in turn, until no candidate is found to repeat.
-    for _ in range(NEW_FACTS_ROUNDS):
+    # so that one is marked and asked in turn, until a round finds no repeat. A round that goes on
+    # has removed a candidate for good, and no entry is asked twice, so this ends.
+    asked: set[int] = set()
+    repeats = True
+    while repeats:
         ranked = mark_repeats(ranked, _one_of(reviewer_candidates(ranked)))
-        ranked, repeats = _with_new_facts(ollama, ranked, {id(entry) for entry in reviewer_candidates(ranked)})
-        if not repeats:
-            break
+        ranked, repeats = _with_new_facts(ollama, ranked, {id(entry) for entry in reviewer_candidates(ranked)}, asked)
     merged, security_floor = _merged_entries(
         _reviewed_entries(settings, ollama, ranked),
         settings.digest_secondary_items,
@@ -375,19 +374,34 @@ def _one_of(entries: list[DigestEntry]) -> Callable[[DigestEntry], bool]:
     return lambda entry: id(entry) in wanted
 
 
-def _with_new_facts(ollama: JudgesNewFacts, entries: list[DigestEntry], wanted: set[int]) -> tuple[list[DigestEntry], bool]:
-    """The entries with what each wanted repeat adds to the earlier days' reports; True if one adds nothing."""
+def _with_new_facts(
+    ollama: JudgesNewFacts, entries: list[DigestEntry], wanted: set[int], asked: set[int]
+) -> tuple[list[DigestEntry], bool]:
+    """The entries with what each wanted repeat adds to the earlier days' reports; True if one adds nothing.
+
+    Today's report is every newsletter's that merged into the entry: the new fact may be in one
+    folded in. Each entry is asked once, by its candidate id in asked, so a failed check is not
+    repeated every round.
+    """
     judged: list[DigestEntry] = []
     repeats = False
     for entry in entries:
-        if id(entry) in wanted and entry.previous_days and entry.earlier_summaries and entry.new_facts is None:
+        if (
+            id(entry) in wanted
+            and entry.previous_days
+            and entry.earlier_summaries
+            and entry.new_facts is None
+            and entry.candidate_id not in asked
+        ):
+            if entry.candidate_id is not None:
+                asked.add(entry.candidate_id)
             facts = ollama.new_facts(
                 {
                     "title": entry.item.title,
-                    "summary": entry.item.summary_zh_tw,
+                    "summary": "\n".join(entry.merged_summaries or (entry.item.summary_zh_tw,)),
                     "why_it_matters": entry.item.why_it_matters_zh_tw,
                 },
-                list(entry.earlier_summaries[:NEW_FACTS_EARLIER_REPORTS]),
+                list(entry.earlier_summaries[-NEW_FACTS_EARLIER_REPORTS:]),
             )
             if facts is not None:
                 entry = replace(entry, new_facts=facts)
