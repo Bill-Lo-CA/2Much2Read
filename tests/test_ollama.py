@@ -1300,3 +1300,20 @@ def test_new_facts_are_asked_of_the_review_model_and_none_means_a_repeat() -> No
     assert client.new_facts(today, ["Ivanti 已修補。"]) is None
     request = json.loads(route.calls[0].request.content)
     assert request["model"] == "qwen3:8b" and "<untrusted_reports>" in request["messages"][1]["content"]
+
+
+@respx.mock
+def test_the_new_facts_prompt_leaves_out_the_oldest_reports_to_fit_num_ctx() -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(return_value=_chat({"new_facts": [], "new_details": False}))
+    client = OllamaClient(num_ctx=2048)
+    today = {"title": "Ivanti 修補", "summary": "Ivanti 已修補。", "why_it_matters": "需更新。"}
+    earlier = [f"第 {day} 天：" + "Ivanti 漏洞細節" * 40 for day in range(6)]
+
+    assert client.new_facts(today, earlier) == ()
+    sent = json.loads(route.calls[0].request.content)["messages"][1]["content"]
+    payload = json.loads(sent.split("<untrusted_reports>\n", 1)[1].split("\n</untrusted_reports>", 1)[0])
+    assert 0 < len(payload["earlier"]) < len(earlier) and payload["earlier"] == earlier[-len(payload["earlier"]) :]
+
+    # Not even the latest fits beside today's: nothing is asked, and nothing is known.
+    assert client.new_facts({**today, "summary": "Ivanti 已修補。" * 400}, earlier) is None
+    assert route.call_count == 1

@@ -726,16 +726,39 @@ def test_a_repeat_carries_what_the_earlier_reports_said() -> None:
     linked = replace(entry(1, "Opus 5.5 pricing", "TLDR AI"), article_url="https://anthropic.com/opus")
     judged = entry(2, "Claude Opus 5.5 is 40% cheaper", "TLDR AI")
     earlier = [
-        said(23, 100, "Anthropic releases Opus 5.5", "Anthropic 發布 Opus 5.5。", "https://anthropic.com/opus"),
-        said(24, 101, "Anthropic releases Claude Opus 5.5", "Opus 5.5 價格下降。"),
+        said(23, 100, "Anthropic releases Opus 5.5", "Anthropic 發布 Opus 5.5。"),
+        said(24, 101, "Anthropic releases Claude Opus 5.5", "Opus 5.5 價格下降。", "https://anthropic.com/opus"),
     ]
 
     marked = with_previous_coverage([linked, judged], earlier, lambda _l, _r: True, 3, [])
 
-    # The link settles the first on the 23rd; the second shares "opus 5.5" with both days, and the
-    # model's yes on each brings each day's report.
-    assert marked[0].earlier_summaries[0] == "Anthropic 發布 Opus 5.5。"
-    assert marked[1].earlier_summaries == ("Anthropic 發布 Opus 5.5。", "Opus 5.5 價格下降。")
+    # The link settles the first on the 24th, and the model's yes adds the 23rd; the second shares
+    # "opus 5.5" with both days, and the model's yes on each brings each day's report. Either way
+    # they come oldest first, so the new-facts check can keep the latest.
+    assert marked[0].earlier_summaries == marked[1].earlier_summaries == ("Anthropic 發布 Opus 5.5。", "Opus 5.5 價格下降。")
+
+
+def test_the_new_facts_check_reads_every_report_merged_today_against_the_latest_earlier_ones() -> None:
+    asked: list[tuple[dict[str, str], list[str]]] = []
+
+    class Judge:
+        def new_facts(self, today: dict[str, str], earlier: list[str]) -> tuple[str, ...] | None:
+            asked.append((today, earlier))
+            return ()
+
+    merged = replace(
+        entry(1, "Ivanti patches the exploited VPN flaw", "THN"),
+        merged_summaries=("Ivanti 警告 VPN 零日漏洞。", "10 月 13 日已釋出修補。"),
+        previous_days=3,
+        previous_window=3,
+        earlier_summaries=tuple(f"第 {day} 份報導。" for day in range(8)),
+    )
+
+    selection._with_new_facts(Judge(), [merged], {id(merged)}, set())
+
+    today, earlier = asked[0]
+    assert "10 月 13 日已釋出修補。" in today["summary"]
+    assert earlier == [f"第 {day} 份報導。" for day in range(2, 8)]
 
 
 def test_a_repeat_with_nothing_new_may_not_headline() -> None:
@@ -803,6 +826,44 @@ def test_a_repeat_with_nothing_new_gives_its_reviewer_slot_to_the_next_candidate
     mentions = [value.item.title for value in shown if value.review_score is None]
     assert headlines == ["Ivanti patches the exploited VPN flaw", "PHP releases emergency fixes"]
     assert mentions == ["GitLab patches a CVSS 10.0 flaw"]
+
+
+def test_repeats_are_asked_until_a_round_finds_none_and_each_only_once() -> None:
+    """Three rounds used to stop there, and the fourth repeat in a row reached the reviewer unasked."""
+    asked: list[str] = []
+    handed: list[list[dict[str, object]]] = []
+
+    def mark(entries: list[DigestEntry], wanted: Callable[[DigestEntry], bool]) -> list[DigestEntry]:
+        return [
+            replace(value, previous_days=1, previous_window=3, earlier_summaries=("昨天的報導。",))
+            if wanted(value) and value.item.title != "A fresh story" and not value.previous_days
+            else value
+            for value in entries
+        ]
+
+    class Reviewer:
+        def new_facts(self, today: dict[str, str], earlier: list[str]) -> tuple[str, ...] | None:
+            asked.append(today["title"])
+            # The check fails for the first; it stays a candidate, and is not asked again each round.
+            return None if today["title"] == "A check that fails" else ()
+
+        def review_digest(self, candidates: list[dict[str, object]], maximum: int, *_: object) -> DigestReview:
+            handed.append(candidates)
+            return DigestReview.model_validate(
+                {"selected": [{"candidate_id": c["candidate_id"], "score": 90, "reason_zh_tw": "具體"} for c in candidates]}
+            )
+
+        def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
+            return False
+
+    titles = ["A check that fails", *(f"Repeat number {number}" for number in range(1, 5)), "A fresh story"]
+    ranked = [entry(index, title, f"Source {index}") for index, title in enumerate(titles, start=1)]
+    settings = Settings(digest_review_candidate_limit=2, digest_secondary_items=5)
+
+    selection._selected_entries(settings, Reviewer(), ranked, mark, lambda _message: None)
+
+    assert asked == titles[:5]
+    assert [c["candidate_id"] for c in handed[0]] == [1, 6]
 
 
 def test_an_update_says_so_beside_its_repeat_mark() -> None:

@@ -255,6 +255,8 @@ REVIEW_RESERVED_TOKENS_PER_SELECTION = 280
 REVIEW_RESERVED_OUTPUT_TOKENS = 256
 # A deepened item may use both 800-character fields, which is far more output than a review needs.
 DEEPEN_RESERVED_OUTPUT_TOKENS = 1600
+# Eight facts at most, each a sentence of Traditional Chinese.
+NEW_FACTS_RESERVED_OUTPUT_TOKENS = 800
 # Measured on twenty real ten-item extractions: at most 1911 output tokens, so 250 per item plus the
 # overview leaves margin. A repair round also carries the first answer back, and is refitted for it.
 EXTRACT_RESERVED_TOKENS_PER_ITEM = 250
@@ -1106,10 +1108,33 @@ class OllamaClient:
         """The facts today's report of a story adds to the earlier days' reports: empty if none, None if unknown.
 
         Runs on the review model, resident from selection. A failure is no evidence either way, so
-        the story is treated as it was before this was asked.
+        the story is treated as it was before this was asked. The earlier reports come oldest first,
+        and the oldest are left out until the prompt fits num_ctx, since Ollama would cut an
+        oversized one from its head, instructions first. If even the latest leaves no room, the
+        check is not asked, as if it had failed.
         """
         schema = _ollama_schema(NewFacts.model_json_schema())
-        payload = json.dumps({"today": today, "earlier": earlier}, ensure_ascii=False)
+
+        def prompt_for(reports: list[str]) -> str:
+            payload = json.dumps({"today": today, "earlier": reports}, ensure_ascii=False)
+            return f"Schema: {json.dumps(schema)}\n<untrusted_reports>\n{payload}\n</untrusted_reports>"
+
+        budget = (
+            self.num_ctx - _estimated_tokens(NEW_FACTS_SYSTEM_PROMPT) - NEW_FACTS_RESERVED_OUTPUT_TOKENS - CHAT_TEMPLATE_TOKENS
+        )
+        reports = list(earlier)
+        while reports and _estimated_tokens(prompt_for(reports)) > budget:
+            reports.pop(0)
+        if not reports:
+            logger.warning("new-facts check skipped: the reports exceed num_ctx=%d", self.num_ctx)
+            return None
+        if len(reports) < len(earlier):
+            logger.warning(
+                "new-facts prompt exceeds num_ctx=%d; comparing with %d of %d earlier reports",
+                self.num_ctx,
+                len(reports),
+                len(earlier),
+            )
         raw = ""
         try:
             response = self._client.post(
@@ -1118,10 +1143,7 @@ class OllamaClient:
                     "model": self.review_model,
                     "messages": [
                         {"role": "system", "content": NEW_FACTS_SYSTEM_PROMPT},
-                        {
-                            "role": "user",
-                            "content": f"Schema: {json.dumps(schema)}\n<untrusted_reports>\n{payload}\n</untrusted_reports>",
-                        },
+                        {"role": "user", "content": prompt_for(reports)},
                     ],
                     "format": schema,
                     "stream": False,

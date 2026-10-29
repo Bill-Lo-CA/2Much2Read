@@ -417,7 +417,7 @@ def with_previous_coverage(
         names = versioned_names(entry)
         linked = [(day, other) for day, other, other_link, _, _ in earlier if link is not None and link == other_link]
         days = {day for day, _ in linked}
-        reports = [other.item.summary_zh_tw for _, other in linked]
+        reports = [(day, other.item.summary_zh_tw) for day, other in linked]
         shortlist: dict[date, list[tuple[tuple[int, float], int, DigestEntry]]] = {}
         for position, (day, other, _, other_tokens, other_names) in enumerate(earlier):
             score = (len(names & other_names), weight(tokens & other_tokens))
@@ -428,10 +428,11 @@ def with_previous_coverage(
             match = next((other for _, _, other in best_first[:REPEAT_JUDGEMENTS_PER_DAY] if same_story(entry, other)), None)
             if match is not None:
                 days.add(day)
-                reports.append(match.item.summary_zh_tw)
+                reports.append((day, match.item.summary_zh_tw))
         # An entry checked after merging may already carry a larger count from one it absorbed.
         days_carried = max(entry.previous_days, min(len(days), window))
-        summaries = tuple(dict.fromkeys((*entry.earlier_summaries, *reports)))
+        # Oldest first, so a caller short of room can keep the latest.
+        summaries = tuple(dict.fromkeys((*entry.earlier_summaries, *(summary for _, summary in sorted(reports)))))
         marked.append(
             replace(entry, previous_days=days_carried, previous_window=window, earlier_summaries=summaries) if days else entry
         )
