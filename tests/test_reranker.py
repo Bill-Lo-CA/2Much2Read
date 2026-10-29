@@ -128,7 +128,7 @@ def test_the_hub_is_asked_only_for_a_model_not_on_disk(
 
     fetched: list[str] = []
 
-    def snapshot_download(repo_id: str, *, local_files_only: bool = False) -> str:
+    def snapshot_download(repo_id: str, *, cache_dir: str | None = None, local_files_only: bool = False) -> str:
         if local_files_only:
             if not cached:
                 raise LocalEntryNotFoundError("not cached")
@@ -140,6 +140,28 @@ def test_the_hub_is_asked_only_for_a_model_not_on_disk(
 
     assert ensure_reranker_model("Qwen/test") is (not cached)
     assert fetched == downloads
+
+
+def test_the_model_is_checked_and_fetched_where_sentence_transformers_loads_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import huggingface_hub
+    from huggingface_hub.errors import LocalEntryNotFoundError
+
+    cache_dirs: list[str | None] = []
+
+    def snapshot_download(repo_id: str, *, cache_dir: str | None = None, local_files_only: bool = False) -> str:
+        cache_dirs.append(cache_dir)
+        if local_files_only:
+            raise LocalEntryNotFoundError("not cached")
+        return "/cache/snapshot"
+
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+    monkeypatch.setenv("SENTENCE_TRANSFORMERS_HOME", str(tmp_path))
+
+    ensure_reranker_model("Qwen/test")
+
+    assert cache_dirs == [str(tmp_path), str(tmp_path)]
 
 
 def test_a_local_model_directory_needs_no_hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

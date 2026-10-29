@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import gc
 import hashlib
+import os
 from collections.abc import Sequence
 from dataclasses import replace
 from pathlib import Path
@@ -36,16 +37,21 @@ def ensure_reranker_model(model_name: str) -> bool:
     though nothing changes it between runs. The Hub is now asked only when the model is not cached:
     the first run downloads it here, before Gmail is read, so a failed download costs nothing, and
     RelevanceReranker then loads from disk alone. A local directory needs neither.
+
+    The cache is the one CrossEncoder will load from: SENTENCE_TRANSFORMERS_HOME when it is set,
+    otherwise the Hub's own. Checking the Hub's cache while CrossEncoder looked in another would
+    pass the check and then fail the load offline.
     """
     if Path(model_name).expanduser().is_dir():
         return False
     from huggingface_hub import snapshot_download
     from huggingface_hub.errors import LocalEntryNotFoundError
 
+    cache_dir = os.getenv("SENTENCE_TRANSFORMERS_HOME")
     try:
-        snapshot_download(model_name, local_files_only=True)
+        snapshot_download(model_name, cache_dir=cache_dir, local_files_only=True)
     except LocalEntryNotFoundError:
-        snapshot_download(model_name)
+        snapshot_download(model_name, cache_dir=cache_dir)
         return True
     return False
 
