@@ -641,6 +641,7 @@ class Database:
         placeholders = ",".join("?" for _ in document_ids)
         rows = self.connection.execute(
             f"""SELECT i.*,d.published_at,d.source_id,d.source_type,d.discussion_url,d.content_basis,d.external_id,
+            d.content_characters,(SELECT COUNT(*) FROM items s WHERE s.document_id=i.document_id) AS document_items,
             h.score AS hn_score,h.descendants AS hn_comments,h.final_url
             FROM items i JOIN documents d ON d.id=i.document_id
             LEFT JOIN hackernews_document_state h ON h.document_id=d.id

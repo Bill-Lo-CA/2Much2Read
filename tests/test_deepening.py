@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import base64
 import json
 from dataclasses import replace
+from typing import Any
 
 import httpx
 import pytest
@@ -68,6 +70,44 @@ def fake_fetcher(monkeypatch: pytest.MonkeyPatch, body: bytes | None) -> None:
             return FetchedArticle(url, url, "text/html", body)
 
     monkeypatch.setattr(headlines, "ArticleFetcher", FakeFetcher)
+
+
+class FakeGmail:
+    def __init__(self, text: str | None) -> None:
+        self.text = text
+        self.read: list[str] = []
+
+    def get_message(self, message_id: str) -> dict[str, Any]:
+        self.read.append(message_id)
+        if self.text is None:
+            raise OSError("Gmail unreachable")
+        return {"payload": {"mimeType": "text/plain", "body": {"data": base64.urlsafe_b64encode(self.text.encode()).decode()}}}
+
+
+def test_a_newsletter_sent_as_one_piece_is_rewritten_from_its_email() -> None:
+    """The email is the piece itself, and only its hash and length were kept, so Gmail is asked again."""
+    ollama = FakeOllama()
+    gmail = FakeGmail("Mistral's Timestral has 209M parameters. Try it: https://mistral.ai/news/timestral\n" * 20)
+    essay = replace(entry("Timestral"), piece_email_id="gmail-1")
+
+    deepened = headlines._deepened_entries(Settings(), ollama, [essay], lambda _: None, gmail)
+
+    basis, content = ollama.calls[0]
+    assert gmail.read == ["gmail-1"] and basis == "email"
+    assert "209M parameters" in content and "[L1]" not in content and "mistral.ai" not in content
+    assert deepened[0].item.summary_zh_tw == "重寫後長很多的摘要內容。"
+
+
+@pytest.mark.parametrize("gmail", [FakeGmail(None), None], ids=["unreadable", "no-gmail"])
+def test_a_piece_whose_email_cannot_be_read_keeps_its_summary(gmail: FakeGmail | None) -> None:
+    ollama = FakeOllama()
+    messages: list[str] = []
+    essay = replace(entry("Timestral"), piece_email_id="gmail-1")
+
+    deepened = headlines._deepened_entries(Settings(), ollama, [essay], messages.append, gmail)
+
+    assert not ollama.calls and deepened == [essay]
+    assert bool(messages) is (gmail is not None)
 
 
 def test_a_headline_is_rewritten_from_the_article_body(monkeypatch: pytest.MonkeyPatch) -> None:

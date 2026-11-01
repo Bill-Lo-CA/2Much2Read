@@ -129,7 +129,7 @@ def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
             replace(entry, review_score=100 - index) for index, entry in enumerate(entries[: settings.digest_max_items])
         ],
     )
-    monkeypatch.setattr(pipeline, "_deepened_entries", lambda _settings, _ollama, entries, _status: entries)
+    monkeypatch.setattr(pipeline, "_deepened_entries", lambda _settings, _ollama, entries, _status, _gmail: entries)
 
 
 TRACKER = "https://info.example.io/e3t/Ctc/L2+113/abc"
@@ -842,7 +842,7 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
     monkeypatch.setattr(
         pipeline,
         "_deepened_entries",
-        lambda _settings, _ollama, entries, _status: recorded(events, "reviewer:deepen", entries),
+        lambda _settings, _ollama, entries, _status, _gmail: recorded(events, "reviewer:deepen", entries),
     )
 
     run_pipeline(settings, no_deliver=True)

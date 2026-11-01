@@ -279,7 +279,7 @@ def run_pipeline(
                 if security_floor is not None:
                     status(f"Security floor: promoted {security_floor.promoted}")
                 reviewed_entries = _checked_titles(settings, ollama, reviewed_entries, status)
-                reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status)
+                reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status, gmail)
             finally:
                 _unload_model(ollama, settings.ollama_review_model, status)
             content = render_digest(

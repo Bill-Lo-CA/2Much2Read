@@ -222,6 +222,32 @@ def test_items_for_documents_excludes_prior_runs(tmp_path: Path) -> None:
     database.close()
 
 
+def test_a_newsletter_sent_as_one_long_piece_is_its_items_source_text(tmp_path: Path) -> None:
+    """AlphaSignal's Sunday essay gave one item from 9,596 characters, and had no link to fetch."""
+    from two_much_two_read import selection
+
+    database = Database(tmp_path / "test.sqlite3")
+    piece, notice, issue = (
+        discover(database, gmail_id, body)
+        for gmail_id, body in (("essay", "x" * 9596), ("notice", "x" * 1500), ("issue", "x" * 9596))
+    )
+    assert piece is not None and notice is not None and issue is not None
+    database.store_extraction(piece, extraction("Essay"))
+    database.store_extraction(notice, extraction("Notice"))
+    two = extraction("First story")
+    database.store_extraction(issue, two.model_copy(update={"items": [*two.items, extraction("Second story").items[0]]}))
+
+    entries = selection._items(database, [piece, notice, issue], 10, {})
+
+    assert {entry.item.title: entry.piece_email_id for entry in entries} == {
+        "Essay": "essay",
+        "Notice": None,
+        "First story": None,
+        "Second story": None,
+    }
+    database.close()
+
+
 def test_save_digest_finalizes_staged_documents_atomically(tmp_path: Path) -> None:
     database = Database(tmp_path / "test.sqlite3")
     document_id = discover(database, "gmail-1")

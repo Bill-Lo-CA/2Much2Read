@@ -52,6 +52,19 @@ CVE_PATTERN = re.compile(r"(?<![A-Za-z0-9])CVE-\d{4}-\d{4,}(?![A-Za-z0-9])", re.
 # Below the 0-100 range DigestReviewSelection allows, so a story the floor promotes sorts after
 # every headline the reviewer chose, a zero-scored one included; _entry_rank keeps it a headline.
 FLOOR_REVIEW_SCORE = -1
+# A newsletter that sends one piece - AlphaSignal's Sunday essay, a Latent Space interview - gives one
+# item, and the extractor read all of the piece to write it, so the email is that item's source text
+# as an article is a link's. Shorter than this, one item is a notice rather than a piece: the shortest
+# such piece over two months ran to 5,023 characters, and one-item notices to 1,500.
+PIECE_MIN_CHARACTERS = 4000
+
+
+def _piece_email_id(row: dict[str, object]) -> str | None:
+    """The Gmail message a row's item is the whole of, or None; rows without the counts are no piece."""
+    characters = row.get("content_characters")
+    if row["source_type"] != "gmail" or row.get("document_items") != 1 or characters is None:
+        return None
+    return str(row["external_id"]) if int(str(characters)) >= PIECE_MIN_CHARACTERS else None
 
 
 def _items(database: Database, document_ids: list[int], limit: int, source_names: dict[str, str]) -> list[DigestEntry]:
@@ -84,6 +97,7 @@ def _items(database: Database, document_ids: list[int], limit: int, source_names
                 hn_comments=int(str(row["hn_comments"])) if row["hn_comments"] is not None else None,
                 hn_item_id=str(row["external_id"]) if row["source_type"] == "hackernews" else None,
                 content_basis=str(row["content_basis"]),
+                piece_email_id=_piece_email_id(row),
             )
         )
     return result

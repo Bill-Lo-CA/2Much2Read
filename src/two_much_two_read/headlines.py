@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from typing import Protocol
+from typing import Any, Protocol
 
 import httpx
 
@@ -14,6 +14,7 @@ from .digest import (
     DigestEntry,
     canonical_url,
 )
+from .mime import EmailExtractionError, extract_gmail_payload
 from .ollama import (
     OllamaContextError,
     OllamaSchemaError,
@@ -23,6 +24,7 @@ from .ollama import (
     translated_from,
 )
 from .schemas import (
+    LINK_CODE_TEXT,
     HeadlineCheck,
     ItemDeepening,
 )
@@ -31,6 +33,10 @@ from .stages import StatusReporter, _unload_model
 
 class DeepensItems(Protocol):
     def deepen_item(self, title: str, category: str, basis: str, content: str) -> ItemDeepening: ...
+
+
+class ReadsEmail(Protocol):
+    def get_message(self, message_id: str) -> dict[str, Any]: ...
 
 
 class ChecksTitles(Protocol):
@@ -55,12 +61,23 @@ def _article_to_deepen_from(entry: DigestEntry) -> str | None:
     return url
 
 
-def _headline_source(entry: DigestEntry, fetcher: ArticleFetcher, status: StatusReporter) -> tuple[str, str]:
-    """The fullest text available for a headline: the article itself, or the newsletters on it.
+def _email_text(gmail: ReadsEmail, message_id: str) -> str:
+    """A one-piece newsletter's email as the extractor read it, without the link codes it was given."""
+    payload = gmail.get_message(message_id).get("payload")
+    if not isinstance(payload, dict):
+        raise EmailExtractionError("message payload is not a MIME structure", "EMAIL_PAYLOAD_INVALID")
+    return LINK_CODE_TEXT.sub("", extract_gmail_payload(payload).analysis_text)
+
+
+def _headline_source(
+    entry: DigestEntry, fetcher: ArticleFetcher, status: StatusReporter, gmail: ReadsEmail | None = None
+) -> tuple[str, str]:
+    """The fullest text available for a headline: the article itself, the email, or the newsletters on it.
 
     The extractor's own summary is the floor, not the goal - it was written from a few lines of one
-    email. Email bodies are never persisted, so the article is the only route to more text, and the
-    merged newsletter coverage is the fallback when there is no link or the fetch fails.
+    email. Email bodies are never persisted, so the article is the route to more text. A newsletter
+    that sent one piece is the exception: the email is the piece, and it is read from Gmail again.
+    The merged newsletter coverage is the fallback when there is neither or a read fails.
     """
     url = _article_to_deepen_from(entry)
     if url:
@@ -78,6 +95,12 @@ def _headline_source(entry: DigestEntry, fetcher: ArticleFetcher, status: Status
             # is a defect rather than an unreachable page, so it is named: a silent fallback would
             # let the rewrite quietly stop working for a whole class of pages.
             status(f"Warning: could not read {url} ({type(error).__name__}); using the newsletter summaries")
+    if entry.piece_email_id is not None and gmail is not None:
+        try:
+            return _email_text(gmail, entry.piece_email_id), "email"
+        except Exception as error:
+            # Broad for the article's reason above, and the summary still stands.
+            status(f"Warning: could not read the email for {entry.item.title} ({type(error).__name__}); using its summary")
     summaries = entry.merged_summaries or (entry.item.summary_zh_tw,)
     return "\n\n".join((*summaries, entry.item.why_it_matters_zh_tw)), "newsletters"
 
@@ -153,7 +176,11 @@ def _checked_titles(
 
 
 def _deepened_entries(
-    settings: Settings, ollama: DeepensItems, entries: list[DigestEntry], status: StatusReporter
+    settings: Settings,
+    ollama: DeepensItems,
+    entries: list[DigestEntry],
+    status: StatusReporter,
+    gmail: ReadsEmail | None = None,
 ) -> list[DigestEntry]:
     if not settings.digest_deepen_headlines:
         return entries
@@ -163,7 +190,7 @@ def _deepened_entries(
         if entry.review_score is None:
             deepened.append(entry)
             continue
-        content, basis = _headline_source(entry, fetcher, status)
+        content, basis = _headline_source(entry, fetcher, status, gmail)
         if basis == "newsletters" and not entry.merged_summaries:
             # The fallback is this item's own summary, so there is nothing fuller to rewrite from.
             # The prompt asks for four to six sentences naming versions and numbers, and a single
