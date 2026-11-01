@@ -711,6 +711,13 @@ systemctl --user status 2much2read-runtime.timer 2busy1miss-runtime.timer 2busy1
 journalctl --user -u 2much2read-runtime.service -u 2busy1miss-runtime.service -u 2busy1miss-runtime-agenda.service -n 100 --no-pager
 ```
 
+A scheduled run has no terminal, so its progress lines go to the journal as log records instead:
+`LOG_LEVEL=INFO` shows them all, and the default `WARNING` only those that report something wrong,
+such as an article the headline rewrite could not parse. Before `LOG_LEVEL` was read, every one of
+them was dropped. It sets only 2much2read's own loggers: libraries keep Python's default of
+warnings and above, because httpx logs each request's full URL at INFO, and a Discord webhook URL
+carries its token.
+
 `LOCK_CONTENDED` means another local run is active; retry after it finishes.
 `DISCORD_DELIVERY_FAILED` leaves a durable destination delivery pending, so use the relevant
 retry command after fixing the webhook or network. `doctor` checks local setup
