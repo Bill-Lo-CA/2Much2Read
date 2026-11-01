@@ -167,14 +167,24 @@ a newsletter past it to keep a security story on top. An item whose article is t
 newsletter's own front page - the newsletter describing its issue - is dropped at extraction.
 
 A headline needs something behind it: an article to read, another newsletter's coverage of the same
-story, or a text the extractor read in full (a Hacker News story or self-post). An item with none of
-these may still be a mention, but it never reaches the reviewer, whose picks become headlines. Its
+story, or a text the extractor read in full (a Hacker News story or self-post, or a newsletter that
+sent one piece). An item with none of these may still be a mention, but it never reaches the
+reviewer, whose picks become headlines. Its
 summary is only what the extractor made of the newsletter's own text, and the headline rewrite has
 nothing fuller to work from. For a link list such as Hacker Newsletter, that text is the bare title:
 on 2026-09-25 two of the first six headlines were one-line guesses of this kind, and one of them was
 wrong. When copies of one story merge, the one with something behind it stays primary, whichever
 ranked higher. Each run's JSON reports `no_article_by_source`, the items and articleless items per
 source, which is the evidence for how much weight each source should get.
+
+A newsletter that sends one piece rather than a list of stories - AlphaSignal's Sunday essay, a
+Latent Space interview - gives one item, written from the whole email, and the email is that item's
+source text as an article is a link's. An email counts as one piece when it gave exactly one item
+and runs to at least 4,000 characters; over two months the shortest such piece ran to 5,023, and
+one-item notices to 1,500. AlphaSignal's essay used to reach Monday's digest among a dozen other
+emails, always as a mention, since it links to no article. Since the clocks went back it arrives
+before the 10:00 run, and on 2026-11-01 it was that day's only email, so the digest had no headline
+at all.
 
 A story newsletters keep returning to over several days is one that matters, so each candidate is
 checked against the items of the previous `DIGEST_REPEAT_WINDOW_DAYS` (default 3) calendar days - not
@@ -268,7 +278,9 @@ headline's article and rewrites its summary and significance on the review model
 merged newsletter coverage when there is no link or the fetch fails. A Hacker News self-post is
 always rewritten from that fallback: it has no article, so its stored URL is the discussion page,
 and extract_article cannot tell the author's post from the replies to it. Email bodies are never persisted
-- only their hash and length - so the article is the only route back to fuller text. The rewrite is
+- only their hash and length - so the article is the route back to fuller text. A newsletter that
+sent one piece is the exception: the email is the piece, so it is read from Gmail again for the
+rewrite, without its link codes. The rewrite is
 discarded, keeping the original summary, when the fetch or the model fails, when the model reports
 that the source text is not about this item, or when it answers in the wrong language. It is refused
 outright when trimming to `OLLAMA_NUM_CTX` leaves no source text at all — at 2048 the fixed prompt

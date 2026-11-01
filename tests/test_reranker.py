@@ -748,6 +748,30 @@ def test_what_counts_as_something_behind_an_entry(
     assert has_source_text(story) is expected
 
 
+def test_a_newsletter_sent_as_one_piece_has_its_email_behind_it() -> None:
+    essay = replace(
+        entry(1, "Why specialized foundation models matter", "AlphaSignal"), article_url=None, content_basis="newsletter"
+    )
+
+    assert not has_source_text(essay)
+    assert has_source_text(replace(essay, piece_email_id="gmail-1"))
+
+
+def test_only_a_newsletter_email_counted_with_its_items_can_be_a_piece() -> None:
+    # A Hacker News story is one item from one long document too, and has no email to read.
+    row: dict[str, object] = {
+        "source_type": "hackernews",
+        "document_items": 1,
+        "content_characters": 20000,
+        "external_id": "4242",
+    }
+
+    assert selection._piece_email_id(row) is None
+    assert selection._piece_email_id({**row, "source_type": "gmail"}) == "4242"
+    # The previous days' rows carry no counts.
+    assert selection._piece_email_id({"source_type": "gmail", "external_id": "4242"}) is None
+
+
 def test_a_second_copy_from_the_same_newsletter_is_not_coverage() -> None:
     # Deduping folds the copy's summary into merged_summaries, but it is the same newsletter's text
     # again; left counting, the title would reach the reviewer and could become a headline.

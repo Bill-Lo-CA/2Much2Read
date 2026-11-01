@@ -107,6 +107,9 @@ class DigestEntry:
     hn_comments: int | None = None
     hn_item_id: str | None = None
     content_basis: str | None = None
+    # The Gmail message this entry is the whole of, when a newsletter sent one piece; see
+    # selection.PIECE_MIN_CHARACTERS. The email is then the entry's source text, as an article is.
+    piece_email_id: str | None = None
     candidate_id: int | None = None
     source_type: str | None = None
     source_id: str | None = None
@@ -140,14 +143,20 @@ def has_source_text(entry: DigestEntry) -> bool:
 
     The article itself - read by the extractor for a Hacker News story, or linked from a newsletter
     and there for the headline rewrite to fetch - or another newsletter's coverage of the same
-    story. Without either, the summary is whatever the extractor made of the newsletter's text,
-    and for a link list that is the headline alone. A Hacker News post whose body could not be read
-    falls back to metadata and stores its discussion page as the article link; that page was never
-    read, so it counts for nothing. Nor does a second copy from the same newsletter, which merges
-    into merged_summaries as well but is the same text again: only another source's coverage counts,
-    and that is what also_from records.
+    story, or the email itself when a newsletter sent one piece and the extractor made one item of
+    all of it. Without any, the summary is whatever the extractor made of a few lines of the
+    newsletter's text, and for a link list that is the headline alone. A Hacker News post whose
+    body could not be read falls back to metadata and stores its discussion page as the article
+    link; that page was never read, so it counts for nothing. Nor does a second copy from the same
+    newsletter, which merges into merged_summaries as well but is the same text again: only another
+    source's coverage counts, and that is what also_from records.
     """
-    return entry.content_basis in {"article", "hn_self_post"} or _article_url(entry) is not None or bool(entry.also_from)
+    return (
+        entry.content_basis in {"article", "hn_self_post"}
+        or _article_url(entry) is not None
+        or bool(entry.also_from)
+        or entry.piece_email_id is not None
+    )
 
 
 # Campaign tags, and the parameters that carry the subscriber's own identity: a newsletter's click
