@@ -151,3 +151,32 @@ def test_token_status_distinguishes_missing_and_unusable_files(tmp_path: Path, c
         token_path.write_text(contents, encoding="utf-8")
 
     assert oauth.token_status(token_path, gmail.SCOPES) == expected
+
+
+@pytest.mark.parametrize(
+    ("scoped", "valid", "expired", "refresh_token", "expected"),
+    [
+        (False, True, False, "r", "reauth_required"),  # a token without every scope is reauthorized
+        (True, True, False, None, "ok"),
+        (True, False, True, "r", "refresh_needed"),
+        (True, False, True, None, "reauth_required"),
+        (True, False, False, "r", "reauth_required"),
+    ],
+)
+def test_token_status_reads_scopes_validity_and_refreshability(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    scoped: bool,
+    valid: bool,
+    expired: bool,
+    refresh_token: str | None,
+    expected: str,
+) -> None:
+    token_path = tmp_path / "token.json"
+    token_path.write_text("{}", encoding="utf-8")
+    credentials = MagicMock(valid=valid, expired=expired, refresh_token=refresh_token)
+    credentials.has_scopes.return_value = scoped
+    monkeypatch.setattr("two_read_runtime.oauth.Credentials.from_authorized_user_file", MagicMock(return_value=credentials))
+
+    assert oauth.token_status(token_path, gmail.SCOPES) == expected
+    credentials.has_scopes.assert_called_with(gmail.SCOPES)

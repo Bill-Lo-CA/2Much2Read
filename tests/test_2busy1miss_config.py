@@ -152,3 +152,10 @@ def test_agenda_schedule_time_requires_a_minute_precision_time() -> None:
 
     with pytest.raises(ValueError, match="HH:MM"):
         Settings(agenda_schedule_time="20:30:01")
+
+
+def test_an_unknown_reminder_timezone_is_rejected_when_the_settings_are_built() -> None:
+    assert Settings(reminder_timezone="Europe/Paris").reminder_timezone == "Europe/Paris"
+
+    with pytest.raises(ValueError, match="timezone"):
+        Settings(reminder_timezone="Not/A_Timezone")

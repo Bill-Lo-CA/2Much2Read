@@ -5,7 +5,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal, TypeAlias, cast
-from urllib.parse import parse_qsl, urlsplit
+from urllib.parse import urlsplit
 
 from pydantic import HttpUrl, ValidationError
 
@@ -18,7 +18,6 @@ MatchedBy: TypeAlias = Literal["model_link", "exact_anchor", "heading_context", 
 MatchMethod: TypeAlias = Literal[
     "model_link", "exact_anchor", "heading_context", "fuzzy_anchor", "url_slug", "unmatched", "ambiguous"
 ]
-TRACKING_PARAMETERS = {"mc_cid", "mc_eid", "mkt_tok"}
 
 
 @dataclass(frozen=True)
@@ -73,15 +72,15 @@ def _http_url(value: str | None) -> HttpUrl | None:
 def _tracking_url(value: str) -> bool:
     parts = urlsplit(value)
     hostname = (parts.hostname or "").casefold()
-    query_keys = {key.casefold() for key, _ in parse_qsl(parts.query, keep_blank_values=True)}
     path = parts.path.casefold()
+    # Mailchimp's and Marketo's subscriber parameters need no test here: canonical_url has already
+    # removed them from the link this is asked about.
     return (
         "/e3t/" in path
         # HubSpot's second hop, should a resolution ever stop on it.
         or "/events/public/v1/encoded/track/" in path
         or "hubspot" in hostname
         or "mailchimp" in hostname
-        or bool(query_keys & TRACKING_PARAMETERS)
     )
 
 

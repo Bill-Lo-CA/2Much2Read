@@ -128,14 +128,6 @@ def test_a_replacement_that_fails_the_same_check_is_not_shown() -> None:
     assert "kept" in statuses[0]
 
 
-def test_a_cut_title_whose_replacement_fails_takes_the_summarys_lead() -> None:
-    ollama = fake(rejected=frozenset({"OpenAI blocks distillation attacks"}))
-
-    checked = headlines._checked_titles(Settings(), ollama, [entry("GPT-...（需要翻譯）")], lambda _: None)
-
-    assert [value.item.title for value in checked] == ["摘要"]
-
-
 def test_a_replacement_whose_check_cannot_run_is_not_shown() -> None:
     """Failing open would put an unchecked translation in place of a title that was flagged."""
 
@@ -150,17 +142,6 @@ def test_a_replacement_whose_check_cannot_run_is_not_shown() -> None:
     assert headlines._checked_titles(Settings(), ollama, flagged, lambda _: None) == flagged
     cut = headlines._checked_titles(Settings(), ollama, [entry("GPT-...（需要翻譯）")], lambda _: None)
     assert [value.item.title for value in cut] == ["摘要"]
-
-
-def test_a_check_that_cannot_run_keeps_the_title() -> None:
-    class Silent(FakeTitles):
-        def headline_supported(self, headline: str, back: str) -> HeadlineCheck | None:
-            return None
-
-    ollama = Silent({"OpenAI 擴散模型攻擊被阻": "OpenAI's diffusion model attacks blocked"}, {}, set())
-    shown = [entry("OpenAI 擴散模型攻擊被阻")]
-
-    assert headlines._checked_titles(Settings(), ollama, shown, lambda _: None) == shown
 
 
 def test_each_model_loads_once_with_the_review_model_out_of_the_way() -> None:

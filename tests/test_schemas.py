@@ -4,7 +4,14 @@ import pytest
 from pydantic import ValidationError
 
 from two_much_two_read.digest import render_digest
-from two_much_two_read.schemas import ArticleAnalysis, DigestItem, EmailExtraction, ItemAnalysis, NewsletterItemAnalysis
+from two_much_two_read.schemas import (
+    ArticleAnalysis,
+    DigestItem,
+    EmailExtraction,
+    ItemAnalysis,
+    ItemDeepening,
+    NewsletterItemAnalysis,
+)
 
 
 def item_values(**updates: object) -> dict[str, object]:
@@ -87,6 +94,16 @@ def test_overview_rejects_urls_and_markdown_links() -> None:
     for value in ("Read https://example.com", "Read [this](https://example.com)"):
         with pytest.raises(ValidationError):
             EmailExtraction.model_validate(extraction_values(overview_zh_tw=value))
+
+
+@pytest.mark.parametrize("field", ["summary_zh_tw", "why_it_matters_zh_tw"])
+@pytest.mark.parametrize("value", ["Read https://example.com", "Read [this](https://example.com)"])
+def test_a_rewrite_from_article_text_may_not_bring_its_own_links(field: str, value: str) -> None:
+    values: dict[str, object] = {"covers_the_item": True, "summary_zh_tw": "摘要", "why_it_matters_zh_tw": "重要性"}
+    ItemDeepening.model_validate(values)
+
+    with pytest.raises(ValidationError):
+        ItemDeepening.model_validate({**values, field: value})
 
 
 def test_tags_are_normalized_and_bounded() -> None:
