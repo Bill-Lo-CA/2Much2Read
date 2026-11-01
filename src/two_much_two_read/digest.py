@@ -286,6 +286,9 @@ def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:
         # it does not block borrowing one: keeping it would lose both the link the renderer shows
         # and the fuller text the headline rewrite reads.
         article_url=_article_url(primary) or _article_url(other) or primary.article_url,
+        # A newsletter sent as one piece is all about this story, so its email is still the fullest
+        # text behind it when the primary's article cannot be read, or the primary has no article.
+        piece_email_id=primary.piece_email_id or other.piece_email_id,
         previous_days=max(primary.previous_days, other.previous_days),
         previous_window=max(primary.previous_window, other.previous_window),
         earlier_summaries=tuple(dict.fromkeys((*primary.earlier_summaries, *other.earlier_summaries))),

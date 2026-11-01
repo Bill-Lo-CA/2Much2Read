@@ -540,6 +540,22 @@ def test_absorbing_a_hacker_news_entry_keeps_its_discussion() -> None:
     assert (headlines[0].hn_item_id, headlines[0].hn_score, headlines[0].hn_comments) == ("456", 210, 64)
 
 
+def test_absorbing_a_newsletter_sent_as_one_piece_keeps_its_email() -> None:
+    """The headline rewrite falls back to that email when the primary's article cannot be read."""
+    headline = merged_entry(
+        "Timestral 時間序列模型", "Timestral 是時間序列基礎模型。", "AlphaSignal", "https://timestral.example", review_score=90
+    )
+    essay = replace(merged_entry("Timestral deep dive", "Timestral 的架構與評測。", "Latent Space"), piece_email_id="gmail-1")
+
+    headlines, _ = merge_related_entries([headline], [essay], judge(True)[0])
+    assert headlines[0].piece_email_id == "gmail-1"
+
+    # The primary's own email stays: it is the newsletter whose summary is shown.
+    own = replace(headline, piece_email_id="gmail-0")
+    headlines, _ = merge_related_entries([own], [essay], judge(True)[0])
+    assert headlines[0].piece_email_id == "gmail-0"
+
+
 def test_two_newsletters_on_one_article_keep_both_attributions() -> None:
     """The least ambiguous repeat coverage there is, and the case that used to lose the most.
 

@@ -280,7 +280,8 @@ always rewritten from that fallback: it has no article, so its stored URL is the
 and extract_article cannot tell the author's post from the replies to it. Email bodies are never persisted
 - only their hash and length - so the article is the route back to fuller text. A newsletter that
 sent one piece is the exception: the email is the piece, so it is read from Gmail again for the
-rewrite, without its link codes. The rewrite is
+rewrite, without its link codes. That holds after merging too: a headline that absorbed such a
+newsletter falls back to its email when its own article cannot be read. The rewrite is
 discarded, keeping the original summary, when the fetch or the model fails, when the model reports
 that the source text is not about this item, or when it answers in the wrong language. It is refused
 outright when trimming to `OLLAMA_NUM_CTX` leaves no source text at all — at 2048 the fixed prompt
