@@ -37,7 +37,7 @@ from .ollama import (
     close_ollama_client,
     create_ollama_client,
 )
-from .reranker import RelevanceReranker
+from .reranker import RelevanceReranker, ensure_reranker_model
 from .selection import (
     _items,
     _ranked_entries,
@@ -160,6 +160,10 @@ def run_pipeline(
                     )
                     run_status = result.status
                     return result
+            # Once, before any mail is read: a missing model is fetched here rather than failing the
+            # run after extraction, and the later load stays off the network.
+            if ensure_reranker_model(settings.reranker_model):
+                status(f"Downloaded {settings.reranker_model}")
             gmail: GmailClient | None = None
             if any(isinstance(source, GmailSource) for source in sources):
                 creds = credentials(
