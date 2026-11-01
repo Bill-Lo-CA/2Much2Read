@@ -15,9 +15,11 @@ sources:
       label: ai-newsPaper
       criteria:
         from: news@alphasignal.ai
-    # 1 for a newsletter that sends one article, essay, interview, or podcast episode an issue:
-    # the extractor then returns one item for the whole piece rather than one per section.
-    max_items_per_email: 10
+    # Leave unset to count each issue's stories first, drop its sponsored entries, and keep the
+    # strongest EXTRACT_KEEP_SHARE of the rest. Set 1 for a newsletter that sends one article, essay,
+    # interview, or podcast episode an issue: the extractor then returns one item for the whole piece
+    # rather than one per section. Any other number is a fixed cap, with no count.
+    # max_items_per_email: 1
 
   # Keep disabled until the Hacker News source is configured for your digest.
   - type: hackernews

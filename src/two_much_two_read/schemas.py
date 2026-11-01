@@ -274,6 +274,29 @@ class EmailExtraction(BaseModel):
         return value
 
 
+# The most stories one issue is counted as having. A scan that reaches one more is not counting
+# stories: AINews, a recap without headlines, came back as 80 "stories", one per paragraph.
+SCAN_MAX_STORIES = 25
+
+
+class ScannedStory(BaseModel):
+    headline: str
+    sponsored: bool
+
+    @field_validator("headline")
+    @classmethod
+    def shortened(cls, value: str) -> str:
+        # AINews has no headlines, and the scan copied whole paragraphs; a long one is cut, not refused.
+        return value[:300]
+
+
+class StoryScan(BaseModel):
+    """Every story a newsletter carries, in order, before any is extracted."""
+
+    # One past the most, so the grammar stops a runaway list there and the caller can tell.
+    stories: list[ScannedStory] = Field(max_length=SCAN_MAX_STORIES + 1)
+
+
 class FieldTranslation(BaseModel):
     # The title is input context only; ignore it if the model returns one.
     model_config = ConfigDict(extra="ignore")
