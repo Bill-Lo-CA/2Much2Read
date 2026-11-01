@@ -13,6 +13,8 @@ dependencies = [
   "google-api-python-client>=2.170,<3",
   "google-auth-oauthlib>=1.2,<2",
   "httpx>=0.28,<1",
+  # Imported directly by the reranker's model check; get_cached_repo_tree is in 1.26.
+  "huggingface-hub>=1.26,<2",
   "langdetect>=1.0.9,<2",
   "lxml>=5.4,<7",
   "pydantic>=2.11,<3",

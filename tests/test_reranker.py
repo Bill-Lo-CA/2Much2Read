@@ -136,6 +136,7 @@ def test_the_hub_is_asked_only_for_a_model_not_on_disk(
             fetched.append(repo_id)
         return "/cache/snapshot"
 
+    monkeypatch.setattr(huggingface_hub, "get_cached_repo_tree", lambda *a, **k: [])
     monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
 
     assert ensure_reranker_model("Qwen/test") is (not cached)
@@ -150,18 +151,44 @@ def test_the_model_is_checked_and_fetched_where_sentence_transformers_loads_it(
 
     cache_dirs: list[str | None] = []
 
+    def get_cached_repo_tree(repo_id: str, *, cache_dir: str | None = None) -> list[object]:
+        cache_dirs.append(cache_dir)
+        return []
+
     def snapshot_download(repo_id: str, *, cache_dir: str | None = None, local_files_only: bool = False) -> str:
         cache_dirs.append(cache_dir)
         if local_files_only:
             raise LocalEntryNotFoundError("not cached")
         return "/cache/snapshot"
 
+    monkeypatch.setattr(huggingface_hub, "get_cached_repo_tree", get_cached_repo_tree)
     monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
     monkeypatch.setenv("SENTENCE_TRANSFORMERS_HOME", str(tmp_path))
 
     ensure_reranker_model("Qwen/test")
 
-    assert cache_dirs == [str(tmp_path), str(tmp_path)]
+    assert cache_dirs == [str(tmp_path)] * 3
+
+
+def test_a_cache_without_its_file_listing_is_completed_online_once(monkeypatch: pytest.MonkeyPatch) -> None:
+    """CrossEncoder fills a cache file by file and leaves no listing, so the offline check passes a partial one."""
+    import huggingface_hub
+    from huggingface_hub.errors import CachedRepoTreeNotFoundError
+
+    fetched: list[bool] = []
+
+    def get_cached_repo_tree(repo_id: str, *, cache_dir: str | None = None) -> list[object]:
+        raise CachedRepoTreeNotFoundError("no listing")
+
+    def snapshot_download(repo_id: str, *, cache_dir: str | None = None, local_files_only: bool = False) -> str:
+        fetched.append(local_files_only)
+        return "/cache/snapshot"
+
+    monkeypatch.setattr(huggingface_hub, "get_cached_repo_tree", get_cached_repo_tree)
+    monkeypatch.setattr(huggingface_hub, "snapshot_download", snapshot_download)
+
+    assert ensure_reranker_model("Qwen/test") is True
+    assert fetched == [False]
 
 
 def test_a_local_model_directory_needs_no_hub(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

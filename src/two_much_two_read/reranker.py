@@ -41,16 +41,23 @@ def ensure_reranker_model(model_name: str) -> bool:
     The cache is the one CrossEncoder will load from: SENTENCE_TRANSFORMERS_HOME when it is set,
     otherwise the Hub's own. Checking the Hub's cache while CrossEncoder looked in another would
     pass the check and then fail the load offline.
+
+    The offline check tells a partial snapshot from a whole one only by the repo's file listing,
+    which snapshot_download caches and CrossEncoder, fetching file by file, does not. Without it, a
+    download cut short after the config would pass, and every run would then fail to load. A cache
+    without a listing, as every cache CrossEncoder filled is, is completed online once, and that
+    caches the listing for the runs after.
     """
     if Path(model_name).expanduser().is_dir():
         return False
-    from huggingface_hub import snapshot_download
-    from huggingface_hub.errors import LocalEntryNotFoundError
+    from huggingface_hub import get_cached_repo_tree, snapshot_download
+    from huggingface_hub.errors import CachedRepoTreeNotFoundError, LocalEntryNotFoundError
 
     cache_dir = os.getenv("SENTENCE_TRANSFORMERS_HOME")
     try:
+        get_cached_repo_tree(model_name, cache_dir=cache_dir)
         snapshot_download(model_name, cache_dir=cache_dir, local_files_only=True)
-    except LocalEntryNotFoundError:
+    except (CachedRepoTreeNotFoundError, LocalEntryNotFoundError):
         snapshot_download(model_name, cache_dir=cache_dir)
         return True
     return False
