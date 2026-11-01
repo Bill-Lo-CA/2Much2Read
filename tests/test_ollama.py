@@ -1377,6 +1377,18 @@ def test_an_issue_cut_to_fit_the_scan_is_asked_for_at_least_the_old_cap() -> Non
     assert "max_items=10\n" in json.loads(route.calls[1].request.content)["messages"][1]["content"]
 
 
+@pytest.mark.parametrize(("num_ctx", "asked"), [(6000, 10), (8192, 15), (16384, 25)])
+@respx.mock
+def test_no_more_stories_are_asked_for_than_the_context_has_room_for(num_ctx: int, asked: int) -> None:
+    """25 stories reserve 6,550 output tokens: at 6000 the newsletter had none, and the email failed for good."""
+    scan = _scan(*((f"Release number {index}", False) for index in range(25)))
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[scan, _chat(_items_result(GOOD))])
+
+    OllamaClient(num_ctx=num_ctx).extract("tldr-ai", "News", max_items=None)
+
+    assert f"max_items={asked}\n" in json.loads(route.calls[1].request.content)["messages"][1]["content"]
+
+
 @respx.mock
 def test_a_failed_scan_falls_back_to_the_old_cap() -> None:
     route = respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[_translation("not json"), _chat(_items_result(GOOD))])

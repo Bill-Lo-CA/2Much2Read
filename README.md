@@ -291,7 +291,9 @@ sponsors let 20 of 36 through, while the list marked 34 of them and no story, so
 dropped by the list. An issue whose list reaches 26 entries - a recap without headlines, such as
 AINews, listed paragraph by paragraph - is not counted, and up to ten items are taken as before, as
 they are when the list fails. An issue too long for the list's prompt is listed only up to the cut,
-so its count is taken as a floor of ten.
+so its count is taken as a floor of ten. Each item asked for reserves room for its output, so no
+more are asked for than half of `OLLAMA_NUM_CTX` has room for, and never fewer than ten: 25 at the
+default 16384, 15 at 8192.
 
 A newsletter that sends one piece an issue - an article, essay, interview, or podcast episode - is
 given `max_items_per_email: 1` in `sources.yaml`. The extractor otherwise cuts such a piece into items

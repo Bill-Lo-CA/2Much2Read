@@ -387,6 +387,17 @@ def fitted_extraction_content(content: str, overhead_tokens: int, num_ctx: int, 
     return bounded, len(bounded) < len(content)
 
 
+def _extraction_items_that_fit(num_ctx: int) -> int:
+    """The most items a scanned issue is asked for: what half of num_ctx reserves output for, or the
+    old cap of UNSCANNED_ITEMS if that is more.
+
+    Each item asked for reserves its output, and 25 stories reserve 6,550 tokens. At
+    OLLAMA_NUM_CTX=6000 that left the newsletter no room, and the email failed for good where the
+    old cap had read it. Half the window still leaves 16384 room for 25 stories.
+    """
+    return max(UNSCANNED_ITEMS, (num_ctx // 2 - EXTRACT_RESERVED_OUTPUT_BASE) // EXTRACT_RESERVED_TOKENS_PER_ITEM)
+
+
 def _cut_to(content: str, budget: int) -> str:
     """The content cut from its tail to at most budget estimated tokens; empty when there is no budget."""
     if budget <= 0:
@@ -680,7 +691,8 @@ class OllamaClient:
         keep_share of the rest are kept by importance. Sponsors are asked for too: the extractor
         cannot tell which they are, and one it took in a story's place pushed that story past the
         cap. An issue cut to fit the scan has stories past those counted, so there the count is a
-        floor, never below the old cap of UNSCANNED_ITEMS. A scan that fails leaves that cap.
+        floor, never below the old cap of UNSCANNED_ITEMS. A scan that fails leaves that cap. No
+        more are asked for than num_ctx has room for (_extraction_items_that_fit).
         """
         if max_items is not None:
             return self._extract(source_id, content, truncated, max_items)
@@ -692,6 +704,12 @@ class OllamaClient:
             return self._extract(source_id, content, truncated, UNSCANNED_ITEMS)
         sponsored = [story.headline for story in scan.stories if story.sponsored]
         wanted = max(len(scan.stories), UNSCANNED_ITEMS) if cut else len(scan.stories)
+        fitting = _extraction_items_that_fit(self.num_ctx)
+        if wanted > fitting:
+            logger.warning(
+                "extraction for %s: asking for %d of %d stories to fit num_ctx=%d", source_id, fitting, wanted, self.num_ctx
+            )
+            wanted = fitting
         result = self._extract(source_id, content, truncated, wanted)
         extracted = len(result.items)
         result.items = kept_stories(result.items, sponsored, self.keep_share)
