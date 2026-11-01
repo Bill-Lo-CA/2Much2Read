@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import re
 from collections import Counter
 from collections.abc import Callable, Sequence
@@ -24,7 +25,7 @@ from .digest import (
     DigestEntry,
     _entry_rank,
     dedupe_entries,
-    has_source_text,
+    may_headline,
     merge_before_selection,
     merge_related_entries,
     story_tokens,
@@ -40,6 +41,7 @@ from .schemas import (
 from .stages import StatusReporter
 from .storage import Database
 
+logger = logging.getLogger(__name__)
 # The category whose reviewer slots are reserved by DIGEST_SECURITY_CANDIDATE_SLOTS, and whose
 # stories _with_security_floor keeps in every digest that has one to show.
 RESERVED_CATEGORY = "SECURITY"
@@ -167,6 +169,8 @@ def _review_candidates(ranked: list[DigestEntry], limit: int, security_slots: in
 # rather than staying empty. Beyond the limit they are ordinary mentions. The reviewer asks for fewer,
 # or none, when they would cost it a candidate; see OllamaClient.review_digest.
 REVIEW_REFILL_PICKS = 5
+# How many earlier reports a repeat is compared with: the latest, which carry the most facts.
+NEW_FACTS_EARLIER_REPORTS = 6
 
 
 def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[DigestEntry]) -> list[DigestEntry]:
@@ -179,7 +183,7 @@ def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[Di
     # headlines, and rejoins the passed-over candidates below.
     everything = ranked
     ranked = _review_candidates(
-        [entry for entry in everything if has_source_text(entry)],
+        [entry for entry in everything if may_headline(entry)],
         settings.digest_review_candidate_limit,
         settings.digest_security_candidate_slots,
     )
@@ -199,6 +203,7 @@ def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[Di
                 # is a sign it matters, as previous_days is.
                 "source": ", ".join(name for name in (entry.source_name, *entry.also_from) if name),
                 **({"previous_days": entry.previous_days} if entry.previous_days else {}),
+                **({"new_facts": list(entry.new_facts)} if entry.new_facts else {}),
             }
         )
     # The context fitter trims from the tail, where the reserved candidates sit by design.
@@ -219,9 +224,7 @@ def _reviewed_entries(settings: Settings, ollama: ReviewsDigest, ranked: list[Di
     # after merging, so a mention absorbed into a headline frees its slot for the next candidate.
     reviewed = {id(entry) for entry in ranked}
     unselected = [
-        entry
-        for entry in everything
-        if entry.candidate_id not in scores and (id(entry) in reviewed or not has_source_text(entry))
+        entry for entry in everything if entry.candidate_id not in scores and (id(entry) in reviewed or not may_headline(entry))
     ]
     return selected + unselected
 
@@ -308,7 +311,11 @@ def _repeat_marker(
     return mark
 
 
-class ReviewsAndJudges(ReviewsDigest, JudgesSameStory, Protocol):
+class JudgesNewFacts(Protocol):
+    def new_facts(self, today: dict[str, str], earlier: list[str]) -> tuple[str, ...] | None: ...
+
+
+class ReviewsAndJudges(ReviewsDigest, JudgesSameStory, JudgesNewFacts, Protocol):
     pass
 
 
@@ -325,7 +332,7 @@ def _selected_entries(
 
     def reviewer_candidates(entries: list[DigestEntry]) -> list[DigestEntry]:
         return _review_candidates(
-            [entry for entry in entries if has_source_text(entry)],
+            [entry for entry in entries if may_headline(entry)],
             settings.digest_review_candidate_limit,
             settings.digest_security_candidate_slots,
         )
@@ -333,7 +340,7 @@ def _selected_entries(
     def may_be_shown(entries: list[DigestEntry]) -> list[DigestEntry]:
         # The reviewer's candidates, whose picks are the headlines and the rest mentions, and the
         # entries without source text that lead the mentions.
-        bare = [entry for entry in entries if not has_source_text(entry)]
+        bare = [entry for entry in entries if not may_headline(entry)]
         return reviewer_candidates(entries) + bare[: settings.digest_secondary_items]
 
     # Marked before merging as well as after: a repeat found only through a report that folds into
@@ -343,8 +350,14 @@ def _selected_entries(
     reviewing = {id(entry) for entry in reviewer_candidates(ranked)}
     ranked = mark_repeats(ranked, lambda entry: id(entry) in reviewing)
     ranked = merge_before_selection(ranked, may_be_shown, same_story)
-    reviewing = {id(entry) for entry in reviewer_candidates(ranked)}
-    ranked = mark_repeats(ranked, lambda entry: id(entry) in reviewing)
+    # A repeat with nothing new leaves the reviewer's candidates, and the next entry takes its place,
+    # so that one is marked and asked in turn, until a round finds no repeat. A round that goes on
+    # has removed a candidate for good, and no entry is asked twice, so this ends.
+    asked: set[int] = set()
+    repeats = True
+    while repeats:
+        ranked = mark_repeats(ranked, _one_of(reviewer_candidates(ranked)))
+        ranked, repeats = _with_new_facts(ollama, ranked, {id(entry) for entry in reviewer_candidates(ranked)}, asked)
     merged, security_floor = _merged_entries(
         _reviewed_entries(settings, ollama, ranked),
         settings.digest_secondary_items,
@@ -354,6 +367,49 @@ def _selected_entries(
         picks=settings.digest_max_items,
     )
     return mark_repeats(merged, lambda _entry: True), security_floor
+
+
+def _one_of(entries: list[DigestEntry]) -> Callable[[DigestEntry], bool]:
+    wanted = {id(entry) for entry in entries}
+    return lambda entry: id(entry) in wanted
+
+
+def _with_new_facts(
+    ollama: JudgesNewFacts, entries: list[DigestEntry], wanted: set[int], asked: set[int]
+) -> tuple[list[DigestEntry], bool]:
+    """The entries with what each wanted repeat adds to the earlier days' reports; True if one adds nothing.
+
+    Today's report is every newsletter's that merged into the entry: the new fact may be in one
+    folded in. Each entry is asked once, by its candidate id in asked, so a failed check is not
+    repeated every round.
+    """
+    judged: list[DigestEntry] = []
+    repeats = False
+    for entry in entries:
+        if (
+            id(entry) in wanted
+            and entry.previous_days
+            and entry.earlier_summaries
+            and entry.new_facts is None
+            and entry.candidate_id not in asked
+        ):
+            if entry.candidate_id is not None:
+                asked.add(entry.candidate_id)
+            facts = ollama.new_facts(
+                {
+                    "title": entry.item.title,
+                    "summary": "\n".join(entry.merged_summaries or (entry.item.summary_zh_tw,)),
+                    "why_it_matters": entry.item.why_it_matters_zh_tw,
+                },
+                list(entry.earlier_summaries[-NEW_FACTS_EARLIER_REPORTS:]),
+            )
+            if facts is not None:
+                entry = replace(entry, new_facts=facts)
+                if not facts:
+                    repeats = True
+                    logger.warning("repeat with nothing new, kept from the headlines: %s", entry.item.title)
+        judged.append(entry)
+    return judged, repeats
 
 
 def _story_judge(ollama: JudgesSameStory, budget: int, status: StatusReporter) -> Callable[[DigestEntry, DigestEntry], bool]:
@@ -416,7 +472,7 @@ def _merged_entries(
     """
     # Taken before merging: an entry with source text now is one the reviewer saw. Merging can give a
     # bare entry another newsletter's coverage, but that coverage arrived after the review did.
-    reviewable = {entry.candidate_id for entry in entries if has_source_text(entry) and entry.candidate_id is not None}
+    reviewable = {entry.candidate_id for entry in entries if may_headline(entry) and entry.candidate_id is not None}
     headlines = [entry for entry in entries if entry.review_score is not None]
     mentions = [entry for entry in entries if entry.review_score is None]
     headlines, mentions = merge_related_entries(headlines, mentions, same_story)

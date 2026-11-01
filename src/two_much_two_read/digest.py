@@ -31,6 +31,7 @@ LABELS = {
         "discussion": "討論",
         "source": "來源",
         "repeat": "🔁 前 {window} 天中有 {days} 天也有報導",
+        "updated": "，今天有新進展",
         "repeat_short": "🔁 {days}/{window} 天",
     },
     "zh-cn": {
@@ -50,6 +51,7 @@ LABELS = {
         "discussion": "讨论",
         "source": "来源",
         "repeat": "🔁 前 {window} 天中有 {days} 天也有报道",
+        "updated": "，今天有新进展",
         "repeat_short": "🔁 {days}/{window} 天",
     },
     "en": {
@@ -69,6 +71,7 @@ LABELS = {
         "discussion": "Discussion",
         "source": "Source",
         "repeat": "🔁 Also covered on {days} of the previous {window} days",
+        "updated": ", with new details today",
         "repeat_short": "🔁 {days}/{window} days",
     },
 }
@@ -89,6 +92,7 @@ NEUTRAL_LABELS = {
     "discussion": "💬",
     "source": "🔗",
     "repeat": "🔁 {days}/{window}",
+    "updated": " ＋",
     "repeat_short": "🔁 {days}/{window}",
 }
 
@@ -115,6 +119,20 @@ class DigestEntry:
     # How many of the previous previous_window days carried the same story, from with_previous_coverage.
     previous_days: int = 0
     previous_window: int = 0
+    # What those earlier days' newsletters said of it, from with_previous_coverage, and the facts this
+    # report adds to them: None until judged, empty when it adds none and so repeats them.
+    earlier_summaries: tuple[str, ...] = ()
+    new_facts: tuple[str, ...] | None = None
+
+
+def may_headline(entry: DigestEntry) -> bool:
+    """Whether an entry may take a headline: it has source text, and it is not a repeat with nothing new.
+
+    A story the previous days already carried, retold today without a fact they lacked, is what the
+    reader has had; on 2026-10-15 the GitLab flaw the 14th led with led again from another
+    newsletter, which said nothing the first had not. It may still be a mention.
+    """
+    return has_source_text(entry) and entry.new_facts != ()
 
 
 def has_source_text(entry: DigestEntry) -> bool:
@@ -261,7 +279,16 @@ def _absorbed(primary: DigestEntry, other: DigestEntry) -> DigestEntry:
         article_url=_article_url(primary) or _article_url(other) or primary.article_url,
         previous_days=max(primary.previous_days, other.previous_days),
         previous_window=max(primary.previous_window, other.previous_window),
+        earlier_summaries=tuple(dict.fromkeys((*primary.earlier_summaries, *other.earlier_summaries))),
+        new_facts=_merged_facts(primary.new_facts, other.new_facts),
     )
+
+
+def _merged_facts(primary: tuple[str, ...] | None, other: tuple[str, ...] | None) -> tuple[str, ...] | None:
+    """New facts if either report had some; a repeat only if both were judged and neither had any."""
+    if primary or other:
+        return tuple(dict.fromkeys((*(primary or ()), *(other or ()))))
+    return () if primary == () and other == () else None
 
 
 def dedupe_entries(items: list[DigestEntry]) -> list[DigestEntry]:
@@ -388,7 +415,9 @@ def with_previous_coverage(
         link = canonical_url(entry.article_url)
         tokens = story_tokens(entry) - FUNCTION_WORDS
         names = versioned_names(entry)
-        days = {day for day, _, other_link, _, _ in earlier if link is not None and link == other_link}
+        linked = [(day, other) for day, other, other_link, _, _ in earlier if link is not None and link == other_link]
+        days = {day for day, _ in linked}
+        reports = [(day, other.item.summary_zh_tw) for day, other in linked]
         shortlist: dict[date, list[tuple[tuple[int, float], int, DigestEntry]]] = {}
         for position, (day, other, _, other_tokens, other_names) in enumerate(earlier):
             score = (len(names & other_names), weight(tokens & other_tokens))
@@ -396,11 +425,17 @@ def with_previous_coverage(
                 shortlist.setdefault(day, []).append((score, -position, other))
         for day, candidates in sorted(shortlist.items()):
             best_first = sorted(candidates, key=lambda candidate: candidate[:2], reverse=True)
-            if any(same_story(entry, other) for _, _, other in best_first[:REPEAT_JUDGEMENTS_PER_DAY]):
+            match = next((other for _, _, other in best_first[:REPEAT_JUDGEMENTS_PER_DAY] if same_story(entry, other)), None)
+            if match is not None:
                 days.add(day)
+                reports.append((day, match.item.summary_zh_tw))
         # An entry checked after merging may already carry a larger count from one it absorbed.
         days_carried = max(entry.previous_days, min(len(days), window))
-        marked.append(replace(entry, previous_days=days_carried, previous_window=window) if days else entry)
+        # Oldest first, so a caller short of room can keep the latest.
+        summaries = tuple(dict.fromkeys((*entry.earlier_summaries, *(summary for _, summary in sorted(reports)))))
+        marked.append(
+            replace(entry, previous_days=days_carried, previous_window=window, earlier_summaries=summaries) if days else entry
+        )
     return marked
 
 
@@ -577,7 +612,8 @@ def render_digest(
             names = ", ".join((value.source_name, *value.also_from))
             lines.append(f"   {labels['source']}：{sanitize_discord_text(names)}")
         if value.previous_days:
-            lines.append(f"   {labels['repeat'].format(days=value.previous_days, window=value.previous_window)}")
+            updated = labels["updated"] if value.new_facts else ""
+            lines.append(f"   {labels['repeat'].format(days=value.previous_days, window=value.previous_window)}{updated}")
         if value.hn_item_id:
             if value.hn_score is not None and value.hn_comments is not None:
                 lines.append(f"   {labels['hn']}：{value.hn_score} {labels['points']} · {value.hn_comments} {labels['comments']}")
