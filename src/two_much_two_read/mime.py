@@ -55,6 +55,24 @@ URL_PATTERN = re.compile(r"https?://[^\s<>\"']+")
 # article's slug is as likely to be about opting out as the link is to do it.
 UNSUBSCRIBE_WORD = re.compile(r"unsub(?:scri|(?![a-z]))")
 UNSUBSCRIBE_TOKENS = frozenset({"optout", "opt-out", "opt_out", "disable_email"})
+# Where a link leads to a person rather than a story: a writer's or editor's profile, one name under a
+# people path, or the photo and photographer a header image credits. SANS NewsBites signs each
+# editor's comment with a link to the editor's profile, and the extractor gave six items of one issue
+# those links; Risky Business credits its images on Unsplash, and two items took the photo's page.
+PROFILE_PATH = re.compile(r"/(?:authors?|profiles?|people|contributors?|staff)/[^/]+/?", re.IGNORECASE)
+# A stock-photo site's pages for one photo or one photographer, by the path's first part; an @name is
+# a photographer on any of them, and each serves its images from a host of their own. The rest of the
+# site can be the story: Getty's newsroom on its suit against Stability AI, Shutterstock's on selling
+# its library to OpenAI for training.
+STOCK_PHOTO_PAGES = {
+    "unsplash": frozenset({"photos", "illustrations"}),
+    "pexels": frozenset({"photo", "video"}),
+    "pixabay": frozenset({"photos", "illustrations", "vectors", "videos", "users"}),
+    "shutterstock": frozenset({"image-photo", "image-vector", "image-illustration", "editorial", "video", "g"}),
+    "istockphoto": frozenset({"photo", "vector", "video", "portfolio"}),
+    "gettyimages": frozenset({"detail"}),
+}
+STOCK_PHOTO_IMAGE_HOSTS = frozenset({"images", "image", "plus", "media", "cdn"})
 # Characters that print as nothing. Senders pad the preview text with them, alternating with no-break
 # spaces, so that a mail client shows no more of the body in the inbox: TLDR's four editions each
 # send 52 such pairs, 264 tokens of nothing. Only runs go: one such character alone is part of the
@@ -86,6 +104,24 @@ def unsubscribe_link(url: str) -> bool:
     query = [value for pair in parse_qsl(parts.query, keep_blank_values=True) for value in pair]
     text = " ".join([host, unquote(parts.path), *query]).casefold()
     return bool(UNSUBSCRIBE_WORD.search(text)) or not UNSUBSCRIBE_TOKENS.isdisjoint(re.split(r"[^a-z0-9_-]+", text))
+
+
+def person_link(url: str) -> bool:
+    """Whether the URL leads to a person - a byline's profile, a photo credit - rather than a story."""
+    try:
+        parts = urlsplit(url)
+        host = (parts.hostname or "").casefold()
+    except ValueError:
+        return False
+    path = unquote(parts.path)
+    if PROFILE_PATH.fullmatch(path):
+        return True
+    labels = host.split(".")
+    pages = next((STOCK_PHOTO_PAGES[label] for label in labels if label in STOCK_PHOTO_PAGES), None)
+    if pages is None:
+        return False
+    first = path.strip("/").split("/")[0].casefold()
+    return labels[0] in STOCK_PHOTO_IMAGE_HOSTS or first.startswith("@") or first in pages
 
 
 class EmailExtractionError(ValueError):
@@ -177,6 +213,7 @@ def _link_candidates(plain: str, html: str, unsubscribe: frozenset[str] = frozen
 
     No unsubscribe link is a candidate, whatever its label: those the email's List-Unsubscribe
     header names (unsubscribe), and any whose address says it unsubscribes (unsubscribe_link).
+    Nor is a link to a person rather than a story (person_link).
     """
     candidates: list[LinkCandidate] = []
     seen: set[str] = set()
@@ -194,7 +231,7 @@ def _link_candidates(plain: str, html: str, unsubscribe: frozenset[str] = frozen
         nonlocal scanned
         scanned += 1
         safe_url = _safe_url(raw_url)
-        if safe_url is None or safe_url in seen or safe_url in unsubscribe or unsubscribe_link(safe_url):
+        if safe_url is None or safe_url in seen or safe_url in unsubscribe or unsubscribe_link(safe_url) or person_link(safe_url):
             return
         if CONTROL_LABEL_PATTERN.fullmatch(anchor_text.strip()):
             return
