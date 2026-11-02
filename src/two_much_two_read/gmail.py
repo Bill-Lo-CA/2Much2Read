@@ -8,6 +8,7 @@ from typing import Any
 
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build  # type: ignore[import-untyped]
+from googleapiclient.errors import HttpError  # type: ignore[import-untyped]
 
 from two_read_runtime.oauth import load_credentials
 
@@ -226,3 +227,14 @@ class GmailClient:
 
 def display_id(message_id: str) -> str:
     return hashlib.sha256(message_id.encode()).hexdigest()[:10]
+
+
+def error_name(error: Exception) -> str:
+    """What a Gmail request failed with, for a log line: the error's type, and an API error's HTTP status.
+
+    The type alone reads HttpError for a message deleted since (404), a rate limit (429), and an
+    outage (5xx) alike, and only the outage passes by itself.
+    """
+    if isinstance(error, HttpError):
+        return f"HttpError {error.status_code}"
+    return type(error).__name__

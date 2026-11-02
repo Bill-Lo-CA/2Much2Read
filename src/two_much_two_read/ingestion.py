@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from datetime import UTC, datetime
 from email.utils import parseaddr
@@ -16,7 +17,7 @@ from .config import GmailSource, HackerNewsSource, Settings
 from .digest import (
     canonical_url,
 )
-from .gmail import GmailClient, message_headers
+from .gmail import GmailClient, error_name, message_headers
 from .hackernews import HackerNewsCandidate, HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
 from .mime import MAX_ANALYSIS_CHARS, EmailExtractionError, extract_gmail_payload
 from .ollama import (
@@ -33,6 +34,8 @@ from .schemas import (
 from .stages import StatusReporter
 from .storage import Database
 from .url_enrichment import UrlEnricher, resolve_match, shown_url
+
+logger = logging.getLogger(__name__)
 
 
 def _email_content(value: ExtractedEmailContent | str) -> ExtractedEmailContent:
@@ -57,7 +60,10 @@ class AnalyzesArticles(Protocol):
 def _sync_processing_label(database: Database, gmail: GmailClient, gmail_id: str, document_id: int, state: str) -> bool:
     try:
         gmail.sync_processing_label(gmail_id, state)
-    except Exception:
+    except Exception as error:
+        # The row records GMAIL_LABEL_SYNC_FAILED and nothing of why, so the reason is logged: a
+        # message deleted since will fail every retry, where an outage passes.
+        logger.warning("could not label document %d %s: %s", document_id, state, error_name(error))
         database.fail_label_sync(document_id)
         return False
     database.mark_label_synced(document_id)
