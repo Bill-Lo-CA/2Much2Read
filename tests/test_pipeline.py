@@ -1097,6 +1097,67 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
     ]
 
 
+def test_hacker_news_titles_are_scored_once_the_ollama_models_are_let_go(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With RERANKER_DEVICE=cuda the reranker would otherwise load beside the extractor on one GPU."""
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n  - type: gmail\n    id: alphasignal\n    name: AlphaSignal\n    gmail_query: from:alphasignal.ai\n"
+        "  - type: hackernews\n    id: hn-best\n    name: Hacker News Best\n",
+        encoding="utf-8",
+    )
+    settings = Settings(sources_config_path=sources_path, database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "lock")
+    events: list[str] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    class FakeHackerNewsClient:
+        def close(self) -> None:
+            pass
+
+    class FakeReranker:
+        def __init__(self, _model: str, _device: str) -> None:
+            events.append("reranker:load")
+
+        def score_titles(self, titles: Sequence[str], source: str) -> list[float]:
+            events.append("reranker:score")
+            return [0.5] * len(titles)
+
+        def close(self) -> None:
+            events.append("reranker:unload")
+
+    def process_hackernews(
+        *args: object, score_titles: ingestion.TitleScorer, **kwargs: object
+    ) -> tuple[int, int, int, int, list[int], int]:
+        assert score_titles(["Story"], "Hacker News Best") == [0.5]
+        events.append("extractor:stories")
+        return 0, 0, 0, 0, [], 0
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(
+        pipeline, "_process_source", lambda *args, **kwargs: recorded(events, "extractor:emails", (0, 0, 0, 0, [], []))
+    )
+    monkeypatch.setattr(pipeline, "_process_hackernews_source", process_hackernews)
+    monkeypatch.setattr(pipeline, "_unload_model", lambda _ollama, model, *_: events.append(f"unload:{model}"))
+    monkeypatch.setattr(pipeline, "RelevanceReranker", FakeReranker)
+
+    run_pipeline(settings, no_deliver=True)
+
+    assert events[: events.index("extractor:stories") + 1] == [
+        "extractor:emails",
+        "unload:llama3.2:3b",
+        "unload:translategemma:4b",
+        "reranker:load",
+        "reranker:score",
+        "reranker:unload",
+        "extractor:stories",
+    ]
+
+
 def test_credentials_failure_records_a_failed_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sources_path = tmp_path / "sources.yaml"
     write_sources(sources_path)

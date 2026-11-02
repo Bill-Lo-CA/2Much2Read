@@ -28,6 +28,7 @@ from .headlines import (
     _deepened_entries,
 )
 from .ingestion import (
+    TitleScorer,
     _process_hackernews_source,
     _process_source,
     _sync_processing_label,
@@ -46,7 +47,7 @@ from .selection import (
     _selected_entries,
     _with_related_headlines,
 )
-from .stages import StatusReporter, _ignore_status, _unload_model
+from .stages import StatusReporter, UnloadsModels, _ignore_status, _unload_model
 from .storage import Database
 
 
@@ -96,6 +97,27 @@ def _error_summary(error: BaseException) -> str:
     if len(flattened) > MAX_ERROR_SUMMARY:
         return flattened[: MAX_ERROR_SUMMARY - 1] + "…"
     return flattened
+
+
+def _title_scorer(settings: Settings, ollama: UnloadsModels, status: StatusReporter) -> TitleScorer:
+    """Scores titles on a reranker loaded for that alone, once the Ollama models are let go.
+
+    Gmail sources run first and leave the extractor and the translator loaded for OLLAMA_KEEP_ALIVE,
+    and with RERANKER_DEVICE=cuda the reranker would load onto the same GPU beside them. The models
+    are released here as they are before the digest's own ranking; the extractor loads again for the
+    stories that follow.
+    """
+
+    def score_titles(titles: list[str], source_name: str) -> list[float]:
+        _unload_model(ollama, settings.ollama_model, status)
+        _unload_model(ollama, settings.ollama_translate_model, status)
+        reranker = RelevanceReranker(settings.reranker_model, settings.reranker_device)
+        try:
+            return reranker.score_titles(titles, source_name)
+        finally:
+            reranker.close()
+
+    return score_titles
 
 
 def _fair_share(budget: int, sources: int) -> int:
@@ -179,15 +201,6 @@ def run_pipeline(
                     gmail.ensure_labels()
             if any(isinstance(source, HackerNewsSource) for source in sources):
                 hackernews = HackerNewsClient()
-
-            def score_titles(titles: list[str], source_name: str) -> list[float]:
-                # Loaded for this alone and let go again: it may share a GPU with the extractor.
-                reranker = RelevanceReranker(settings.reranker_model, settings.reranker_device)
-                try:
-                    return reranker.score_titles(titles, source_name)
-                finally:
-                    reranker.close()
-
             ollama = create_ollama_client(settings)
             gmail_remaining = settings.gmail_max_messages_per_run
             command_remaining = max_messages
@@ -268,7 +281,7 @@ def run_pipeline(
                             status,
                             force=force,
                             now=now,
-                            score_titles=score_titles,
+                            score_titles=_title_scorer(settings, ollama, status),
                         )
                         skipped += source_skipped
                         source_documents = []
