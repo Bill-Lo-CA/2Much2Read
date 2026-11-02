@@ -96,6 +96,17 @@ class RelevanceReranker:
         scored = [(float(score), entry) for score, entry in zip(scores, entries, strict=True)]
         return [replace(entry, reranker_score=score) for score, entry in sorted(scored, key=lambda value: value[0], reverse=True)]
 
+    def score_titles(self, titles: Sequence[str], source: str) -> list[float]:
+        """How well each title alone fits the digest, on the scale rank() scores entries on.
+
+        For choosing which Hacker News stories are worth fetching and extracting at all, before
+        there is a summary to judge; see ingestion._process_hackernews_source.
+        """
+        if not titles:
+            return []
+        pairs = [(RERANK_QUERY, f"Title: {title}\nSource: {source}") for title in titles]
+        return [float(score) for score in self._model.predict(pairs, activation_fn=self._activation_fn)]
+
     def close(self) -> None:
         del self._model
         gc.collect()

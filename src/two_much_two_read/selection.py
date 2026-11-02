@@ -24,10 +24,12 @@ from .config import Settings
 from .digest import (
     DigestEntry,
     _entry_rank,
+    _first_match,
     dedupe_entries,
     may_headline,
     merge_before_selection,
     merge_related_entries,
+    shown_headlines,
     story_tokens,
     with_previous_coverage,
 )
@@ -458,6 +460,30 @@ def _story_judge(ollama: JudgesSameStory, budget: int, status: StatusReporter) -
         return same
 
     return judge
+
+
+def _with_related_headlines(
+    settings: Settings,
+    ollama: JudgesSameStory,
+    stories: list[DigestEntry],
+    entries: list[DigestEntry],
+    status: StatusReporter,
+) -> list[DigestEntry]:
+    """Each Hacker News story with the number of the headline that is the same story, where one is.
+
+    The stories are a section of their own rather than candidates for the headlines, so a story the
+    newsletters led with stays among them; the note says where the digest already covers it. Judged
+    as merging judges, on the same shortlist and its own budget of the same size.
+    """
+    headlines = shown_headlines(entries, settings.digest_top_items)
+    if not stories or not headlines:
+        return stories
+    same_story = _story_judge(ollama, settings.digest_merge_judgements, status)
+    related: list[DigestEntry] = []
+    for story in stories:
+        index = _first_match(story, headlines, same_story)
+        related.append(story if index is None else replace(story, related_headline=index + 1))
+    return related
 
 
 def _judged(entry: DigestEntry) -> dict[str, str]:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from datetime import UTC, datetime
 from email.utils import parseaddr
 from typing import Protocol
@@ -16,7 +17,7 @@ from .digest import (
     canonical_url,
 )
 from .gmail import GmailClient, message_headers
-from .hackernews import HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
+from .hackernews import HackerNewsCandidate, HackerNewsClient, HackerNewsError, resolve_hackernews_candidate
 from .mime import MAX_ANALYSIS_CHARS, EmailExtractionError, extract_gmail_payload
 from .ollama import (
     OllamaClient,
@@ -265,6 +266,25 @@ def _process_source(
     return discovered, discovered, processed, failed, processed_document_ids, processed_documents
 
 
+# Scores titles, named by their source, for how well each fits the digest; RelevanceReranker.score_titles.
+TitleScorer = Callable[[list[str], str], list[float]]
+
+
+def _by_relevance(
+    candidates: list[HackerNewsCandidate], source: HackerNewsSource, score_titles: TitleScorer
+) -> list[HackerNewsCandidate]:
+    """The candidates that fit the digest best first, ties in feed order.
+
+    The feed ranks by votes across everything Hacker News discusses, and the stories are fetched and
+    extracted in this order until the source's budget is spent: on 2026-11-01 four of the feed's top
+    ten were a farmer's seeds, Norway's roadside restrooms and the like, while stories on malware and
+    an airline breach sat below the cut.
+    """
+    scores = score_titles([candidate.document.title for candidate in candidates], source.name)
+    order = sorted(range(len(candidates)), key=lambda index: scores[index], reverse=True)
+    return [candidates[index] for index in order]
+
+
 def _process_hackernews_source(
     database: Database,
     hackernews: HackerNewsClient,
@@ -275,7 +295,15 @@ def _process_hackernews_source(
     *,
     force: bool,
     now: datetime,
+    score_titles: TitleScorer,
 ) -> tuple[int, int, int, int, list[int], int]:
+    """Fetch and extract up to the source's budget of stories; the budget counts stories extracted.
+
+    A story whose article cannot be read is passed over for the next one, and spends nothing: one
+    unreadable page is a paywall or a robots rule, so it is skipped, not failed. Every page this run
+    tried being unreadable is a fetcher that is broken, and those count as failures, so that it cannot
+    pass for a quiet news day.
+    """
     limit = min(remaining, source.max_articles_per_run)
     discovered = 0
     processed = 0
@@ -283,6 +311,7 @@ def _process_hackernews_source(
     attempted = 0
     skipped = 0
     processed_document_ids: list[int] = []
+    unreadable = 0
     fetcher = ArticleFetcher()
     if force:
         status(f"{source.id}: retrying failed stories")
@@ -314,6 +343,9 @@ def _process_hackernews_source(
         failed += discovery.unreadable
         if discovery.unreadable:
             status(f"{source.id}: failed to read {discovery.unreadable} stor{'y' if discovery.unreadable == 1 else 'ies'}")
+        if candidates:
+            status(f"{source.id}: ranking {len(candidates)} stories")
+            candidates = _by_relevance(candidates, source, score_titles)
 
     for candidate in candidates:
         if attempted >= limit:
@@ -331,7 +363,6 @@ def _process_hackernews_source(
             candidate.comments,
             force=force,
         )
-        attempted += 1
         discovered += int(created)
         status(f"{source.id}: resolving {candidate.document.title}")
         try:
@@ -340,11 +371,12 @@ def _process_hackernews_source(
         except (ArticleFetchError, ArticleExtractionError) as error:
             database.record_hackernews_fetch_failure(document_id, error.code)
             if not source.allow_metadata_fallback:
-                failed += 1
-                status(f"{source.id}: failed {candidate.document.title} ({error.code})")
+                unreadable += 1
+                status(f"{source.id}: passed over {candidate.document.title} ({error.code})")
                 continue
             resolved = ResolvedContent(document=candidate.document, text="", basis="metadata", truncated=False)
             status(f"{source.id}: analyzing metadata only for {candidate.document.title}")
+        attempted += 1
 
         status(f"{source.id}: analyzing {candidate.document.title}")
         try:
@@ -393,4 +425,8 @@ def _process_hackernews_source(
         processed += 1
         processed_document_ids.append(document_id)
         status(f"{source.id}: processed {candidate.document.title}")
+    if processed:
+        skipped += unreadable
+    else:
+        failed += unreadable
     return attempted, discovered, processed, failed, processed_document_ids, skipped

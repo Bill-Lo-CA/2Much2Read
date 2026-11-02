@@ -44,6 +44,7 @@ from .selection import (
     _repeat_marker,
     _save_reranker_scores,
     _selected_entries,
+    _with_related_headlines,
 )
 from .stages import StatusReporter, _ignore_status, _unload_model
 from .storage import Database
@@ -137,6 +138,8 @@ def run_pipeline(
     processed = 0
     processed_documents: list[tuple[int, str]] = []
     processed_document_ids: list[int] = []
+    # Of those, the Hacker News stories': a section of the digest of their own; see render_digest.
+    hackernews_document_ids: list[int] = []
     discovered = 0
     failed = 0
     skipped = 0
@@ -176,6 +179,15 @@ def run_pipeline(
                     gmail.ensure_labels()
             if any(isinstance(source, HackerNewsSource) for source in sources):
                 hackernews = HackerNewsClient()
+
+            def score_titles(titles: list[str], source_name: str) -> list[float]:
+                # Loaded for this alone and let go again: it may share a GPU with the extractor.
+                reranker = RelevanceReranker(settings.reranker_model, settings.reranker_device)
+                try:
+                    return reranker.score_titles(titles, source_name)
+                finally:
+                    reranker.close()
+
             ollama = create_ollama_client(settings)
             gmail_remaining = settings.gmail_max_messages_per_run
             command_remaining = max_messages
@@ -248,10 +260,19 @@ def run_pipeline(
                             source_ids,
                             source_skipped,
                         ) = _process_hackernews_source(
-                            database, hackernews, ollama, source, source_remaining, status, force=force, now=now
+                            database,
+                            hackernews,
+                            ollama,
+                            source,
+                            source_remaining,
+                            status,
+                            force=force,
+                            now=now,
+                            score_titles=score_titles,
                         )
                         skipped += source_skipped
                         source_documents = []
+                        hackernews_document_ids.extend(source_ids)
                     if command_remaining is not None:
                         command_remaining -= used
                     discovered += source_discovered
@@ -260,7 +281,12 @@ def run_pipeline(
                     processed_document_ids.extend(source_ids)
                     processed_documents.extend(source_documents)
                 source_names_by_id = {source.id: source.name for source in sources}
-                entries = _items(database, processed_document_ids, settings.digest_rerank_candidate_limit, source_names_by_id)
+                story_ids = set(hackernews_document_ids)
+                newsletter_document_ids = [document_id for document_id in processed_document_ids if document_id not in story_ids]
+                entries = _items(database, newsletter_document_ids, settings.digest_rerank_candidate_limit, source_names_by_id)
+                # Apart from the newsletters' and uncapped by their limit, which takes the newest
+                # first: a story is up to max_age_hours old, and a busy day would push it out.
+                stories = _items(database, hackernews_document_ids, len(hackernews_document_ids), source_names_by_id)
             finally:
                 # Both, since titles are translated between emails and the translator stays loaded too.
                 _unload_model(ollama, settings.ollama_model, status)
@@ -269,7 +295,10 @@ def run_pipeline(
             reranker = RelevanceReranker(settings.reranker_model, settings.reranker_device)
             try:
                 ranked_entries = _ranked_entries(reranker, entries)
-                _save_reranker_scores(database, ranked_entries, reranker, status)
+                # Ranked apart, so that deduplication cannot fold a story into a newsletter's entry
+                # for the same article, or one into it: each keeps its own place.
+                stories = _ranked_entries(reranker, stories)
+                _save_reranker_scores(database, [*ranked_entries, *stories], reranker, status)
             finally:
                 reranker.close()
 
@@ -278,18 +307,24 @@ def run_pipeline(
                 reviewed_entries, security_floor = _selected_entries(settings, ollama, ranked_entries, mark_repeats, status)
                 if security_floor is not None:
                     status(f"Security floor: promoted {security_floor.promoted}")
-                reviewed_entries = _checked_titles(settings, ollama, reviewed_entries, status)
+                # In one pass, so the translation model loads once for both.
+                checked = _checked_titles(settings, ollama, [*reviewed_entries, *stories], status)
+                reviewed_entries, stories = checked[: len(reviewed_entries)], checked[len(reviewed_entries) :]
                 reviewed_entries = _deepened_entries(settings, ollama, reviewed_entries, status, gmail)
+                stories = _with_related_headlines(settings, ollama, stories, reviewed_entries, status)
             finally:
                 _unload_model(ollama, settings.ollama_review_model, status)
             content = render_digest(
                 reviewed_entries,
                 now,
                 ", ".join(dict.fromkeys(source.category for source in sources)),
-                ", ".join(dict.fromkeys(entry.source_name or entry.source_id or "Unknown" for entry in reviewed_entries)),
+                ", ".join(
+                    dict.fromkeys(entry.source_name or entry.source_id or "Unknown" for entry in [*reviewed_entries, *stories])
+                ),
                 settings.digest_top_items,
                 settings.digest_language,
                 reviewed=True,
+                hackernews=stories,
             )
             digest_id: int | None = None
             destinations = []

@@ -459,6 +459,19 @@ in `config/sources.example.yaml` is ready to copy. Supported feeds are
 SSRF-safe full-text extraction by default; set `allow_metadata_fallback: true`
 only when a clearly marked metadata-only result is acceptable.
 
+The stories are a section of the digest of their own, after the newsletters' headlines and
+mentions, and never compete with them: up to `max_articles_per_run` a run, each its title, its
+summary's first sentence, its points and comments, and its article and discussion links. They are
+chosen by relevance rather than by the feed's order. The feed ranks by votes across everything Hacker
+News discusses - on 2026-11-01 four of its top ten were a farmer's seeds, Norway's roadside restrooms
+and the like - so each run scores the titles of up to `max_story_candidates` stories no older than
+`max_age_hours` with the reranker, on the question it asks of every entry, and fetches the best
+first. A story whose article cannot be read, behind a paywall or a robots rule, is passed over for
+the next and counted as skipped; only a run in which no article could be read at all counts them as
+failures, since that is a fetcher that is broken. A story that is the same story as one of the
+headlines says which, as "相關：今日重點第 2 則", judged as merging judges and within a budget of
+`DIGEST_MERGE_JUDGEMENTS` of its own.
+
 ```bash
 uv run 2much2read hackernews list --source hn-best
 uv run 2much2read hackernews inspect --source hn-best --story-id ID --fetch-article
