@@ -166,6 +166,30 @@ def test_unload_reports_success() -> None:
     assert OllamaClient().unload("qwen3:4b") is True
 
 
+@respx.mock
+def test_responds_asks_the_extraction_model_for_one_token_within_a_minute() -> None:
+    route = respx.post("http://127.0.0.1:11434/api/chat").mock(
+        return_value=httpx.Response(200, json={"message": {"content": "OK"}})
+    )
+
+    assert OllamaClient(model="qwen3:4b", num_ctx=8192).responds() is True
+    request = json.loads(route.calls[0].request.content)
+    # Extraction's own num_ctx: any other would reload the model it asks about.
+    assert (request["model"], request["options"]["num_ctx"], request["options"]["num_predict"]) == ("qwen3:4b", 8192, 1)
+    assert route.calls[0].request.extensions["timeout"]["read"] == ollama.PROBE_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    "answer",
+    [httpx.ReadTimeout("stalled"), httpx.ConnectError("refused"), httpx.Response(500, json={}), httpx.Response(200, json={})],
+)
+@respx.mock
+def test_responds_is_false_for_anything_but_an_answer(answer: httpx.Response | httpx.HTTPError) -> None:
+    respx.post("http://127.0.0.1:11434/api/chat").mock(side_effect=[answer])
+
+    assert OllamaClient().responds() is False
+
+
 def review_candidate(candidate_id: int, characters: int) -> dict[str, object]:
     return {
         "candidate_id": candidate_id,

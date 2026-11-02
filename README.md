@@ -745,6 +745,14 @@ When Gmail refuses a label, a warning names the document and the HTTP status, as
 retry command after fixing the webhook or network. `doctor` checks local setup
 without posting unless `--send-test` is explicitly supplied.
 
+An email whose extraction outruns `OLLAMA_TIMEOUT_SECONDS` ends the run with
+`OLLAMA_EXTRACT_TIMEOUT` and is neither failed nor labelled, since a stalled Ollama would time out
+every email and a Failed email is never read again. The next run reads everything again and gives
+that email two tries in a row. If both time out while the model still answers a one-token probe,
+that email alone fails and is labelled Failed, and the run goes on; if the model answers nothing,
+Ollama has stalled rather than the email, and the run ends again with the email kept for the next.
+An Ollama that cannot be reached at all ends every run and fails no email.
+
 ## Development
 
 ```bash

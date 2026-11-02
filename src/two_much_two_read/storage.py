@@ -344,7 +344,7 @@ class Database:
 
     def gmail_document(self, gmail_id: str) -> sqlite3.Row | None:
         row = self.connection.execute(
-            """SELECT d.id, d.state FROM documents d JOIN gmail_document_state g ON g.document_id=d.id
+            """SELECT d.id, d.state, d.last_error_code FROM documents d JOIN gmail_document_state g ON g.document_id=d.id
             WHERE g.gmail_message_id=?""",
             (gmail_id,),
         ).fetchone()
@@ -608,6 +608,12 @@ class Database:
             last_error_code=?, updated_at=? WHERE id=?""",
             (error_code, now, document_id),
         )
+        self.connection.commit()
+
+    def record_document_error(self, document_id: int, error_code: str) -> None:
+        """Note an error against a document without failing it, so that the next run reads it again knowing."""
+        now = datetime.now(UTC).isoformat()
+        self.connection.execute("UPDATE documents SET last_error_code=?, updated_at=? WHERE id=?", (error_code, now, document_id))
         self.connection.commit()
 
     def mark_label_synced(self, document_id: int) -> None:

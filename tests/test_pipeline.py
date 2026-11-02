@@ -2312,6 +2312,147 @@ def test_label_sync_failure_is_repaired_without_reextracting(
     database.close()
 
 
+class TimingOutGmail:
+    """Two emails, "slow" and then "quick", whose bodies are their ids."""
+
+    def __init__(self) -> None:
+        self.labels: list[tuple[str, str]] = []
+
+    def ensure_labels(self) -> None:
+        pass
+
+    def iter_messages(self, query: str) -> Iterator[str]:
+        yield from ("slow", "quick")
+
+    def get_message(self, message_id: str) -> dict[str, object]:
+        return {"internalDate": "0", "threadId": message_id, "payload": {"body": message_id}}
+
+    def sync_processing_label(self, message_id: str, state: str) -> None:
+        self.labels.append((message_id, state))
+
+
+class TimingOutOllama:
+    """Fails the email "slow" with error for its first timeouts tries, and answers every other.
+
+    A probe answers when responding is True.
+    """
+
+    def __init__(self, timeouts: int, error: type[httpx.TransportError] = httpx.ReadTimeout, *, responding: bool = True) -> None:
+        self.timeouts = timeouts
+        self.error = error
+        self.responding = responding
+        self.tries: list[str] = []
+        self.probes = 0
+
+    def responds(self) -> bool:
+        self.probes += 1
+        return self.responding
+
+    def extract(self, source_id: str, body: str, *args: object) -> EmailExtraction:
+        self.tries.append(body)
+        if body == "slow" and self.timeouts:
+            self.timeouts -= 1
+            raise self.error("timed out")
+        return EmailExtraction(
+            source_id=source_id, newsletter_title="News", newsletter_date=None, overview_zh_tw="摘要", items=[]
+        )
+
+
+def timing_out_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, gmail: TimingOutGmail, ollama: TimingOutOllama) -> Settings:
+    sources_path = tmp_path / "sources.yaml"
+    write_sources(sources_path)
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: gmail)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: ollama)
+    monkeypatch.setattr(ingestion, "extract_gmail_payload", lambda payload: str(payload["body"]))
+    return Settings(
+        sources_config_path=sources_path, database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock"
+    )
+
+
+def document_states(settings: Settings) -> list[tuple[str, str | None]]:
+    database = Database(settings.database_path)
+    try:
+        return [tuple(row) for row in database.connection.execute("SELECT state,last_error_code FROM documents ORDER BY id")]
+    finally:
+        database.close()
+
+
+def test_an_email_that_times_out_ends_the_run_and_fails_alone_after_two_more_tries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gmail = TimingOutGmail()
+    ollama = TimingOutOllama(timeouts=3)
+    settings = timing_out_run(tmp_path, monkeypatch, gmail, ollama)
+
+    with pytest.raises(ingestion.ExtractionTimeoutError, match="OLLAMA_EXTRACT_TIMEOUT: document 1 from alphasignal"):
+        run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 22, tzinfo=ZoneInfo("America/Montreal")))
+    # Not failed, and no label: Ollama may only have stalled, and the next run reads it again.
+    assert ollama.tries == ["slow"]
+    assert gmail.labels == []
+    assert document_states(settings) == [("discovered", "OLLAMA_EXTRACT_TIMEOUT")]
+
+    result = run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 23, tzinfo=ZoneInfo("America/Montreal")))
+
+    assert (result.status, result.processed, result.failed) == ("partial", 1, 1)
+    assert ollama.tries == ["slow", "slow", "slow", "quick"]
+    # Asked once, after the second try: the model answers, so the email is what it cannot finish.
+    assert ollama.probes == 1
+    assert gmail.labels == [("slow", "failed"), ("quick", "processed")]
+    assert document_states(settings) == [("failed", "OLLAMA_EXTRACT_TIMEOUT"), ("processed", None)]
+
+
+def test_an_email_that_times_out_again_while_ollama_answers_nothing_is_kept_for_the_next_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gmail = TimingOutGmail()
+    ollama = TimingOutOllama(timeouts=3, responding=False)
+    settings = timing_out_run(tmp_path, monkeypatch, gmail, ollama)
+    with pytest.raises(ingestion.ExtractionTimeoutError):
+        run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 22, tzinfo=ZoneInfo("America/Montreal")))
+
+    # A stall that outlasts a run, not the email: passing it over would lose a sound email a day.
+    with pytest.raises(ingestion.ExtractionTimeoutError, match="Ollama answers nothing at all; it is kept for the next run"):
+        run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 23, tzinfo=ZoneInfo("America/Montreal")))
+
+    assert ollama.tries == ["slow", "slow", "slow"]
+    assert ollama.probes == 1
+    assert gmail.labels == []
+    assert document_states(settings) == [("discovered", "OLLAMA_EXTRACT_TIMEOUT")]
+
+
+def test_an_email_that_timed_out_and_answers_its_second_try_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    gmail = TimingOutGmail()
+    ollama = TimingOutOllama(timeouts=2)
+    settings = timing_out_run(tmp_path, monkeypatch, gmail, ollama)
+    with pytest.raises(ingestion.ExtractionTimeoutError):
+        run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 22, tzinfo=ZoneInfo("America/Montreal")))
+
+    result = run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 23, tzinfo=ZoneInfo("America/Montreal")))
+
+    assert (result.processed, result.failed) == (2, 0)
+    assert ollama.tries == ["slow", "slow", "slow", "quick"]
+    assert ollama.probes == 0
+    assert document_states(settings) == [("processed", None), ("processed", None)]
+
+
+@pytest.mark.parametrize("error", [httpx.ConnectError, httpx.ConnectTimeout])
+def test_an_ollama_that_cannot_be_reached_ends_every_run_and_fails_no_email(
+    error: type[httpx.TransportError], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gmail = TimingOutGmail()
+    ollama = TimingOutOllama(timeouts=2, error=error)
+    settings = timing_out_run(tmp_path, monkeypatch, gmail, ollama)
+
+    for day in (22, 23):
+        with pytest.raises(error):
+            run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, day, tzinfo=ZoneInfo("America/Montreal")))
+
+    assert ollama.tries == ["slow", "slow"]
+    assert gmail.labels == []
+    assert document_states(settings) == [("discovered", None)]
+
+
 def test_stale_label_reconciliation_does_not_use_the_message_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     sources_path = tmp_path / "sources.yaml"
     write_sources(sources_path)

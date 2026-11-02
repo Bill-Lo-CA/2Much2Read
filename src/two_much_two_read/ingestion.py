@@ -28,6 +28,7 @@ from .ollama import (
 from .schemas import (
     ArticleAnalysis,
     DigestItem,
+    EmailExtraction,
     ExtractedEmailContent,
     ResolvedContent,
 )
@@ -90,6 +91,62 @@ def _links_front_page_of(item: DigestItem, sender: str | None) -> bool:
     host = (parts.hostname or "").lower().removeprefix("www.")
     same_site = host == sender or host.endswith(f".{sender}") or sender.endswith(f".{host}")
     return bool(host) and same_site and parts.path in {"", "/"} and not parts.query
+
+
+EXTRACT_TIMEOUT = "OLLAMA_EXTRACT_TIMEOUT"
+
+
+class ExtractionTimeoutError(ValueError):
+    """An email's extraction outran OLLAMA_TIMEOUT_SECONDS for the first time, which ends the run; see _extraction."""
+
+
+def _extraction(
+    ollama: OllamaClient,
+    database: Database,
+    source: GmailSource,
+    document_id: int,
+    body: str,
+    truncated: bool,
+    status: StatusReporter,
+    *,
+    timed_out_before: bool,
+) -> EmailExtraction | str:
+    """The email's extraction, or the code it failed with.
+
+    A timeout is not taken for the email's fault at first. Ollama stalling would time out every
+    email in turn, and a failed email is labelled Failed and never read again, so the first ends
+    the run - as Ollama being unreachable does - and the next run reads everything again. But an
+    email that outruns the timeout by itself, with the model repeating itself until the context is
+    full, would then end every run for as long as it stays within GMAIL_LOOKBACK_DAYS. So the
+    timeout is recorded against the email, and the next run gives it two tries in a row. If both
+    time out and the model still answers a one-token probe, the email is what it cannot finish: it
+    fails alone and the run goes on. A model that answers nothing has stalled again, or still - a
+    stall over two runs would otherwise pass over one sound email a day - so the run ends as at
+    first, and the record stands for the run after.
+
+    Only a read timeout counts. Ollama answering nothing at all - refused, or a connect timeout -
+    says nothing about the email, and still ends the run every time.
+    """
+    tries = 2 if timed_out_before else 1
+    for attempt in range(1, tries + 1):
+        try:
+            return ollama.extract(source.id, body, truncated, source.max_items_per_email)
+        except (OllamaContextError, OllamaSchemaError) as error:
+            return str(error).split(" response_preview=", 1)[0]
+        except httpx.ReadTimeout as error:
+            if not timed_out_before:
+                database.record_document_error(document_id, EXTRACT_TIMEOUT)
+                raise ExtractionTimeoutError(
+                    f"{EXTRACT_TIMEOUT}: document {document_id} from {source.id} timed out; "
+                    "the next run tries it twice, then passes it over"
+                ) from error
+            status(f"Warning: {source.id}: extraction timed out again ({attempt} of {tries})")
+    if not ollama.responds():
+        raise ExtractionTimeoutError(
+            f"{EXTRACT_TIMEOUT}: document {document_id} from {source.id} timed out twice more, but Ollama "
+            "answers nothing at all; it is kept for the next run"
+        )
+    return EXTRACT_TIMEOUT
 
 
 def _process_source(
@@ -190,13 +247,20 @@ def _process_source(
             continue
         discovered += 1
         status(f"{source.id}: extracting {subject}")
-        try:
-            extraction = ollama.extract(source.id, body, truncated, source.max_items_per_email)
-        except (OllamaContextError, OllamaSchemaError) as error:
-            reason = str(error).split(" response_preview=", 1)[0]
-            database.fail_document(document_id, reason)
+        extraction = _extraction(
+            ollama,
+            database,
+            source,
+            document_id,
+            body,
+            truncated,
+            status,
+            timed_out_before=existing is not None and existing["last_error_code"] == EXTRACT_TIMEOUT,
+        )
+        if isinstance(extraction, str):
+            database.fail_document(document_id, extraction)
             failed += 1
-            status(f"{source.id}: failed {subject} ({reason})")
+            status(f"{source.id}: failed {subject} ({extraction})")
             if not dry_run:
                 _sync_processing_label(database, gmail, gmail_id, document_id, "failed")
             continue
