@@ -17,6 +17,7 @@ from .command_models import (
 )
 from .config import GmailSource, Settings, load_sources
 from .gmail import FilterStatus, GmailClient, credentials, display_id, message_headers
+from .ingestion import _sync_processing_label
 from .mime import MAX_ANALYSIS_CHARS, extract_gmail_payload
 from .ollama import close_ollama_client, create_ollama_client
 from .storage import Database
@@ -161,14 +162,12 @@ def reconcile_labels(settings: Settings) -> LabelsReconcileResult:
             )
             gmail.ensure_labels()
             for message in database.gmail_documents_for_label_reconciliation():
-                try:
-                    gmail.sync_processing_label(str(message["gmail_message_id"]), str(message["state"]))
-                except Exception:
-                    database.fail_label_sync(int(message["id"]))
-                    failed += 1
-                else:
-                    database.mark_label_synced(int(message["id"]))
+                if _sync_processing_label(
+                    database, gmail, str(message["gmail_message_id"]), int(message["id"]), str(message["state"])
+                ):
                     reconciled += 1
+                else:
+                    failed += 1
         finally:
             database.close()
     return LabelsReconcileResult(status="partial" if failed else "ok", reconciled=reconciled, failed=failed)

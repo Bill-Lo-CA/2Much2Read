@@ -11,9 +11,11 @@ from pathlib import Path
 from typing import cast
 from zoneinfo import ZoneInfo
 
+import httplib2  # type: ignore[import-untyped]
 import httpx
 import pytest
 from conftest import directory_digest, recorded
+from googleapiclient.errors import HttpError  # type: ignore[import-untyped]
 from pydantic import HttpUrl
 
 from two_much_two_read import headlines, ingestion, mail_operations, pipeline, selection
@@ -2239,7 +2241,9 @@ def test_forced_run_uses_a_separate_digest_key_after_daily_reservation(tmp_path:
     database.close()
 
 
-def test_label_sync_failure_is_repaired_without_reextracting(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_label_sync_failure_is_repaired_without_reextracting(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     sources_path = tmp_path / "sources.yaml"
     write_sources(sources_path)
     settings = Settings(
@@ -2265,7 +2269,7 @@ def test_label_sync_failure_is_repaired_without_reextracting(tmp_path: Path, mon
         def sync_processing_label(self, message_id: str, state: str) -> None:
             calls.append(f"label:{state}")
             if self.fail_sync:
-                raise RuntimeError("Gmail unavailable")
+                raise HttpError(httplib2.Response({"status": 503}), b"Backend Error")
 
     class FakeOllama:
         def extract(self, *args: object) -> EmailExtraction:
@@ -2292,6 +2296,8 @@ def test_label_sync_failure_is_repaired_without_reextracting(tmp_path: Path, mon
         "GMAIL_LABEL_SYNC_FAILED",
     )
     database.close()
+    # The row cannot say why; the log names the status, which tells an outage from a deleted message.
+    assert caplog.messages == ["could not label document 1 processed: HttpError 503"]
 
     gmail.fail_sync = False
     assert run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 23, tzinfo=ZoneInfo("America/Montreal"))).processed == 0
@@ -2439,7 +2445,9 @@ def test_dry_run_skips_gmail_label_writes_and_persistent_database(tmp_path: Path
     assert not settings.database_path.exists()
 
 
-def test_labels_reconcile_repairs_terminal_messages_and_records_retries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_labels_reconcile_repairs_terminal_messages_and_records_retries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
     settings = Settings(database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "digest.lock")
     database = Database(settings.database_path)
     processed_id = discover_gmail_document(database, "processed", "source")
@@ -2473,6 +2481,7 @@ def test_labels_reconcile_repairs_terminal_messages_and_records_retries(tmp_path
     ).fetchall()
     assert [tuple(row) for row in rows] == [("synced", None), ("failed", "GMAIL_LABEL_SYNC_FAILED")]
     database.close()
+    assert caplog.messages == [f"could not label document {failed_id} failed: RuntimeError"]
 
 
 class CountingOllama:

@@ -734,6 +734,12 @@ them was dropped. It sets only 2much2read's own loggers: libraries keep Python's
 warnings and above, because httpx logs each request's full URL at INFO, and a Discord webhook URL
 carries its token.
 
+A run or backfill that fails ends on one line naming the error and, where there is one, its
+remedy, as `AUTH_REAUTH_REQUIRED` above does; only a defect in the code still ends in a traceback.
+When Gmail refuses a label, a warning names the document and the HTTP status, as in
+`could not label document 412 processed: HttpError 503`. A 5xx or 429 passes, and the next run or
+`labels reconcile` sets the label; a 404 is a message since deleted for good, which no retry will label.
+
 `LOCK_CONTENDED` means another local run is active; retry after it finishes.
 `DISCORD_DELIVERY_FAILED` leaves a durable destination delivery pending, so use the relevant
 retry command after fixing the webhook or network. `doctor` checks local setup

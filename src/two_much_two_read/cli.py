@@ -253,14 +253,17 @@ def run_command(
 ) -> None:
     if force and (dry_run or source is None or max_messages is None):
         raise typer.BadParameter("--force requires --source and --max-messages and cannot use --dry-run")
+    # The run's own errors too, as 2busy1miss and 2bored1made report theirs: each names its cause and
+    # remedy in its message - AUTH_REAUTH_REQUIRED says which command to run - and the scheduled
+    # run's journal showed it at the foot of a full traceback instead.
     try:
         settings = Settings()
+        result = run_with_live_progress(
+            "2much2read run",
+            lambda status: run_pipeline(settings, source, max_messages, not deliver, dry_run, force, status=status),
+        )
     except ValueError as error:
         raise typer.BadParameter(str(error)) from error
-    result = run_with_live_progress(
-        "2much2read run",
-        lambda status: run_pipeline(settings, source, max_messages, not deliver, dry_run, force, status=status),
-    )
     emit_delivery_result(result)
 
 
@@ -272,7 +275,7 @@ def backfill(
 ) -> None:
     try:
         settings = Settings(gmail_lookback_days=days)
+        result = run_pipeline(settings, source, None, not deliver, False)
     except ValueError as error:
         raise typer.BadParameter(str(error)) from error
-    result = run_pipeline(settings, source, None, not deliver, False)
     emit_delivery_result(result)

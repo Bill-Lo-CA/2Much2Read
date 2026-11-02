@@ -95,6 +95,32 @@ def test_run_and_backfill_report_invalid_settings_without_a_traceback(
     assert "Traceback" not in result.output
 
 
+@pytest.mark.parametrize("command", [["run"], ["backfill"]])
+def test_run_and_backfill_report_a_failed_run_by_its_message(command: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    def expired_token(*args: object, **kwargs: object) -> NewsletterRunResult:
+        raise ValueError("AUTH_REAUTH_REQUIRED: run '2much2read auth gmail'")
+
+    monkeypatch.setattr(cli, "run_pipeline", expired_token)
+
+    result = CliRunner().invoke(cli.app, command)
+
+    assert result.exit_code == 2
+    assert "AUTH_REAUTH_REQUIRED: run '2much2read auth gmail'" in result.output
+
+
+@pytest.mark.parametrize("command", [["run"], ["backfill"]])
+def test_run_and_backfill_leave_a_defect_its_traceback(command: list[str], monkeypatch: pytest.MonkeyPatch) -> None:
+    def defect(*args: object, **kwargs: object) -> NewsletterRunResult:
+        raise TypeError("'NoneType' object is not subscriptable")
+
+    monkeypatch.setattr(cli, "run_pipeline", defect)
+
+    result = CliRunner().invoke(cli.app, command)
+
+    # Only a ValueError is a reported failure; a bug's traceback is what finds it.
+    assert isinstance(result.exception, TypeError)
+
+
 @pytest.mark.parametrize(("level", "shown"), [("INFO", True), ("WARNING", False)])
 @pytest.mark.usefixtures("project_logging")
 def test_log_level_sets_what_a_run_logs_and_leaves_library_logs_alone(
