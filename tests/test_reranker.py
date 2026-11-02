@@ -76,6 +76,30 @@ def test_reranker_orders_by_model_score() -> None:
     assert [(value.candidate_id, value.reranker_score) for value in ranked] == [(2, 0.9), (1, 0.2)]
 
 
+def test_titles_are_scored_alone_under_the_same_query() -> None:
+    """Hacker News stories are chosen by title before there is a summary to judge."""
+    seen: list[list[tuple[str, str]]] = []
+    reranker = fake_reranker([0.2, 0.9])
+    model = reranker._model
+
+    class RecordingModel:
+        def predict(self, pairs: list[tuple[str, str]], activation_fn: object) -> list[float]:
+            seen.append(pairs)
+            return list(model.predict(pairs, activation_fn))
+
+    reranker._model = RecordingModel()
+
+    assert reranker.score_titles(["Casio Watches of the 1980s", "TCP Use-After-Free"], "Hacker News Best") == [0.2, 0.9]
+    assert seen == [
+        [
+            (RERANK_QUERY, "Title: Casio Watches of the 1980s\nSource: Hacker News Best"),
+            (RERANK_QUERY, "Title: TCP Use-After-Free\nSource: Hacker News Best"),
+        ]
+    ]
+    assert reranker.score_titles([], "Hacker News Best") == []
+    assert len(seen) == 1
+
+
 def test_reranker_overrides_the_models_generic_search_prompt(monkeypatch: pytest.MonkeyPatch) -> None:
     """Qwen3-Reranker defaults to a generic web-search instruction.
 
@@ -1345,3 +1369,39 @@ def test_stored_items_come_back_with_everything_selection_and_rendering_read(tmp
         None,
     )
     assert (gmail.article_url, gmail.content_basis, gmail.item.source_title) == (None, "newsletter", "Model ships")
+
+
+class SameStoryJudge:
+    def __init__(self, same: set[frozenset[str]]) -> None:
+        self.same = same
+        self.asked: list[tuple[str, str]] = []
+
+    def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
+        self.asked.append((left["title"], right["title"]))
+        return frozenset((left["title"], right["title"])) in self.same
+
+
+def test_a_hacker_news_story_names_the_headline_that_is_the_same_story() -> None:
+    settings = Settings(digest_top_items=2)
+    headlines = [
+        replace(entry(1, "Timestral 時間序列模型", "AlphaSignal"), review_score=90),
+        replace(entry(2, "GitLab 權杖外洩", "TLDR InfoSec"), review_score=80),
+        # Past the headlines shown: a story matching it is related to nothing the reader sees above.
+        replace(entry(3, "Docker 漏洞", "SANS"), review_score=70),
+        entry(4, "Kubernetes 1.36 發布", "TLDR DevOps"),
+    ]
+    stories = [
+        entry(11, "GitLab 權杖經由電子郵件外洩", "Hacker News Best"),
+        entry(12, "Docker 漏洞細節", "Hacker News Best"),
+        entry(13, "Timestral 架構解析", "Hacker News Best"),
+    ]
+    judge = SameStoryJudge({frozenset(("GitLab 權杖經由電子郵件外洩", "GitLab 權杖外洩"))})
+
+    related = selection._with_related_headlines(settings, judge, stories, headlines, lambda _: None)
+
+    assert [story.related_headline for story in related] == [2, None, None]
+    # Only shortlisted pairs reach the model, and only against the headlines shown.
+    assert ("Docker 漏洞細節", "Docker 漏洞") not in judge.asked
+    assert ("Timestral 架構解析", "Timestral 時間序列模型") in judge.asked
+    assert selection._with_related_headlines(settings, judge, [], headlines, lambda _: None) == []
+    assert selection._with_related_headlines(settings, judge, stories, headlines[3:], lambda _: None) == stories

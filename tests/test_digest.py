@@ -7,6 +7,7 @@ from pydantic import HttpUrl
 
 from two_much_two_read.digest import (
     DigestEntry,
+    _lead,
     canonical_url,
     dedupe,
     dedupe_entries,
@@ -53,6 +54,78 @@ def test_renderer_and_chunks_disable_mentions() -> None:
     assert "＠everyone" in text
     chunks = chunk_text(text * 100)
     assert all(len(chunk) <= 2000 for chunk in chunks)
+
+
+def hacker_news_story(story_id: int, title: str, summary: str, **fields: object) -> DigestEntry:
+    values: dict[str, object] = {
+        "article_url": f"https://example.com/{story_id}",
+        "discussion_url": f"https://news.ycombinator.com/item?id={story_id}",
+        "hn_item_id": str(story_id),
+        "hn_score": 300,
+        "hn_comments": 120,
+        "content_basis": "article",
+        "source_name": "Hacker News Best",
+        **fields,
+    }
+    return replace(DigestEntry(item(title, None).model_copy(update={"summary_zh_tw": summary})), **values)  # type: ignore[arg-type]
+
+
+def test_hacker_news_stories_follow_the_digest_one_sentence_each() -> None:
+    stories = [
+        hacker_news_story(1, "TCP 釋放後使用漏洞", "Linux 核心 2.6 版後的 TCP 堆疊有漏洞。可遠端觸發。", related_headline=2),
+        # A self-post: its page is the discussion, so there is no article to link.
+        hacker_news_story(
+            2, "Ask HN：你們怎麼備份？", "作者詢問備份做法。", article_url="https://news.ycombinator.com/item?id=2"
+        ),
+        # Summarised from its title alone, which says nothing worth a line.
+        hacker_news_story(3, "Altoids 專案", "推測性的摘要。", content_basis="metadata"),
+    ]
+
+    text = render_digest(
+        [replace(DigestEntry(item("Headline", "https://example.com/h")), review_score=90)],
+        datetime(2026, 11, 1, tzinfo=UTC),
+        "AI",
+        "AlphaSignal, Hacker News Best",
+        reviewed=True,
+        hackernews=stories,
+    )
+
+    section = text.split("🟧 Hacker News\n")[1].split("\n\n📊")[0]
+    assert section.split("\n\n") == [
+        "1. TCP 釋放後使用漏洞\n"
+        "   Linux 核心 2.6 版後的 TCP 堆疊有漏洞。\n"
+        "   HN：300 points · 120 comments · 相關：今日重點第 2 則\n"
+        "   文章：<https://example.com/1>\n"
+        "   討論：<https://news.ycombinator.com/item?id=1>",
+        "2. Ask HN：你們怎麼備份？\n   作者詢問備份做法。\n   HN：300 points · 120 comments\n"
+        "   討論：<https://news.ycombinator.com/item?id=2>",
+        "3. Altoids 專案\n   內容：僅 metadata\n   HN：300 points · 120 comments\n"
+        "   文章：<https://example.com/3>\n   討論：<https://news.ycombinator.com/item?id=3>",
+    ]
+    assert text.index("🔥 今日重點") < text.index("🟧 Hacker News") < text.index("📊")
+    assert text.endswith("4 則有效項目")
+
+
+def test_a_day_with_only_hacker_news_still_has_a_digest() -> None:
+    story = hacker_news_story(1, "Timestral 模型", "Timestral 是新模型。")
+    text = render_digest([], datetime(2026, 11, 1, tzinfo=UTC), "AI", "Hacker News Best", reviewed=True, hackernews=[story])
+
+    assert "🔥" not in text
+    assert "1. Timestral 模型\n   Timestral 是新模型。" in text
+    assert render_digest([], datetime(2026, 11, 1, tzinfo=UTC), "AI", "", reviewed=True) == ""
+
+
+@pytest.mark.parametrize(
+    ("summary", "lead"),
+    [
+        ("DeepSeek 發布 V4.1 版。支援百萬 tokens。", "DeepSeek 發布 V4.1 版。"),
+        ("Version 2.5 ships today. It is faster.", "Version 2.5 ships today."),
+        ("沒有句號的摘要", "沒有句號的摘要"),
+        ("真的嗎？是的。", "真的嗎？"),
+    ],
+)
+def test_a_story_is_led_by_its_summarys_first_sentence(summary: str, lead: str) -> None:
+    assert _lead(summary) == lead
 
 
 def test_renderer_sanitizes_untrusted_fields_and_preserves_application_urls() -> None:

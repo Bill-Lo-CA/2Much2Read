@@ -33,6 +33,8 @@ LABELS = {
         "repeat": "🔁 前 {window} 天中有 {days} 天也有報導",
         "updated": "，今天有新進展",
         "repeat_short": "🔁 {days}/{window} 天",
+        "hackernews": "🟧 Hacker News",
+        "related": "相關：今日重點第 {number} 則",
     },
     "zh-cn": {
         "summary": "摘要",
@@ -53,6 +55,8 @@ LABELS = {
         "repeat": "🔁 前 {window} 天中有 {days} 天也有报道",
         "updated": "，今天有新进展",
         "repeat_short": "🔁 {days}/{window} 天",
+        "hackernews": "🟧 Hacker News",
+        "related": "相关：今日重点第 {number} 条",
     },
     "en": {
         "summary": "Summary",
@@ -73,6 +77,8 @@ LABELS = {
         "repeat": "🔁 Also covered on {days} of the previous {window} days",
         "updated": ", with new details today",
         "repeat_short": "🔁 {days}/{window} days",
+        "hackernews": "🟧 Hacker News",
+        "related": "Related: top story {number}",
     },
 }
 NEUTRAL_LABELS = {
@@ -94,6 +100,8 @@ NEUTRAL_LABELS = {
     "repeat": "🔁 {days}/{window}",
     "updated": " ＋",
     "repeat_short": "🔁 {days}/{window}",
+    "hackernews": "🟧",
+    "related": "🔥 {number}",
 }
 
 
@@ -126,6 +134,9 @@ class DigestEntry:
     # report adds to them: None until judged, empty when it adds none and so repeats them.
     earlier_summaries: tuple[str, ...] = ()
     new_facts: tuple[str, ...] | None = None
+    # For a Hacker News story, the number of the headline that is the same story, from
+    # selection._with_related_headlines.
+    related_headline: int | None = None
 
 
 def may_headline(entry: DigestEntry) -> bool:
@@ -589,6 +600,41 @@ def _labels(language: str) -> dict[str, str]:
     return LABELS.get(digest_language_code(language), NEUTRAL_LABELS)
 
 
+# A summary's first sentence, for the Hacker News section's one line. A Latin full stop ends it only
+# before a space or the end, so a version number or a decimal does not.
+FIRST_SENTENCE = re.compile(r".+?(?:[。！？]|[.!?](?=\s|$))", re.DOTALL)
+
+
+def _lead(summary: str) -> str:
+    match = FIRST_SENTENCE.match(summary.strip())
+    return (match.group(0) if match else summary).strip()
+
+
+def _shown(
+    entries: Sequence[DigestEntry], top_items: int, reviewed: bool
+) -> tuple[list[DigestEntry], list[DigestEntry], list[DigestEntry]]:
+    """Every eligible entry, strongest first, then those of them shown as headlines and as mentions."""
+    eligible = dedupe_entries(list(entries))
+    eligible.sort(key=_entry_rank, reverse=True)
+    # Only what the reviewer selected may hold a headline slot. Entries without a review score are
+    # the candidates it passed over, so filling spare headline slots from them would republish
+    # exactly what the final quality filter rejected. That holds even when nothing is scored: a run
+    # that skipped the reviewer because nothing had source text can still merge two bare entries
+    # from different newsletters into one with coverage, and nobody reviewed it. Only a plain item
+    # list, which never went through a review, fills the slots from what has something behind it;
+    # an entry with nothing stays a mention even there.
+    scored = [value for value in eligible if value.review_score is not None]
+    unreviewed = [] if reviewed else [value for value in eligible if has_source_text(value)]
+    top = (scored or unreviewed)[:top_items]
+    shown = {id(value) for value in top}
+    return eligible, top, [value for value in eligible if id(value) not in shown]
+
+
+def shown_headlines(entries: Sequence[DigestEntry], top_items: int) -> list[DigestEntry]:
+    """The headlines render_digest shows for these reviewed entries, in its order: headline n is item n - 1."""
+    return _shown(entries, top_items, reviewed=True)[1]
+
+
 def render_digest(
     items: Sequence[DigestItem | DigestEntry],
     when: datetime,
@@ -598,7 +644,9 @@ def render_digest(
     language: str = "zh-TW",
     *,
     reviewed: bool = False,
+    hackernews: Sequence[DigestEntry] = (),
 ) -> str:
+    """The digest's text: the headlines, the mentions, then the Hacker News stories, in the order given."""
     labels = _labels(language)
     safe_topic = sanitize_discord_text(topic)
     safe_source_names = sanitize_discord_text(source_names)
@@ -608,9 +656,8 @@ def render_digest(
         else DigestEntry(item, article_url=str(item.source_url) if item.source_url else None)
         for item in items
     ]
-    eligible = dedupe_entries(entries)
-    eligible.sort(key=_entry_rank, reverse=True)
-    if not eligible:
+    eligible, top, rest = _shown(entries, top_items, reviewed)
+    if not eligible and not hackernews:
         return ""
 
     def entry(value: DigestEntry, prefix: str) -> str:
@@ -653,25 +700,34 @@ def render_digest(
             parts.append(f"<{url}>")
         return " · ".join(parts)
 
-    # Only what the reviewer selected may hold a headline slot. Entries without a review score are
-    # the candidates it passed over, so filling spare headline slots from them would republish
-    # exactly what the final quality filter rejected. That holds even when nothing is scored: a run
-    # that skipped the reviewer because nothing had source text can still merge two bare entries
-    # from different newsletters into one with coverage, and nobody reviewed it. Only a plain item
-    # list, which never went through a review, fills the slots from what has something behind it;
-    # an entry with nothing stays a mention even there.
-    scored = [value for value in eligible if value.review_score is not None]
-    unreviewed = [] if reviewed else [value for value in eligible if has_source_text(value)]
-    top = (scored or unreviewed)[:top_items]
-    shown = {id(value) for value in top}
-    rest = [value for value in eligible if id(value) not in shown]
+    def story(value: DigestEntry, number: int) -> str:
+        """A Hacker News story is for scanning as well: its title, one sentence, and its standing there."""
+        item = value.item
+        # A story whose page could not be read was summarised from its title alone, which says nothing.
+        lead = labels["metadata"] if value.content_basis == "metadata" else sanitize_discord_text(_lead(item.summary_zh_tw))
+        lines = [f"{number}. {sanitize_discord_text(item.title)}", f"   {lead}"]
+        standing = []
+        if value.hn_score is not None and value.hn_comments is not None:
+            standing.append(f"{labels['hn']}：{value.hn_score} {labels['points']} · {value.hn_comments} {labels['comments']}")
+        if value.related_headline is not None:
+            standing.append(labels["related"].format(number=value.related_headline))
+        if standing:
+            lines.append("   " + " · ".join(standing))
+        if value.article_url and value.article_url != value.discussion_url:
+            lines.append(f"   {labels['article']}：<{value.article_url}>")
+        if value.discussion_url:
+            lines.append(f"   {labels['discussion']}：<{value.discussion_url}>")
+        return "\n".join(lines)
+
     sections = [f"📰 {safe_topic} 2much2read — {when:%Y-%m-%d}"]
     if top:
         sections.append(labels["top"] + "\n" + "\n\n".join(entry(item, f"{i}.") for i, item in enumerate(top, 1)))
     if rest:
         sections.append(labels["rest"] + "\n" + "\n".join(mention(item) for item in rest))
+    if hackernews:
+        sections.append(labels["hackernews"] + "\n" + "\n\n".join(story(value, i) for i, value in enumerate(hackernews, 1)))
     sections.append(
         f"{labels['processed']}\n{labels['topic']}{safe_topic}\n{labels['sources']}{safe_source_names} · "
-        f"{len(eligible)} {labels['valid']}"
+        f"{len(eligible) + len(hackernews)} {labels['valid']}"
     )
     return "\n\n".join(sections)

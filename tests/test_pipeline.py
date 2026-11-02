@@ -117,6 +117,10 @@ def bypass_digest_review_models(monkeypatch: pytest.MonkeyPatch) -> None:
         def rank(self, entries: Sequence[DigestEntry]) -> list[DigestEntry]:
             return list(entries)
 
+        # Falling scores, so the stories keep the feed's order.
+        def score_titles(self, titles: Sequence[str], source: str) -> list[float]:
+            return [-float(index) for index in range(len(titles))]
+
         def close(self) -> None:
             pass
 
@@ -726,11 +730,239 @@ def test_hackernews_deadline_failure_does_not_abort_later_story(tmp_path: Path, 
         lambda _: None,
         force=False,
         now=datetime(2026, 7, 24, tzinfo=UTC),
+        score_titles=lambda titles, _source: [0.0] * len(titles),
     )
 
-    assert result[:4] == (2, 2, 1, 1)
+    # The unreadable story is passed over, spending none of the budget, and skipped: the run read
+    # another, so the fetcher works.
+    assert result[:4] == (1, 2, 1, 0)
+    assert result[5] == 1
     assert database.connection.execute("SELECT COUNT(*) FROM items").fetchone()[0] == 1
     database.close()
+
+
+def hn_candidate(story_id: int, title: str, feed_rank: int, url: str | None = None) -> HackerNewsCandidate:
+    return HackerNewsCandidate(
+        SourceDocument(
+            source_type="hackernews",
+            source_id="hn-best",
+            external_id=str(story_id),
+            title=title,
+            published_at=datetime(2026, 11, 1, tzinfo=UTC),
+            source_url=HttpUrl(url or f"https://example.com/{story_id}"),
+            discussion_url=HttpUrl(f"https://news.ycombinator.com/item?id={story_id}"),
+        ),
+        "beststories",
+        feed_rank,
+        100,
+        10,
+        "external",
+        None,
+    )
+
+
+class AnalyzedStories:
+    def __init__(self) -> None:
+        self.analyzed: list[int] = []
+
+    def analyze_article(self, *args: object, **kwargs: object) -> ArticleAnalysis:
+        assert isinstance(args[1], int)
+        self.analyzed.append(args[1])
+        return ArticleAnalysis(
+            title="標題", category="OTHER", summary_zh_tw="摘要", why_it_matters_zh_tw="原因", importance=7, confidence=0.8
+        )
+
+
+def process_stories(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidates: list[HackerNewsCandidate],
+    scores: list[float],
+    unreadable: set[str],
+    budget: int,
+) -> tuple[tuple[int, int, int, int, list[int], int], list[int], list[str]]:
+    resolved: list[str] = []
+
+    class FakeHackerNewsClient:
+        def discover(self, *args: object, **kwargs: object) -> HackerNewsDiscovery:
+            return HackerNewsDiscovery(candidates, 0)
+
+    def resolve(current: HackerNewsCandidate, *args: object) -> ResolvedHackerNewsContent:
+        resolved.append(current.document.external_id)
+        if current.document.external_id in unreadable:
+            raise ArticleFetchError("ARTICLE_FETCH_FAILED")
+        return ResolvedHackerNewsContent(
+            ResolvedContent(document=current.document, text="text", basis="article", truncated=False), None
+        )
+
+    def score_titles(titles: list[str], source: str) -> list[float]:
+        assert titles == [candidate.document.title for candidate in candidates]
+        assert source == "Hacker News Best"
+        return scores
+
+    monkeypatch.setattr(ingestion, "resolve_hackernews_candidate", resolve)
+    ollama = AnalyzedStories()
+    database = Database(tmp_path / "digest.sqlite3")
+    try:
+        result = ingestion._process_hackernews_source(
+            database,
+            cast(HackerNewsClient, FakeHackerNewsClient()),
+            ollama,
+            HackerNewsSource(id="hn-best", name="Hacker News Best", max_articles_per_run=budget),
+            budget,
+            lambda _: None,
+            force=False,
+            now=datetime(2026, 11, 1, tzinfo=UTC),
+            score_titles=score_titles,
+        )
+    finally:
+        database.close()
+    return result, ollama.analyzed, resolved
+
+
+def test_hacker_news_stories_are_fetched_in_order_of_relevance(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The feed's top on 2026-11-01 led with a farmer's seeds and Norway's roadside restrooms."""
+    candidates = [
+        hn_candidate(1, "Restrooms along the Norwegian Scenic Routes", 1),
+        hn_candidate(2, "TCP Use-After-Free: CVE-2026-98432 / CVSS 9.8", 2),
+        hn_candidate(3, "An Italian farmer found some unknown seeds in his attic", 3),
+        hn_candidate(4, "Malware uses LLMs to rank victims by how much they're worth", 4),
+    ]
+
+    _, analyzed, _ = process_stories(tmp_path, monkeypatch, candidates, [0.1, 0.9, 0.2, 0.8], set(), budget=2)
+
+    assert analyzed == [2, 4]
+
+
+def test_an_unreadable_hacker_news_story_is_passed_over_for_the_next(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    candidates = [hn_candidate(number, f"Story {number}", number) for number in (1, 2, 3, 4)]
+
+    result, analyzed, resolved = process_stories(tmp_path, monkeypatch, candidates, [0.9, 0.8, 0.7, 0.6], {"1"}, budget=2)
+
+    # The budget is two stories extracted, not two fetched, and the paywall is a skip, not a failure.
+    assert (resolved, analyzed) == (["1", "2", "3"], [2, 3])
+    attempted, discovered, processed, failed, _, skipped = result
+    assert (attempted, discovered, processed, failed, skipped) == (2, 3, 2, 0, 1)
+
+
+def test_every_hacker_news_story_unreadable_is_a_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A fetcher that reads no page at all must not pass for a quiet news day."""
+    candidates = [hn_candidate(number, f"Story {number}", number) for number in (1, 2)]
+
+    result, analyzed, _ = process_stories(tmp_path, monkeypatch, candidates, [0.9, 0.8], {"1", "2"}, budget=2)
+
+    attempted, _, processed, failed, _, skipped = result
+    assert analyzed == []
+    assert (attempted, processed, failed, skipped) == (0, 0, 2, 0)
+
+
+def test_hacker_news_stories_are_a_section_apart_from_the_newsletters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Even a story linking the very article a newsletter led with stays in its own section, and says so."""
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n  - type: gmail\n    id: alphasignal\n    name: AlphaSignal\n    gmail_query: from:alphasignal.ai\n"
+        "  - type: hackernews\n    id: hn-best\n    name: Hacker News Best\n",
+        encoding="utf-8",
+    )
+    # A limit that leaves room for the newsletter's one item alone: the stories are loaded apart.
+    settings = Settings(
+        sources_config_path=sources_path,
+        database_path=tmp_path / "digest.sqlite3",
+        lock_path=tmp_path / "lock",
+        digest_rerank_candidate_limit=1,
+    )
+    checked: list[str] = []
+    shared = "https://timestral.example/launch"
+
+    def digest_item(title: str, summary: str, source_title: str | None = None) -> DigestItem:
+        return DigestItem(
+            title=title,
+            category="AI_MODEL",
+            summary_zh_tw=summary,
+            why_it_matters_zh_tw="重要原因。",
+            source_url=HttpUrl(shared),
+            importance=8,
+            confidence=0.9,
+            tags=["ai"],
+            source_title=source_title,
+        )
+
+    def process_gmail(
+        database: Database, *args: object, **kwargs: object
+    ) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
+        document_id = discover_gmail_document(database, "gmail-1", "alphasignal")
+        assert document_id is not None
+        database.store_items(
+            document_id, [digest_item("Timestral 時間序列模型發布", "Timestral 是新的時間序列模型。")], finalize=False
+        )
+        return 1, 1, 1, 0, [document_id], []
+
+    def process_hackernews(database: Database, *args: object, **kwargs: object) -> tuple[int, int, int, int, list[int], int]:
+        candidate = hn_candidate(123, "Timestral: a time-series foundation model", 1, shared)
+        document_id, _ = database.store_hackernews_metadata(candidate.document, "beststories", 1, 412, 96)
+        database.store_hackernews_resolution(
+            document_id,
+            ResolvedContent(
+                document=candidate.document, text="text", basis="article", final_url=HttpUrl(shared), truncated=False
+            ),
+        )
+        database.store_items(
+            document_id,
+            [digest_item("Timestral 時間序列基礎模型", "Timestral 在多項評測勝出。第二句不顯示。", candidate.document.title)],
+            finalize=False,
+        )
+        return 1, 1, 1, 0, [document_id], 0
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    class FakeHackerNewsClient:
+        def close(self) -> None:
+            pass
+
+    class FakeOllama:
+        def same_story(self, left: dict[str, str], right: dict[str, str]) -> bool:
+            return True
+
+        def new_facts(self, today: dict[str, str], earlier: list[str]) -> tuple[str, ...] | None:
+            return None
+
+        def back_translated(self, title: str, source_id: str = "digest") -> str | None:
+            return None
+
+        def translated_headline(self, headline: str, source_id: str = "digest") -> str | None:
+            checked.append(headline)
+            return None
+
+        def unload(self, model: str) -> bool:
+            return True
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllama())
+    monkeypatch.setattr(pipeline, "_process_source", process_gmail)
+    monkeypatch.setattr(pipeline, "_process_hackernews_source", process_hackernews)
+
+    result = run_pipeline(settings, no_deliver=True, now=datetime(2026, 11, 1, 10, tzinfo=ZoneInfo("America/Montreal")))
+
+    assert result.status == "ok"
+    database = Database(settings.database_path)
+    content = str(database.connection.execute("SELECT rendered_content FROM digests").fetchone()[0])
+    database.close()
+    headlines, stories = content.split("🟧 Hacker News\n")
+    assert "1. Timestral 時間序列模型發布" in headlines
+    assert stories.split("\n\n📊")[0].splitlines() == [
+        "1. Timestral 時間序列基礎模型",
+        "   Timestral 在多項評測勝出。",
+        "   HN：412 points · 96 comments · 相關：今日重點第 1 則",
+        f"   文章：<{shared}>",
+        "   討論：<https://news.ycombinator.com/item?id=123>",
+    ]
+    assert "Hacker News Best" in content.split("📊")[1]
+    # Its title is shown, so it is checked against the story's own, as a headline's is.
+    assert checked == ["Timestral: a time-series foundation model"]
 
 
 def test_empty_news_day_records_no_content_run(newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -855,11 +1087,74 @@ def test_run_pipeline_loads_models_sequentially(tmp_path: Path, monkeypatch: pyt
         "unload:llama3.2:3b",
         "unload:translategemma:4b",
         "reranker:load",
+        # The newsletters' entries, then the Hacker News stories, on the one load.
+        "reranker:rank",
         "reranker:rank",
         "reranker:unload",
         "reviewer:run",
         "reviewer:deepen",
         "unload:qwen3:8b",
+    ]
+
+
+def test_hacker_news_titles_are_scored_once_the_ollama_models_are_let_go(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """With RERANKER_DEVICE=cuda the reranker would otherwise load beside the extractor on one GPU."""
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n  - type: gmail\n    id: alphasignal\n    name: AlphaSignal\n    gmail_query: from:alphasignal.ai\n"
+        "  - type: hackernews\n    id: hn-best\n    name: Hacker News Best\n",
+        encoding="utf-8",
+    )
+    settings = Settings(sources_config_path=sources_path, database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "lock")
+    events: list[str] = []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    class FakeHackerNewsClient:
+        def close(self) -> None:
+            pass
+
+    class FakeReranker:
+        def __init__(self, _model: str, _device: str) -> None:
+            events.append("reranker:load")
+
+        def score_titles(self, titles: Sequence[str], source: str) -> list[float]:
+            events.append("reranker:score")
+            return [0.5] * len(titles)
+
+        def close(self) -> None:
+            events.append("reranker:unload")
+
+    def process_hackernews(
+        *args: object, score_titles: ingestion.TitleScorer, **kwargs: object
+    ) -> tuple[int, int, int, int, list[int], int]:
+        assert score_titles(["Story"], "Hacker News Best") == [0.5]
+        events.append("extractor:stories")
+        return 0, 0, 0, 0, [], 0
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "HackerNewsClient", FakeHackerNewsClient)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: object())
+    monkeypatch.setattr(
+        pipeline, "_process_source", lambda *args, **kwargs: recorded(events, "extractor:emails", (0, 0, 0, 0, [], []))
+    )
+    monkeypatch.setattr(pipeline, "_process_hackernews_source", process_hackernews)
+    monkeypatch.setattr(pipeline, "_unload_model", lambda _ollama, model, *_: events.append(f"unload:{model}"))
+    monkeypatch.setattr(pipeline, "RelevanceReranker", FakeReranker)
+
+    run_pipeline(settings, no_deliver=True)
+
+    assert events[: events.index("extractor:stories") + 1] == [
+        "extractor:emails",
+        "unload:llama3.2:3b",
+        "unload:translategemma:4b",
+        "reranker:load",
+        "reranker:score",
+        "reranker:unload",
+        "extractor:stories",
     ]
 
 
