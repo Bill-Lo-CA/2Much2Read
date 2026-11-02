@@ -25,6 +25,7 @@ from two_much_two_read.hackernews import (
     HackerNewsCandidate,
     HackerNewsClient,
     HackerNewsDiscovery,
+    HackerNewsError,
     ResolvedHackerNewsContent,
 )
 from two_much_two_read.mime import EmailExtractionError, extract_gmail_payload
@@ -780,6 +781,8 @@ def process_stories(
     scores: list[float],
     unreadable: set[str],
     budget: int,
+    broken: frozenset[str] = frozenset(),
+    statuses: list[str] | None = None,
 ) -> tuple[tuple[int, int, int, int, list[int], int], list[int], list[str]]:
     resolved: list[str] = []
 
@@ -791,6 +794,8 @@ def process_stories(
         resolved.append(current.document.external_id)
         if current.document.external_id in unreadable:
             raise ArticleFetchError("ARTICLE_FETCH_FAILED")
+        if current.document.external_id in broken:
+            raise TypeError("a hidden ancestor with a styled descendant")
         return ResolvedHackerNewsContent(
             ResolvedContent(document=current.document, text="text", basis="article", truncated=False), None
         )
@@ -810,7 +815,7 @@ def process_stories(
             ollama,
             HackerNewsSource(id="hn-best", name="Hacker News Best", max_articles_per_run=budget),
             budget,
-            lambda _: None,
+            (lambda _: None) if statuses is None else statuses.append,
             force=False,
             now=datetime(2026, 11, 1, tzinfo=UTC),
             score_titles=score_titles,
@@ -854,6 +859,114 @@ def test_every_hacker_news_story_unreadable_is_a_failure(tmp_path: Path, monkeyp
     attempted, _, processed, failed, _, skipped = result
     assert analyzed == []
     assert (attempted, processed, failed, skipped) == (0, 0, 2, 0)
+
+
+def test_a_page_that_breaks_the_parser_is_passed_over_and_named(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Third-party HTML once raised a TypeError out of the parser; one page must not end the run."""
+    candidates = [hn_candidate(number, f"Story {number}", number) for number in (1, 2)]
+    statuses: list[str] = []
+
+    result, analyzed, _ = process_stories(
+        tmp_path, monkeypatch, candidates, [0.9, 0.8], set(), budget=1, broken=frozenset({"1"}), statuses=statuses
+    )
+
+    assert analyzed == [2]
+    assert result[3] == 0
+    assert "Warning: could not read https://example.com/1 (TypeError); passed over" in statuses
+    assert "hn-best: passed over Story 1 (ARTICLE_NO_USABLE_TEXT)" in statuses
+
+
+def test_a_feed_that_cannot_be_read_is_one_failure(tmp_path: Path) -> None:
+    class UnreachableFeed:
+        def discover(self, *args: object, **kwargs: object) -> HackerNewsDiscovery:
+            raise HackerNewsError("HN_FEED_FETCH_FAILED")
+
+    statuses: list[str] = []
+    database = Database(tmp_path / "digest.sqlite3")
+    try:
+        result = ingestion._process_hackernews_source(
+            database,
+            cast(HackerNewsClient, UnreachableFeed()),
+            AnalyzedStories(),
+            HackerNewsSource(id="hn-best", name="Hacker News Best"),
+            10,
+            statuses.append,
+            force=False,
+            now=datetime(2026, 11, 2, tzinfo=UTC),
+            score_titles=lambda titles, _source: pytest.fail("there is nothing to rank"),
+        )
+    finally:
+        database.close()
+
+    assert result == (0, 0, 0, 1, [], 0)
+    assert statuses[-1] == "Warning: hn-best: could not read the feed (HN_FEED_FETCH_FAILED)"
+
+
+def test_a_hacker_news_outage_costs_the_newsletters_nothing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    sources_path = tmp_path / "sources.yaml"
+    sources_path.write_text(
+        "sources:\n  - type: gmail\n    id: alphasignal\n    name: AlphaSignal\n    gmail_query: from:alphasignal.ai\n"
+        "  - type: hackernews\n    id: hn-best\n    name: Hacker News Best\n",
+        encoding="utf-8",
+    )
+    settings = Settings(sources_config_path=sources_path, database_path=tmp_path / "digest.sqlite3", lock_path=tmp_path / "lock")
+
+    def process_gmail(
+        database: Database, *args: object, **kwargs: object
+    ) -> tuple[int, int, int, int, list[int], list[tuple[int, str]]]:
+        document_id = discover_gmail_document(database, "gmail-1", "alphasignal")
+        assert document_id is not None
+        database.store_items(
+            document_id,
+            [
+                DigestItem(
+                    title="Timestral 時間序列模型發布",
+                    category="AI_MODEL",
+                    summary_zh_tw="Timestral 是新的時間序列模型。",
+                    why_it_matters_zh_tw="重要原因。",
+                    source_url=HttpUrl("https://timestral.example/launch"),
+                    importance=8,
+                    confidence=0.9,
+                    tags=["ai"],
+                )
+            ],
+            finalize=False,
+        )
+        return 1, 1, 1, 0, [document_id], []
+
+    class FakeGmailClient:
+        def ensure_labels(self) -> None:
+            pass
+
+    class UnreachableFeed:
+        def discover(self, *args: object, **kwargs: object) -> HackerNewsDiscovery:
+            raise HackerNewsError("HN_FEED_FETCH_FAILED")
+
+        def close(self) -> None:
+            pass
+
+    class FakeOllama:
+        def new_facts(self, today: dict[str, str], earlier: list[str]) -> tuple[str, ...] | None:
+            return None
+
+        def unload(self, model: str) -> bool:
+            return True
+
+    monkeypatch.setattr(pipeline, "credentials", lambda *args: object())
+    monkeypatch.setattr(pipeline, "GmailClient", lambda _: FakeGmailClient())
+    monkeypatch.setattr(pipeline, "HackerNewsClient", UnreachableFeed)
+    monkeypatch.setattr(pipeline, "create_ollama_client", lambda _: FakeOllama())
+    monkeypatch.setattr(pipeline, "_process_source", process_gmail)
+
+    result = run_pipeline(settings, no_deliver=True, now=datetime(2026, 11, 2, 10, tzinfo=ZoneInfo("America/Montreal")))
+
+    # Partial, so the scheduled unit reports it, but the digest is there.
+    assert (result.status, result.processed, result.failed) == ("partial", 1, 1)
+    database = Database(settings.database_path)
+    content = str(database.connection.execute("SELECT rendered_content FROM digests").fetchone()[0])
+    database.close()
+    assert "1. Timestral 時間序列模型發布" in content
+    assert "🟧 Hacker News" not in content
 
 
 def test_hacker_news_stories_are_a_section_apart_from_the_newsletters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
