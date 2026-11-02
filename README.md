@@ -468,7 +468,10 @@ and the like - so each run scores the titles of up to `max_story_candidates` sto
 `max_age_hours` with the reranker, on the question it asks of every entry, and fetches the best
 first. A story whose article cannot be read, behind a paywall or a robots rule, is passed over for
 the next and counted as skipped; only a run in which no article could be read at all counts them as
-failures, since that is a fetcher that is broken. A story that is the same story as one of the
+failures, since that is a fetcher that is broken. A page that breaks the article parser is passed
+over the same way, with a warning naming the error. A feed that cannot be read at all costs the run
+its Hacker News section and nothing else: the newsletters' digest is still made and sent, and the
+run is `partial`, counting the one failure. A story that is the same story as one of the
 headlines says which, as "相關：今日重點第 2 則", judged as merging judges and within a budget of
 `DIGEST_MERGE_JUDGEMENTS` of its own.
 

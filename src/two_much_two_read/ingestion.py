@@ -285,6 +285,21 @@ def _by_relevance(
     return [candidates[index] for index in order]
 
 
+def _story_text(candidate: HackerNewsCandidate, fetcher: ArticleFetcher, status: StatusReporter) -> ResolvedContent | str:
+    """The story's readable text, or the code it could not be read with."""
+    try:
+        return resolve_hackernews_candidate(candidate, fetcher).content
+    except (ArticleFetchError, ArticleExtractionError) as error:
+        return error.code
+    except Exception as error:
+        # Deliberately broad, for the reason headlines._headline_source gives: this parses
+        # third-party HTML, and a hidden ancestor with a styled descendant once raised a TypeError
+        # out of the parser. No shape of page may end a run that carries the day's newsletters too.
+        # Anything reaching here is a defect rather than an unreadable page, so it is named.
+        status(f"Warning: could not read {candidate.document.source_url} ({type(error).__name__}); passed over")
+        return "ARTICLE_NO_USABLE_TEXT"
+
+
 def _process_hackernews_source(
     database: Database,
     hackernews: HackerNewsClient,
@@ -337,7 +352,14 @@ def _process_hackernews_source(
         status(f"{source.id}: scanning stories")
         # Keep normal filtering in `skipped`, but count unreadable items as failures so a broken
         # item endpoint cannot make a scheduled run look like a quiet news day.
-        discovery = hackernews.discover(source, now, limit=source.max_story_candidates)
+        try:
+            discovery = hackernews.discover(source, now, limit=source.max_story_candidates)
+        except HackerNewsError as error:
+            # The feed itself could not be read, so there is nothing to choose from. The run goes on
+            # without the section rather than losing the newsletters' digest with it, and counts
+            # the failure, so that it says so.
+            status(f"Warning: {source.id}: could not read the feed ({error})")
+            return 0, 0, 0, 1, [], 0
         candidates = discovery.candidates
         skipped = discovery.skipped
         failed += discovery.unreadable
@@ -365,17 +387,17 @@ def _process_hackernews_source(
         )
         discovered += int(created)
         status(f"{source.id}: resolving {candidate.document.title}")
-        try:
-            resolved = resolve_hackernews_candidate(candidate, fetcher).content
-            database.store_hackernews_resolution(document_id, resolved)
-        except (ArticleFetchError, ArticleExtractionError) as error:
-            database.record_hackernews_fetch_failure(document_id, error.code)
+        resolved = _story_text(candidate, fetcher, status)
+        if isinstance(resolved, str):
+            database.record_hackernews_fetch_failure(document_id, resolved)
             if not source.allow_metadata_fallback:
                 unreadable += 1
-                status(f"{source.id}: passed over {candidate.document.title} ({error.code})")
+                status(f"{source.id}: passed over {candidate.document.title} ({resolved})")
                 continue
             resolved = ResolvedContent(document=candidate.document, text="", basis="metadata", truncated=False)
             status(f"{source.id}: analyzing metadata only for {candidate.document.title}")
+        else:
+            database.store_hackernews_resolution(document_id, resolved)
         attempted += 1
 
         status(f"{source.id}: analyzing {candidate.document.title}")
