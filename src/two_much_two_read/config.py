@@ -173,6 +173,15 @@ class Settings(BaseSettings):
     # Age at which run history and derived rows are pruned. The document and Gmail-state ledgers
     # are exempt whatever this is set to - see Database.prune.
     retention_days: int = Field(default=30, ge=1)
+    # From which level this project's log lines reach stderr - the journal, under systemd. A run's
+    # status lines are logged there too when no terminal shows them: INFO shows them all, the default
+    # only those that warn. Libraries' own loggers are left alone; see two_read_runtime.logs.
+    log_level: Literal["DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"] = "WARNING"
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def upper_case_log_level(cls, value: object) -> object:
+        return value.upper() if isinstance(value, str) else value
 
     @field_validator("digest_timezone")
     @classmethod

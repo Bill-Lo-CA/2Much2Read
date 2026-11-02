@@ -1,6 +1,8 @@
 import base64
 import json
+import logging
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime
 from typing import Any
 
@@ -91,6 +93,30 @@ def test_run_and_backfill_report_invalid_settings_without_a_traceback(
     assert result.exit_code == 2
     assert "unknown IANA timezone" in result.output
     assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize(("level", "shown"), [("INFO", True), ("WARNING", False)])
+@pytest.mark.usefixtures("project_logging")
+def test_log_level_sets_what_a_run_logs_and_leaves_library_logs_alone(
+    level: str, shown: bool, newsletter_settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def fake_run_pipeline(*args: object, status: Callable[[str], None], **kwargs: object) -> NewsletterRunResult:
+        logging.getLogger("two_much_two_read.pipeline").info("ranked 12 candidates")
+        status("hn-1: resolving")
+        # httpx logs each request's URL at INFO, and a webhook URL carries its token.
+        logging.getLogger("httpx").info("HTTP Request: POST %s", newsletter_settings.discord_webhook_url)
+        return NewsletterRunResult(status="ok", discovered=1, processed=1, failed=0, delivered=0)
+
+    monkeypatch.setattr(cli, "Settings", lambda: newsletter_settings.model_copy(update={"log_level": level}))
+    monkeypatch.setattr(cli, "run_pipeline", fake_run_pipeline)
+
+    result = CliRunner().invoke(cli.app, ["run"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["status"] == "ok"
+    assert ("INFO two_much_two_read.pipeline: ranked 12 candidates" in result.stderr) is shown
+    assert ("INFO two_read_runtime.progress: hn-1: resolving" in result.stderr) is shown
+    assert "test-webhook-token" not in result.output
 
 
 def test_run_avoids_ansi_progress_when_stderr_is_not_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:

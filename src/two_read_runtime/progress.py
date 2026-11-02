@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import sys
 from collections.abc import Callable
 from shutil import get_terminal_size
@@ -11,6 +12,24 @@ from .text import is_inert
 
 Result = TypeVar("Result")
 StatusReporter = Callable[[str], None]
+logger = logging.getLogger(__name__)
+
+
+def _one_line(message: str) -> str:
+    # Status lines carry Gmail subjects and Hacker News titles, so this is untrusted text on its way
+    # to a terminal or a log. keep="" because a status line is one line: a newline here would break
+    # out of the scroll region the live display sets up, or forge a line of its own in the journal.
+    return "".join(character if is_inert(character, keep="") else " " for character in message)
+
+
+def _log_status(message: str) -> None:
+    """A status line where no terminal shows it: a scheduled run's journal, at LOG_LEVEL=INFO.
+
+    The lines reporting something wrong all start "Warning:" and are logged as warnings, so the
+    default level still shows them - an article the headline rewrite could not parse, say. They
+    were dropped outright before, along with every other status line, whenever stderr was no TTY.
+    """
+    logger.log(logging.WARNING if message.startswith("Warning:") else logging.INFO, "%s", _one_line(message))
 
 
 def _format_elapsed(seconds: float) -> str:
@@ -56,7 +75,7 @@ def run_with_elapsed(label: str, operation: Callable[[], Result], interval: floa
 
 def run_with_live_progress(label: str, operation: Callable[[StatusReporter], Result], interval: float = 1.0) -> Result:
     if not sys.stderr.isatty():
-        return operation(lambda _: None)
+        return operation(_log_status)
     start = monotonic()
     stop = Event()
     output = sys.stderr
@@ -75,10 +94,7 @@ def run_with_live_progress(label: str, operation: Callable[[StatusReporter], Res
         output.flush()
 
     def report(message: str) -> None:
-        # Status lines carry Gmail subjects and Hacker News titles, so this is untrusted text on its
-        # way to a terminal. keep="" because a status line is one line: a newline here would break
-        # out of the scroll region this display sets up.
-        safe_message = "".join(character if is_inert(character, keep="") else " " for character in message)
+        safe_message = _one_line(message)
         with lock:
             refresh_timer()
             output.write(f"\r\033[K{safe_message}\n")

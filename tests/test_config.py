@@ -281,6 +281,14 @@ def test_an_unknown_timezone_is_rejected_when_the_settings_are_built() -> None:
         Settings(digest_timezone="Not/AZone")
 
 
+def test_the_log_level_is_a_level_name_in_either_case() -> None:
+    assert Settings().log_level == "WARNING"
+    assert Settings(log_level="info").log_level == "INFO"
+
+    with pytest.raises(ValidationError):
+        Settings(log_level="verbose")
+
+
 def test_implausible_ollama_limits_are_rejected() -> None:
     for value in (0, -1, 512):
         with pytest.raises(ValidationError):

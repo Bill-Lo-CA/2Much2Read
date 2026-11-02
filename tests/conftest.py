@@ -1,4 +1,5 @@
 import hashlib
+import logging
 from collections.abc import Iterator
 from pathlib import Path
 from typing import TypeVar
@@ -9,6 +10,7 @@ from two_busy_one_miss.config import Settings as CalendarSettings
 from two_busy_one_miss.storage import Database as CalendarDatabase
 from two_much_two_read.config import Settings as NewsletterSettings
 from two_much_two_read.storage import Database as NewsletterDatabase
+from two_read_runtime.logs import PROJECT_LOGGERS
 
 T = TypeVar("T")
 
@@ -83,6 +85,17 @@ def calendar_database(calendar_settings: CalendarSettings) -> Iterator[CalendarD
         yield database
     finally:
         database.close()
+
+
+@pytest.fixture
+def project_logging() -> Iterator[None]:
+    """This project's loggers as they were before the test configured them; see configure_logging."""
+    loggers = [logging.getLogger(name) for name in PROJECT_LOGGERS]
+    saved = [(logger.level, list(logger.handlers)) for logger in loggers]
+    yield
+    for logger, (level, handlers) in zip(loggers, saved, strict=True):
+        logger.setLevel(level)
+        logger.handlers[:] = handlers
 
 
 @pytest.fixture(autouse=True)

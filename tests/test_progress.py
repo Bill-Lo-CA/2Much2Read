@@ -1,9 +1,11 @@
 import io
+import sys
 from collections.abc import Callable
 
 import pytest
 
 from two_read_runtime import progress
+from two_read_runtime.logs import configure_logging
 
 
 class TtyBuffer(io.StringIO):
@@ -59,16 +61,30 @@ def test_live_progress_neutralizes_control_characters_in_untrusted_status_text(m
     assert "hn-1: resolving  2J [31mtake over the terminal" in output
 
 
-def test_live_progress_is_silent_without_a_tty(monkeypatch: pytest.MonkeyPatch) -> None:
+FORGED = "hn-1: resolving\nWARNING two_much_two_read: forged"
+WARNING = "Warning: could not read https://example.com/a (TypeError); using the newsletter summaries"
+LOGGED_INFO = "INFO two_read_runtime.progress: hn-1: resolving WARNING two_much_two_read: forged"
+LOGGED_WARNING = f"WARNING two_read_runtime.progress: {WARNING}"
+
+
+@pytest.mark.parametrize(
+    ("level", "logged"), [("INFO", [LOGGED_INFO, LOGGED_WARNING]), ("WARNING", [LOGGED_WARNING]), ("ERROR", [])]
+)
+@pytest.mark.usefixtures("project_logging")
+def test_live_progress_logs_its_status_lines_without_a_tty(
+    level: str, logged: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A scheduled run has no terminal, and its status lines - the warnings among them - were dropped."""
     stderr = io.StringIO()
-    monkeypatch.setattr("two_read_runtime.progress.sys.stderr", stderr)
-    messages: list[str] = []
+    monkeypatch.setattr(sys, "stderr", stderr)
+    configure_logging(level)
 
     def operation(report: progress.StatusReporter) -> str:
-        report("not shown")
-        messages.append("finished")
+        report(FORGED)
+        report(WARNING)
         return "done"
 
     assert progress.run_with_live_progress("job", operation) == "done"
-    assert messages == ["finished"]
-    assert stderr.getvalue() == ""
+    # One line per status line: a title's newline cannot forge a journal line of its own.
+    assert stderr.getvalue().splitlines() == logged
+    assert "\033" not in stderr.getvalue()

@@ -8,6 +8,7 @@ import httpx
 import typer
 from pydantic import BaseModel, ValidationError
 
+from two_read_runtime.logs import configure_logging
 from two_read_runtime.progress import run_with_live_progress
 
 from .command_models import MailSelector, SubscriptionCandidate
@@ -48,6 +49,18 @@ app.add_typer(subscriptions_app, name="subscriptions")
 app.add_typer(delivery_app, name="delivery")
 app.add_typer(hackernews_app, name="hackernews")
 app.add_typer(maintenance_app, name="maintenance")
+
+
+@app.callback()
+def configure_logs() -> None:
+    # Before every command, so LOG_LEVEL holds for all of them. Settings that do not load are the
+    # command's to report, with its own message and exit code, so they are left for it to meet.
+    try:
+        level = Settings().log_level
+    except ValueError:
+        return
+    configure_logging(level)
+
 
 SourceOption = Annotated[str | None, typer.Option("--source")]
 QueryOption = Annotated[str | None, typer.Option("--query")]
