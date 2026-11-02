@@ -2,7 +2,7 @@
 set -eu
 
 systemctl --user disable --now 2much2read-runtime.timer || true
-# The run can take up to TimeoutStartSec=30min, so removing the unit files without stopping the
+# The run can take up to TimeoutStartSec=60min, so removing the unit files without stopping the
 # service leaves a live process running from units that no longer exist.
 systemctl --user stop 2much2read-runtime.service || true
 service_status=0

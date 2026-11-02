@@ -739,6 +739,12 @@ carries its token.
 retry command after fixing the webhook or network. `doctor` checks local setup
 without posting unless `--send-test` is explicitly supplied.
 
+An email whose extraction outruns `OLLAMA_TIMEOUT_SECONDS` ends the run with
+`OLLAMA_EXTRACT_TIMEOUT` and is neither failed nor labelled, since a stalled Ollama would time out
+every email and a Failed email is never read again. The next run reads everything again and gives
+that email two tries in a row: if both time out, it alone fails and is labelled Failed, and the run
+goes on. An Ollama that cannot be reached at all ends every run and fails no email.
+
 ## Development
 
 ```bash
