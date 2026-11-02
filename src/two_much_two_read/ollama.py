@@ -278,6 +278,8 @@ Return exactly schema-conforming JSON and no reasoning or commentary."""
 SCAN_RESERVED_TOKENS_PER_STORY = 40
 # Stories asked for when the scan fails: the old fixed cap.
 UNSCANNED_ITEMS = 10
+# Ample for a loaded model's one token, or for loading it again: 1.3 seconds for qwen3:4b here.
+PROBE_TIMEOUT_SECONDS = 60
 SPONSOR_MARK = re.compile(r"\(\s*sponsor(?:ed)?\s*\)", re.IGNORECASE)
 HEADLINE_FILLER = frozenset({"the", "a", "an", "of", "to", "and", "in", "for", "with", "on", "is", "your"})
 EXTRACT_RESERVED_OUTPUT_BASE = 300
@@ -1441,6 +1443,33 @@ class OllamaClient:
             logger.warning("failed to unload %s, it may still hold memory: %s", model, error)
             return False
         return True
+
+    def responds(self) -> bool:
+        """Whether the extraction model answers a one-token request within PROBE_TIMEOUT_SECONDS.
+
+        Asked once an email's extraction has timed out twice in a row (ingestion._extraction), to
+        tell an email the model cannot finish from an Ollama that answers nobody. The num_ctx is
+        extraction's own, since any other would reload the model being asked about. The timed-out
+        request does not stand in the way: on Ollama 0.21.0, after an 8-second timeout on a
+        generation that runs 84 seconds to the end, this answered in 0.09 seconds.
+        """
+        try:
+            response = self._client.post(
+                f"{self.base_url}/api/chat",
+                json={
+                    "model": self.model,
+                    "messages": [{"role": "user", "content": "Reply with OK."}],
+                    "stream": False,
+                    "think": False,
+                    "keep_alive": self.keep_alive,
+                    "options": {"temperature": 0, "num_ctx": self.num_ctx, "num_predict": 1},
+                },
+                timeout=min(PROBE_TIMEOUT_SECONDS, self.timeout),
+            )
+            response.raise_for_status()
+            return isinstance(response.json()["message"]["content"], str)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return False
 
 
 def create_ollama_client(settings: Settings) -> OllamaClient:

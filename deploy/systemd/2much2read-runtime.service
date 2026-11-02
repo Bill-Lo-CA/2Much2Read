@@ -7,9 +7,9 @@ EnvironmentFile=%h/.config/2much2read-runtime/.2much2read.env
 Environment=HF_HOME=%h/.local/share/2much2read-runtime/2much2read/huggingface
 ExecStart=__EXECUTABLE__ run
 # Room for the run after an email's extraction timed out, which gives that email two tries: up to
-# four OLLAMA_TIMEOUT_SECONDS waits, story scan and extraction each time, on top of the usual run
-# of up to twenty minutes. A run killed here records nothing, so every run after would be killed
-# at the same email.
+# four OLLAMA_TIMEOUT_SECONDS waits, story scan and extraction each time, and a probe of up to a
+# minute, on top of the usual run of up to twenty minutes. A run killed here records nothing, so
+# every run after would be killed at the same email.
 TimeoutStartSec=60min
 NoNewPrivileges=true
 PrivateTmp=true

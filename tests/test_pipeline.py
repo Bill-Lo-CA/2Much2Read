@@ -2326,12 +2326,21 @@ class TimingOutGmail:
 
 
 class TimingOutOllama:
-    """Fails the email "slow" with error for its first timeouts tries, and answers every other."""
+    """Fails the email "slow" with error for its first timeouts tries, and answers every other.
 
-    def __init__(self, timeouts: int, error: type[httpx.TransportError] = httpx.ReadTimeout) -> None:
+    A probe answers when responding is True.
+    """
+
+    def __init__(self, timeouts: int, error: type[httpx.TransportError] = httpx.ReadTimeout, *, responding: bool = True) -> None:
         self.timeouts = timeouts
         self.error = error
+        self.responding = responding
         self.tries: list[str] = []
+        self.probes = 0
+
+    def responds(self) -> bool:
+        self.probes += 1
+        return self.responding
 
     def extract(self, source_id: str, body: str, *args: object) -> EmailExtraction:
         self.tries.append(body)
@@ -2381,8 +2390,29 @@ def test_an_email_that_times_out_ends_the_run_and_fails_alone_after_two_more_tri
 
     assert (result.status, result.processed, result.failed) == ("partial", 1, 1)
     assert ollama.tries == ["slow", "slow", "slow", "quick"]
+    # Asked once, after the second try: the model answers, so the email is what it cannot finish.
+    assert ollama.probes == 1
     assert gmail.labels == [("slow", "failed"), ("quick", "processed")]
     assert document_states(settings) == [("failed", "OLLAMA_EXTRACT_TIMEOUT"), ("processed", None)]
+
+
+def test_an_email_that_times_out_again_while_ollama_answers_nothing_is_kept_for_the_next_run(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    gmail = TimingOutGmail()
+    ollama = TimingOutOllama(timeouts=3, responding=False)
+    settings = timing_out_run(tmp_path, monkeypatch, gmail, ollama)
+    with pytest.raises(ingestion.ExtractionTimeoutError):
+        run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 22, tzinfo=ZoneInfo("America/Montreal")))
+
+    # A stall that outlasts a run, not the email: passing it over would lose a sound email a day.
+    with pytest.raises(ingestion.ExtractionTimeoutError, match="Ollama answers nothing at all; it is kept for the next run"):
+        run_pipeline(settings, no_deliver=True, now=datetime(2026, 7, 23, tzinfo=ZoneInfo("America/Montreal")))
+
+    assert ollama.tries == ["slow", "slow", "slow"]
+    assert ollama.probes == 1
+    assert gmail.labels == []
+    assert document_states(settings) == [("discovered", "OLLAMA_EXTRACT_TIMEOUT")]
 
 
 def test_an_email_that_timed_out_and_answers_its_second_try_is_kept(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2396,6 +2426,7 @@ def test_an_email_that_timed_out_and_answers_its_second_try_is_kept(tmp_path: Pa
 
     assert (result.processed, result.failed) == (2, 0)
     assert ollama.tries == ["slow", "slow", "slow", "quick"]
+    assert ollama.probes == 0
     assert document_states(settings) == [("processed", None), ("processed", None)]
 
 

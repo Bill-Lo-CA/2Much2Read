@@ -112,8 +112,11 @@ def _extraction(
     the run - as Ollama being unreachable does - and the next run reads everything again. But an
     email that outruns the timeout by itself, with the model repeating itself until the context is
     full, would then end every run for as long as it stays within GMAIL_LOOKBACK_DAYS. So the
-    timeout is recorded against the email, and the next run gives it two tries in a row: if both
-    time out, it fails alone and the run goes on.
+    timeout is recorded against the email, and the next run gives it two tries in a row. If both
+    time out and the model still answers a one-token probe, the email is what it cannot finish: it
+    fails alone and the run goes on. A model that answers nothing has stalled again, or still - a
+    stall over two runs would otherwise pass over one sound email a day - so the run ends as at
+    first, and the record stands for the run after.
 
     Only a read timeout counts. Ollama answering nothing at all - refused, or a connect timeout -
     says nothing about the email, and still ends the run every time.
@@ -132,6 +135,11 @@ def _extraction(
                     "the next run tries it twice, then passes it over"
                 ) from error
             status(f"Warning: {source.id}: extraction timed out again ({attempt} of {tries})")
+    if not ollama.responds():
+        raise ExtractionTimeoutError(
+            f"{EXTRACT_TIMEOUT}: document {document_id} from {source.id} timed out twice more, but Ollama "
+            "answers nothing at all; it is kept for the next run"
+        )
     return EXTRACT_TIMEOUT
 
 
