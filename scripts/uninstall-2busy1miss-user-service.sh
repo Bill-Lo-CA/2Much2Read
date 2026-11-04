@@ -2,9 +2,10 @@
 set -eu
 
 systemctl --user disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer || true
+systemctl --user disable --now 2busy1miss-todo-web.service || true
 systemctl --user stop 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service || true
 service_status=0
-systemctl --user is-active --quiet 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service || service_status=$?
+systemctl --user is-active --quiet 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service 2busy1miss-todo-web.service || service_status=$?
 case "$service_status" in
   3|4) ;;
   0)
@@ -20,5 +21,6 @@ rm -f \
   "$HOME/.config/systemd/user/2busy1miss-runtime.service" \
   "$HOME/.config/systemd/user/2busy1miss-runtime.timer" \
   "$HOME/.config/systemd/user/2busy1miss-runtime-agenda.service" \
-  "$HOME/.config/systemd/user/2busy1miss-runtime-agenda.timer"
+  "$HOME/.config/systemd/user/2busy1miss-runtime-agenda.timer" \
+  "$HOME/.config/systemd/user/2busy1miss-todo-web.service"
 systemctl --user daemon-reload

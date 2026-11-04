@@ -306,6 +306,7 @@ def test_newsletter_installer_rejects_invalid_schedule(tmp_path: Path, setting: 
                 "2busy1miss-runtime.timer",
                 "2busy1miss-runtime-agenda.service",
                 "2busy1miss-runtime-agenda.timer",
+                "2busy1miss-todo-web.service",
             ],
             "disable --now 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer",
             "stop 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service",
@@ -941,3 +942,263 @@ def test_the_shell_running_the_installer_does_not_choose_the_schedule(tmp_path: 
     assert "ignoring AGENDA_SCHEDULE_TIME, DISCORD_BOT_TOKEN, REMINDERS_CONFIG_PATH, reminder_timezone" in stderr
     # Names only: the values of settings like this one are secrets.
     assert "not-for-the-log" not in stderr
+
+
+TAILSCALE_ADDRESS = "100.89.225.36"
+SECRET_WEBHOOK = "https://discord.com/api/webhooks/123456789012345678/secret-webhook-token"
+
+
+def _run_todo_web_installer(
+    tmp_path: Path,
+    *arguments: str,
+    answer: str = "y\n",
+    reminders: str = "timezone: America/Toronto\ncalendars:\n  - id: primary\n",
+    env: str = f"DISCORD_WEBHOOK_URL={SECRET_WEBHOOK}\n",
+    tailscale_output: str = TAILSCALE_ADDRESS,
+    tailscale_status: int = 0,
+) -> tuple[subprocess.CompletedProcess[str], Path, str]:
+    root = Path(__file__).parents[1]
+    home = tmp_path / "home"
+    config_root = home / ".config" / "2much2read-runtime"
+    config_root.mkdir(parents=True)
+    (config_root / "reminders.yaml").write_text(reminders, encoding="utf-8")
+    (config_root / ".2busy1miss.env").write_text(env, encoding="utf-8")
+    (home / ".local" / "share" / "2much2read-runtime" / "2busy1miss").mkdir(parents=True)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "systemctl.log"
+    log.touch()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n', encoding="utf-8")
+    systemctl.chmod(0o755)
+    tailscale = fake_bin / "tailscale"
+    tailscale.write_text(f'#!/bin/sh\nprintf "%s\\n" "{tailscale_output}"\nexit {tailscale_status}\n', encoding="utf-8")
+    tailscale.chmod(0o755)
+    result = subprocess.run(
+        ["sh", "scripts/install-2busy1miss-todo-web.sh", *arguments],
+        cwd=root,
+        env=os.environ
+        | {
+            "HOME": str(home),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SYSTEMCTL_LOG": str(log),
+            # A variable in this shell must not outrank the managed file the service would read.
+            "REMINDER_TIMEZONE": "Asia/Tokyo",
+        },
+        text=True,
+        capture_output=True,
+        input=answer,
+    )
+    return result, home / ".config" / "systemd" / "user" / "2busy1miss-todo-web.service", log.read_text(encoding="utf-8")
+
+
+def test_todo_web_installer_writes_a_unit_with_no_way_to_the_credentials(tmp_path: Path) -> None:
+    result, unit, calls = _run_todo_web_installer(tmp_path)
+
+    assert result.returncode == 0, result.stderr
+    root = Path(__file__).parents[1]
+    contents = unit.read_text(encoding="utf-8")
+    assert f"ExecStart={root}/.venv/bin/2busy1miss todo serve --host {TAILSCALE_ADDRESS} --port 8766\n" in contents
+    assert "Environment=REMINDER_TIMEZONE=America/Toronto\n" in contents
+    assert f"BindReadOnlyPaths={root}/.venv {root}/src %h/.config/2much2read-runtime/reminders.yaml\n" in contents
+    assert "BindPaths=%h/.local/share/2much2read-runtime/2busy1miss\n" in contents
+    assert "ProtectHome=tmpfs\n" in contents
+    assert "\nEnvironmentFile=" not in contents
+    assert "__" not in contents
+    assert SECRET_WEBHOOK not in contents
+    assert SECRET_WEBHOOK not in result.stdout + result.stderr
+    assert f"TODO_WEB_URL=http://{TAILSCALE_ADDRESS}:8766/\n" in result.stdout
+    assert calls.splitlines() == [
+        "--user daemon-reload",
+        "--user enable 2busy1miss-todo-web.service",
+        "--user restart 2busy1miss-todo-web.service",
+    ]
+
+
+def test_todo_web_installer_starts_nothing_unless_told_to(tmp_path: Path) -> None:
+    result, unit, calls = _run_todo_web_installer(tmp_path, answer="\n")
+
+    assert result.returncode == 0, result.stderr
+    assert unit.is_file()
+    assert calls.splitlines() == ["--user daemon-reload"]
+    assert "not started" in result.stdout
+
+
+def test_todo_web_installer_takes_a_timezone_only_the_environment_file_names(tmp_path: Path) -> None:
+    result, unit, _ = _run_todo_web_installer(
+        tmp_path, reminders="calendars:\n  - id: primary\n", env="REMINDER_TIMEZONE=Europe/Berlin\n"
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert "Environment=REMINDER_TIMEZONE=Europe/Berlin\n" in unit.read_text(encoding="utf-8")
+
+
+def test_todo_web_installer_uses_the_port_it_is_given(tmp_path: Path) -> None:
+    result, unit, _ = _run_todo_web_installer(tmp_path, "--port", "9000")
+
+    assert result.returncode == 0, result.stderr
+    assert "--port 9000\n" in unit.read_text(encoding="utf-8")
+    assert f"TODO_WEB_URL=http://{TAILSCALE_ADDRESS}:9000/\n" in result.stdout
+
+
+@pytest.mark.parametrize(
+    ("tailscale_output", "tailscale_status"),
+    [("", 1), ("", 0), ("fd7a:115c:a1e0::7434:e125", 0), ("100.89.225.36|evil", 0)],
+)
+def test_todo_web_installer_needs_a_tailscale_address(tmp_path: Path, tailscale_output: str, tailscale_status: int) -> None:
+    result, unit, calls = _run_todo_web_installer(tmp_path, tailscale_output=tailscale_output, tailscale_status=tailscale_status)
+
+    assert result.returncode == 1
+    assert "no Tailscale address" in result.stderr
+    assert not unit.exists()
+    assert calls == ""
+
+
+@pytest.mark.parametrize("port", ["8766|evil", "1023", "80", "65536", "99999", "0", "008766", ""])
+def test_todo_web_installer_refuses_a_port_the_command_would_not_take(tmp_path: Path, port: str) -> None:
+    result, unit, _ = _run_todo_web_installer(tmp_path, "--port", port)
+
+    assert result.returncode == 2
+    assert "--port requires a number" in result.stderr or "from 1024 to 65535" in result.stderr
+    assert not unit.exists()
+
+
+def test_todo_web_installer_says_a_port_was_left_out(tmp_path: Path) -> None:
+    result, unit, _ = _run_todo_web_installer(tmp_path, "--port")
+
+    assert result.returncode == 2
+    assert "--port requires a number" in result.stderr
+    assert not unit.exists()
+
+
+@pytest.mark.parametrize("port", ["1024", "65535"])
+def test_todo_web_installer_takes_the_ends_of_the_port_range(tmp_path: Path, port: str) -> None:
+    result, unit, _ = _run_todo_web_installer(tmp_path, "--port", port)
+
+    assert result.returncode == 0, result.stderr
+    assert f"--port {port}\n" in unit.read_text(encoding="utf-8")
+
+
+def test_uninstaller_takes_the_todo_page_down_with_the_rest(tmp_path: Path) -> None:
+    root = Path(__file__).parents[1]
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "systemctl.log"
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n[ "$2" = "is-active" ] && exit 3\nexit 0\n',
+        encoding="utf-8",
+    )
+    systemctl.chmod(0o755)
+
+    subprocess.run(
+        ["sh", "scripts/uninstall-2busy1miss-user-service.sh"],
+        cwd=root,
+        env=os.environ | {"HOME": str(tmp_path / "home"), "PATH": f"{fake_bin}:{os.environ['PATH']}", "SYSTEMCTL_LOG": str(log)},
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    calls = log.read_text(encoding="utf-8")
+    assert "disable --now 2busy1miss-todo-web.service" in calls
+    assert "is-active --quiet 2busy1miss-runtime.service 2busy1miss-runtime-agenda.service 2busy1miss-todo-web.service" in calls
+
+
+def test_todo_web_installer_names_only_the_type_of_a_settings_failure(tmp_path: Path) -> None:
+    rejected = "secret-value-that-is-not-a-timezone"
+    result, unit, calls = _run_todo_web_installer(tmp_path, env=f"REMINDER_TIMEZONE={rejected}\n")
+
+    assert result.returncode == 1
+    assert "ValidationError" in result.stderr
+    assert rejected not in result.stdout + result.stderr
+    assert not unit.exists()
+    assert calls == ""
+
+
+def test_todo_web_installer_refuses_a_symlinked_unit(tmp_path: Path) -> None:
+    systemd_dir = tmp_path / "home" / ".config" / "systemd" / "user"
+    systemd_dir.mkdir(parents=True)
+    target = tmp_path / "outside.service"
+    target.write_text("keep", encoding="utf-8")
+    (systemd_dir / "2busy1miss-todo-web.service").symlink_to(target)
+
+    result, _, calls = _run_todo_web_installer(tmp_path)
+
+    assert result.returncode == 1
+    assert "symbolic link" in result.stderr
+    assert target.read_text(encoding="utf-8") == "keep"
+    assert calls == ""
+
+
+def _run_todo_web_installer_on_python_at(tmp_path: Path, root: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """The installer in a checkout whose python reports the given root, with {home} filled in."""
+    repo = Path(__file__).parents[1]
+    home = tmp_path / "home"
+    (home / ".config" / "2much2read-runtime").mkdir(parents=True)
+    (home / ".config" / "2much2read-runtime" / "reminders.yaml").touch()
+    (home / ".local" / "share" / "2much2read-runtime" / "2busy1miss").mkdir(parents=True)
+    checkout = tmp_path / "checkout"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "deploy" / "systemd").mkdir(parents=True)
+    (checkout / ".venv" / "bin").mkdir(parents=True)
+    for relative in ("scripts/install-2busy1miss-todo-web.sh", "deploy/systemd/2busy1miss-todo-web.service"):
+        (checkout / relative).write_text((repo / relative).read_text(encoding="utf-8"), encoding="utf-8")
+    python = checkout / ".venv" / "bin" / "python"
+    python.write_text(
+        f"#!/bin/sh\ncat >/dev/null\nprintf 'timezone=America/Toronto\\ninterpreter_root=%s\\n' '{root.format(home=home)}'\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    command = checkout / ".venv" / "bin" / "2busy1miss"
+    command.touch()
+    command.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (fake_bin / "systemctl").chmod(0o755)
+    (fake_bin / "tailscale").write_text(f'#!/bin/sh\nprintf "%s\\n" "{TAILSCALE_ADDRESS}"\n', encoding="utf-8")
+    (fake_bin / "tailscale").chmod(0o755)
+    result = subprocess.run(
+        ["sh", "scripts/install-2busy1miss-todo-web.sh"],
+        cwd=checkout,
+        env=os.environ | {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+        input="\n",
+    )
+    return result, home / ".config" / "systemd" / "user" / "2busy1miss-todo-web.service", home
+
+
+@pytest.mark.parametrize("root", ["{home}/.local/share/uv/python", "{home}/.pyenv/versions/3.12.1"])
+def test_todo_web_installer_binds_a_python_under_home(tmp_path: Path, root: str) -> None:
+    result, unit, home = _run_todo_web_installer_on_python_at(tmp_path, root)
+
+    assert result.returncode == 0, result.stderr
+    assert f"%h/.config/2much2read-runtime/reminders.yaml {root.format(home=home)}\n" in unit.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("root", ["/usr", "/opt/python"])
+def test_todo_web_installer_leaves_a_python_outside_home_alone(tmp_path: Path, root: str) -> None:
+    result, unit, _ = _run_todo_web_installer_on_python_at(tmp_path, root)
+
+    assert result.returncode == 0, result.stderr
+    assert "%h/.config/2much2read-runtime/reminders.yaml\n" in unit.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("root", ["{home}", "{home}/.local", "{home}/.local/share", "{home}/.config"])
+def test_todo_web_installer_will_not_bind_what_holds_the_credentials(tmp_path: Path, root: str) -> None:
+    result, unit, _ = _run_todo_web_installer_on_python_at(tmp_path, root)
+
+    assert result.returncode == 1
+    assert "binding it would expose" in result.stderr
+    assert not unit.exists()
+
+
+@pytest.mark.parametrize("root", ["{home}/my python", "{home}/py|thon"])
+def test_todo_web_installer_will_not_write_a_python_path_a_unit_cannot_hold(tmp_path: Path, root: str) -> None:
+    result, unit, _ = _run_todo_web_installer_on_python_at(tmp_path, root)
+
+    assert result.returncode == 1
+    assert "a unit file cannot name that path" in result.stderr
+    assert not unit.exists()

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from collections.abc import Mapping
 from datetime import date, datetime
 from typing import Annotated
@@ -30,7 +31,10 @@ from .pipeline import (
     run,
     test_rules,
 )
-from .todos import add_todo, complete_todo, list_todos, remove_todo, reopen_todo
+from .rules import parse_weekdays
+from .todo_prompt import ask_todo
+from .todo_web import DEFAULT_PORT, serve
+from .todos import add_todo, clean_title, complete_todo, list_todos, remove_todo, reopen_todo
 
 app = typer.Typer(no_args_is_help=True)
 auth_app = typer.Typer(no_args_is_help=True)
@@ -224,13 +228,34 @@ def _parsed_day(value: str | None) -> date | None:
         raise typer.BadParameter("date must use YYYY-MM-DD") from error
 
 
+def _add_todo_asked(settings: Settings, on: str | None) -> None:
+    if not (sys.stdin.isatty() and sys.stdout.isatty()):
+        raise ValueError("a title is needed outside a terminal, where there is nobody to ask")
+    if on is not None:
+        parse_weekdays(on)
+    try:
+        answers = ask_todo(clean_title, on)
+    except KeyboardInterrupt:
+        answers = None
+    if answers is None:
+        typer.echo("Cancelled; nothing was added.", err=True)
+        raise typer.Exit(code=1)
+    result = add_todo(settings, *answers)
+    days = "every day" if len(result.weekdays) == 7 else ", ".join(result.weekdays)
+    typer.echo(f"Added to-do {result.id}: {result.title} ({days})")
+
+
 @todo_app.command("add")
 def todo_add_command(
-    title: Annotated[str, typer.Argument()],
+    title: Annotated[str | None, typer.Argument(help="Leave it out in a terminal to be asked for it and for the days.")] = None,
     on: Annotated[str | None, typer.Option("--on", help="Weekdays such as mon,wed,fri; every day when left out.")] = None,
 ) -> None:
     try:
-        emit(add_todo(Settings(), title, on))
+        settings = Settings()
+        if title is None:
+            _add_todo_asked(settings, on)
+        else:
+            emit(add_todo(settings, title, on))
     except ValueError as error:
         raise typer.BadParameter(str(error)) from error
 
@@ -272,3 +297,18 @@ def todo_remove_command(todo_id: Annotated[int, typer.Argument()]) -> None:
         emit(remove_todo(Settings(), todo_id))
     except ValueError as error:
         raise typer.BadParameter(str(error)) from error
+
+
+@todo_app.command("serve")
+def todo_serve_command(
+    host: Annotated[str, typer.Option("--host", help="This machine's Tailscale address, from `tailscale ip -4`.")],
+    port: Annotated[int, typer.Option("--port", min=1024, max=65535)] = DEFAULT_PORT,
+) -> None:
+    try:
+        serve(Settings(), host, port)
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+    except OSError as error:
+        # Tailscale not up yet is the expected case, and the service tries again by itself.
+        typer.echo(f"cannot listen on {host}:{port}: {error.strerror}", err=True)
+        raise typer.Exit(code=1) from error

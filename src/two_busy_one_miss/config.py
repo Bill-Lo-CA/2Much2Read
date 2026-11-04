@@ -107,6 +107,7 @@ class Settings(BaseSettings):
     reminder_timezone: str = "America/Montreal"
     reminder_lookahead_days: int = Field(default=7, ge=1, le=366)
     agenda_schedule_time: time = time(21)
+    todo_web_url: str = ""
 
     @field_validator("reminder_timezone")
     @classmethod

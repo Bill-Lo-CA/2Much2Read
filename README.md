@@ -542,6 +542,7 @@ To-dos are what a calendar cannot express, such as thirty push-ups every morning
 same SQLite database as the reminders:
 
 ```bash
+uv run 2busy1miss todo add                          # asks for the title, then the days from a list
 uv run 2busy1miss todo add "三十下伏地挺身"
 uv run 2busy1miss todo add "跑步" --on mon,wed,fri
 uv run 2busy1miss todo list [--day 2026-11-04]
@@ -572,6 +573,34 @@ A day is the reminder timezone's: `reminders.yaml`'s `timezone` when set, otherw
 `REMINDER_TIMEZONE`. `--day` defaults to today. `done` refuses a day still to come and a day the
 to-do does not fall on, and `remove` stops it counting from today while keeping what was done before.
 These commands take no lock, so one typed while the per-minute timer runs cannot fail for it.
+
+`todo add` with no title asks for one, then offers the days as a list: the arrow keys move, Enter
+chooses, Space ticks a day under `Pick days...`, Esc cancels. Outside a terminal it needs the title.
+
+#### The to-do page
+
+A page for ticking to-dos off from a browser, over [Tailscale](https://tailscale.com/):
+
+```bash
+sh scripts/install-2busy1miss-todo-web.sh [--port 8766]
+```
+
+It prints the page's address and the `TODO_WEB_URL` line to put in `.2busy1miss.env`, which makes
+any agenda listing to-dos link to it. It shows today's to-dos and yesterday's, and can only tick and
+untick those: adding and removing stay in the commands above.
+
+The page has no password, so that its link has nothing to leak in Discord's history. Instead it
+listens only on this machine's Tailscale address, closes connections from outside the tailnet, and
+answers only to its own address and to forms from its own page, so anyone who can reach the tailnet
+can use it. Traffic is encrypted by Tailscale, although a browser will still call `http://` not
+secure.
+
+The service runs with an empty home holding only the code, the Python it runs on if that is installed
+under home, `reminders.yaml` and the database directory, without the environment file or any token.
+It therefore uses the default database and reminders paths, whatever `.2busy1miss.env` says. The
+installer refuses a Python whose directory also holds the credentials or databases, such as one
+installed directly in `~/.local`. Rerun the installer after changing the timezone,
+and `systemctl --user restart 2busy1miss-todo-web.service` after deploying new code.
 
 ## 2bored1made
 
