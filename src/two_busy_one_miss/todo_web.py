@@ -22,6 +22,7 @@ import hashlib
 import html
 import ipaddress
 import logging
+import os
 import socket
 import sqlite3
 from collections.abc import Callable
@@ -308,6 +309,19 @@ class TodoPageServer(ThreadingHTTPServer):
 
     def verify_request(self, request: socket.socket | tuple[bytes, socket.socket], client_address: Any) -> bool:
         return ipaddress.ip_address(client_address[0]) in self.clients
+
+
+def interpreter_root(executable: str, base_prefix: str) -> str:
+    """The one directory holding every step from a virtual environment's python to the real one.
+
+    The unit's sandbox hides home, so an interpreter installed there has to be bound back in. The
+    installation alone is not enough: uv links a virtual environment to cpython-3.13-linux-.../bin,
+    itself a link to cpython-3.13.14-linux-..., and the first of those has to be there too.
+    """
+    link = executable
+    while os.path.islink(link) and os.path.dirname(link) == os.path.dirname(executable):
+        link = os.path.normpath(os.path.join(os.path.dirname(link), os.readlink(link)))
+    return os.path.commonpath([base_prefix, base_prefix if link == executable else link])
 
 
 def serve(settings: Settings, host: str, port: int) -> None:

@@ -1129,3 +1129,76 @@ def test_todo_web_installer_refuses_a_symlinked_unit(tmp_path: Path) -> None:
     assert "symbolic link" in result.stderr
     assert target.read_text(encoding="utf-8") == "keep"
     assert calls == ""
+
+
+def _run_todo_web_installer_on_python_at(tmp_path: Path, root: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """The installer in a checkout whose python reports the given root, with {home} filled in."""
+    repo = Path(__file__).parents[1]
+    home = tmp_path / "home"
+    (home / ".config" / "2much2read-runtime").mkdir(parents=True)
+    (home / ".config" / "2much2read-runtime" / "reminders.yaml").touch()
+    (home / ".local" / "share" / "2much2read-runtime" / "2busy1miss").mkdir(parents=True)
+    checkout = tmp_path / "checkout"
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "deploy" / "systemd").mkdir(parents=True)
+    (checkout / ".venv" / "bin").mkdir(parents=True)
+    for relative in ("scripts/install-2busy1miss-todo-web.sh", "deploy/systemd/2busy1miss-todo-web.service"):
+        (checkout / relative).write_text((repo / relative).read_text(encoding="utf-8"), encoding="utf-8")
+    python = checkout / ".venv" / "bin" / "python"
+    python.write_text(
+        f"#!/bin/sh\ncat >/dev/null\nprintf 'timezone=America/Toronto\\ninterpreter_root=%s\\n' '{root.format(home=home)}'\n",
+        encoding="utf-8",
+    )
+    python.chmod(0o755)
+    command = checkout / ".venv" / "bin" / "2busy1miss"
+    command.touch()
+    command.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (fake_bin / "systemctl").chmod(0o755)
+    (fake_bin / "tailscale").write_text(f'#!/bin/sh\nprintf "%s\\n" "{TAILSCALE_ADDRESS}"\n', encoding="utf-8")
+    (fake_bin / "tailscale").chmod(0o755)
+    result = subprocess.run(
+        ["sh", "scripts/install-2busy1miss-todo-web.sh"],
+        cwd=checkout,
+        env=os.environ | {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+        input="\n",
+    )
+    return result, home / ".config" / "systemd" / "user" / "2busy1miss-todo-web.service", home
+
+
+@pytest.mark.parametrize("root", ["{home}/.local/share/uv/python", "{home}/.pyenv/versions/3.12.1"])
+def test_todo_web_installer_binds_a_python_under_home(tmp_path: Path, root: str) -> None:
+    result, unit, home = _run_todo_web_installer_on_python_at(tmp_path, root)
+
+    assert result.returncode == 0, result.stderr
+    assert f"%h/.config/2much2read-runtime/reminders.yaml {root.format(home=home)}\n" in unit.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("root", ["/usr", "/opt/python"])
+def test_todo_web_installer_leaves_a_python_outside_home_alone(tmp_path: Path, root: str) -> None:
+    result, unit, _ = _run_todo_web_installer_on_python_at(tmp_path, root)
+
+    assert result.returncode == 0, result.stderr
+    assert "%h/.config/2much2read-runtime/reminders.yaml\n" in unit.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("root", ["{home}", "{home}/.local", "{home}/.local/share", "{home}/.config"])
+def test_todo_web_installer_will_not_bind_what_holds_the_credentials(tmp_path: Path, root: str) -> None:
+    result, unit, _ = _run_todo_web_installer_on_python_at(tmp_path, root)
+
+    assert result.returncode == 1
+    assert "binding it would expose" in result.stderr
+    assert not unit.exists()
+
+
+@pytest.mark.parametrize("root", ["{home}/my python", "{home}/py|thon"])
+def test_todo_web_installer_will_not_write_a_python_path_a_unit_cannot_hold(tmp_path: Path, root: str) -> None:
+    result, unit, _ = _run_todo_web_installer_on_python_at(tmp_path, root)
+
+    assert result.returncode == 1
+    assert "a unit file cannot name that path" in result.stderr
+    assert not unit.exists()

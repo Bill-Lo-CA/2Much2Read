@@ -74,23 +74,49 @@ unit="$systemd_dir/2busy1miss-todo-web.service"
 # into the unit. env -i for the reason the main installer drops these names: the service reads the
 # managed file, and a variable exported in this shell would outrank it. Only the exception's type is
 # reported, since a ValidationError over the file quotes the value it rejected, which may be a secret.
-timezone=$(env -i HOME="$HOME" "$repo_dir/.venv/bin/python" - <<'PY'
+resolved=$(env -i HOME="$HOME" "$repo_dir/.venv/bin/python" - <<'PY'
 import sys
 
 from two_busy_one_miss.config import Settings, load_reminders
+from two_busy_one_miss.todo_web import interpreter_root
 
 try:
     settings = Settings()
-    print(load_reminders(settings.reminders_config_path).timezone or settings.reminder_timezone)
+    print(f"timezone={load_reminders(settings.reminders_config_path).timezone or settings.reminder_timezone}")
 except Exception as error:  # noqa: BLE001 - reported by type alone, see above
     print(f"the 2busy1miss settings could not be read ({type(error).__name__}); run `2busy1miss doctor`", file=sys.stderr)
     sys.exit(1)
+print(f"interpreter_root={interpreter_root(sys.executable, sys.base_prefix)}")
 PY
 )
+timezone=$(printf '%s\n' "$resolved" | sed -n 's/^timezone=//p' | tail -n1)
+interpreter_root=$(printf '%s\n' "$resolved" | sed -n 's/^interpreter_root=//p' | tail -n1)
 case "$timezone" in
   ''|/*|*..*|*[!A-Za-z0-9_+./-]*)
     printf '%s\n' "the timezone must name a system timezone, got '$timezone'" >&2
     exit 1
+    ;;
+esac
+
+# Only an interpreter under home needs binding, since the sandbox hides nothing else it could be in.
+# One whose directory also holds the credentials or the other databases cannot be bound at all: it
+# would bring them back into the sandbox, which is the one thing the sandbox is for.
+refuse_interpreter() {
+  printf '%s\n' "cannot sandbox the to-do page with the Python at $interpreter_root: $1" >&2
+  exit 1
+}
+interpreter_bind=""
+case "$interpreter_root" in
+  "$HOME"|"$HOME"/*)
+    case "$interpreter_root" in
+      *[!A-Za-z0-9_+./@-]*) refuse_interpreter "a unit file cannot name that path" ;;
+    esac
+    for private_dir in "$HOME/.config/2much2read-runtime" "$HOME/.local/share/2much2read-runtime"; do
+      case "$private_dir" in
+        "$interpreter_root"/*) refuse_interpreter "binding it would expose $private_dir; use one installed elsewhere" ;;
+      esac
+    done
+    interpreter_bind=" $interpreter_root"
     ;;
 esac
 
@@ -104,6 +130,7 @@ sed -e "s|__EXECUTABLE__|$exe|" \
   -e "s|__HOST__|$host|" \
   -e "s|__PORT__|$port|" \
   -e "s|__TIMEZONE__|$timezone|" \
+  -e "s| __INTERPRETER_ROOT__|$interpreter_bind|" \
   deploy/systemd/2busy1miss-todo-web.service > "$unit"
 
 systemctl --user daemon-reload

@@ -15,10 +15,11 @@ NoNewPrivileges=true
 PrivateTmp=true
 UMask=0077
 ProtectSystem=strict
-# Home is empty but for the code, the reminders file for its timezone, and the database. The Gmail
-# and Calendar tokens and every environment file are not there to read.
+# Home is empty but for the code, the interpreter if it is installed there, the reminders file for
+# its timezone, and the database. The Gmail and Calendar tokens and every environment file are not
+# there to read.
 ProtectHome=tmpfs
-BindReadOnlyPaths=__REPO_DIR__/.venv __REPO_DIR__/src %h/.config/2much2read-runtime/reminders.yaml
+BindReadOnlyPaths=__REPO_DIR__/.venv __REPO_DIR__/src %h/.config/2much2read-runtime/reminders.yaml __INTERPRETER_ROOT__
 BindPaths=%h/.local/share/2much2read-runtime/2busy1miss
 ProtectKernelTunables=true
 ProtectKernelModules=true

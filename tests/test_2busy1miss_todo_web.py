@@ -586,3 +586,55 @@ def test_serve_listens_where_it_is_told_and_lets_in_the_tailnet_only(
 def test_serve_refuses_an_address_outside_the_tailnet_by_name(settings: Settings, host: str) -> None:
     with pytest.raises(ValueError, match=f"^{re.escape(host)} is not a Tailscale address"):
         todo_web.serve(settings, host, 0)
+
+
+def test_interpreter_root_of_a_uv_managed_python(tmp_path: Path) -> None:
+    installs = tmp_path / "uv" / "python"
+    real = installs / "cpython-3.13.14-linux-x86_64-gnu"
+    (real / "bin").mkdir(parents=True)
+    (real / "bin" / "python3.13").touch()
+    (installs / "cpython-3.13-linux-x86_64-gnu").symlink_to(real)
+    venv = tmp_path / "venv" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").symlink_to(installs / "cpython-3.13-linux-x86_64-gnu" / "bin" / "python3.13")
+
+    assert todo_web.interpreter_root(str(venv / "python"), str(real)) == str(installs)
+
+
+def test_interpreter_root_follows_a_standard_venvs_links_out_of_the_environment(tmp_path: Path) -> None:
+    install = tmp_path / "pyenv" / "versions" / "3.12.1"
+    (install / "bin").mkdir(parents=True)
+    (install / "bin" / "python3").touch()
+    venv = tmp_path / "venv" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python3").symlink_to(install / "bin" / "python3")
+    (venv / "python").symlink_to("python3")
+
+    assert todo_web.interpreter_root(str(venv / "python"), str(install)) == str(install)
+
+
+def test_interpreter_root_reads_a_relative_link(tmp_path: Path) -> None:
+    install = tmp_path / "python"
+    (install / "bin").mkdir(parents=True)
+    (install / "bin" / "python3").touch()
+    venv = tmp_path / "venv" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").symlink_to(Path("..") / ".." / "python" / "bin" / "python3")
+
+    assert todo_web.interpreter_root(str(venv / "python"), str(install)) == str(install)
+
+
+def test_interpreter_root_of_the_system_python_is_the_system(tmp_path: Path) -> None:
+    venv = tmp_path / "venv" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").symlink_to("/usr/bin/python3.12")
+
+    assert todo_web.interpreter_root(str(venv / "python"), "/usr") == "/usr"
+
+
+def test_interpreter_root_of_a_copied_python_is_its_installation(tmp_path: Path) -> None:
+    venv = tmp_path / "venv" / "bin"
+    venv.mkdir(parents=True)
+    (venv / "python").touch()
+
+    assert todo_web.interpreter_root(str(venv / "python"), "/opt/python") == "/opt/python"

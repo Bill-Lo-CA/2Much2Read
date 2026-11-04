@@ -595,9 +595,11 @@ answers only to its own address and to forms from its own page, so anyone who ca
 can use it. Traffic is encrypted by Tailscale, although a browser will still call `http://` not
 secure.
 
-The service runs with an empty home holding only the code, `reminders.yaml` and the database
-directory, without the environment file or any token. It therefore uses the default database and
-reminders paths, whatever `.2busy1miss.env` says. Rerun the installer after changing the timezone,
+The service runs with an empty home holding only the code, the Python it runs on if that is installed
+under home, `reminders.yaml` and the database directory, without the environment file or any token.
+It therefore uses the default database and reminders paths, whatever `.2busy1miss.env` says. The
+installer refuses a Python whose directory also holds the credentials or databases, such as one
+installed directly in `~/.local`. Rerun the installer after changing the timezone,
 and `systemctl --user restart 2busy1miss-todo-web.service` after deploying new code.
 
 ## 2bored1made
