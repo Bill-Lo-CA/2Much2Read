@@ -92,8 +92,8 @@ def _event_links(event: CalendarEvent) -> list[tuple[str, str, str]]:
     return links
 
 
-def _with_links(lines: list[str], events: list[CalendarEvent]) -> str:
-    link_lines: list[str] = []
+def _with_links(lines: list[str], events: list[CalendarEvent], leading: Sequence[str] = ()) -> str:
+    link_lines = list(leading)
     seen: set[str] = set()
     for event in events:
         for label, url, hostname in _event_links(event):
@@ -133,8 +133,18 @@ def _todo_lines(day: date, todos: Sequence[str], undone: Sequence[str]) -> list[
     return lines
 
 
+def _todo_page_lines(todo_page: str) -> list[str]:
+    link = _valid_link(todo_page)
+    return [] if link is None else [f"To-do page: <{link[0]}>"]
+
+
 def render_agenda(
-    day: date, events: list[CalendarEvent], timezone: ZoneInfo, todos: Sequence[str] = (), undone: Sequence[str] = ()
+    day: date,
+    events: list[CalendarEvent],
+    timezone: ZoneInfo,
+    todos: Sequence[str] = (),
+    undone: Sequence[str] = (),
+    todo_page: str = "",
 ) -> str:
     # Ordered by instant, then converted - not the other way round. Once two events share a zone
     # they compare by wall clock and ignore fold (PEP 495), which puts 01:30 EST before 01:30 EDT
@@ -148,8 +158,10 @@ def render_agenda(
         RULE,
     ]
     todo_lines = _todo_lines(day, todos, undone)
+    # First among the links, since the event links that follow can run into the cap on them.
+    page_lines = _todo_page_lines(todo_page) if todo_lines else []
     if not events:
-        return _with_links([*lines, f"{'':<11} | No events", *todo_lines], events)
+        return _with_links([*lines, f"{'':<11} | No events", *todo_lines], events, page_lines)
     for event in ordered_events:
         when = _agenda_when(day, event)
         summary = _agenda_cell(event.title)
@@ -158,4 +170,4 @@ def render_agenda(
         lines.append(f"{when:<11} | {summary}")
         if location := _agenda_cell(event.location):
             lines.append(f"{'':<11} | {location}")
-    return _with_links([*lines, *todo_lines], ordered_events)
+    return _with_links([*lines, *todo_lines], ordered_events, page_lines)

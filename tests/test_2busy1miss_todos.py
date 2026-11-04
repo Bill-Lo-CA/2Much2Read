@@ -407,3 +407,97 @@ def test_a_refused_command_ends_on_its_message(
 
     assert result.exit_code == 2
     assert message in " ".join(result.output.replace("│", " ").split())
+
+
+TODO_PAGE = "http://100.89.225.36:8766/"
+
+
+def test_an_agenda_listing_to_dos_links_to_the_page() -> None:
+    content = render_agenda(MONDAY, [], TORONTO, ["伏地挺身"], [], todo_page=TODO_PAGE)
+
+    assert content.splitlines()[-2:] == ["```", f"To-do page: <{TODO_PAGE}>"]
+
+
+def test_an_agenda_listing_only_undone_to_dos_links_to_the_page() -> None:
+    assert f"To-do page: <{TODO_PAGE}>" in render_agenda(MONDAY, [], TORONTO, [], ["跑步"], todo_page=TODO_PAGE)
+
+
+def test_an_agenda_with_no_to_dos_has_no_link_to_the_page() -> None:
+    assert render_agenda(MONDAY, [], TORONTO, todo_page=TODO_PAGE) == render_agenda(MONDAY, [], TORONTO)
+
+
+@pytest.mark.parametrize("url", ["", "javascript:alert(1)", "http://user:password@100.89.225.36:8766/", "100.89.225.36:8766"])
+def test_a_page_address_that_is_not_a_plain_link_is_left_out(url: str) -> None:
+    assert "To-do page" not in render_agenda(MONDAY, [], TORONTO, ["伏地挺身"], [], todo_page=url)
+
+
+def test_the_cap_on_links_cannot_push_out_the_page() -> None:
+    events = [
+        CalendarEvent(
+            calendar_id="primary",
+            calendar_name=None,
+            event_id=f"event-{index}",
+            instance_id=f"event-{index}",
+            title="Meeting",
+            location=f"https://example.com/{index}",
+            start=noon(MONDAY),
+            end=noon(MONDAY) + timedelta(hours=1),
+            all_day=False,
+        )
+        for index in range(30)
+    ]
+
+    lines = render_agenda(MONDAY, events, TORONTO, ["伏地挺身"], [], todo_page=TODO_PAGE).splitlines()
+
+    assert lines[lines.index("```", 1) + 1] == f"To-do page: <{TODO_PAGE}>"
+    assert sum("link - " in line for line in lines) == 19
+
+
+def test_both_agenda_previews_link_to_the_page(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(pipeline, "list_events_between", lambda *_: [])
+    settings = settings.model_copy(update={"todo_web_url": TODO_PAGE})
+    todos.add_todo(settings, "伏地挺身", None, now=noon(MONDAY))
+
+    assert TODO_PAGE in pipeline.agenda(settings, MONDAY, True).content
+    preview = pipeline.next_day_agenda(settings, dry_run=True, force=False, now=noon(MONDAY) - timedelta(days=1))
+    assert isinstance(preview, pipeline.AgendaPreviewResult)
+    assert TODO_PAGE in preview.content
+
+
+def test_an_id_no_to_do_could_have_is_refused_like_any_unknown_one(settings: Settings) -> None:
+    for change in (todos.complete_todo, todos.reopen_todo):
+        with pytest.raises(ValueError, match="no to-do with id"):
+            change(settings, 2**63, MONDAY, now=noon(MONDAY))
+
+
+def test_add_outside_a_terminal_needs_a_title(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+
+    result = CliRunner().invoke(cli.app, ["todo", "add"])
+
+    assert result.exit_code == 2
+    assert "title is needed" in result.output
+    assert rows_or_empty(settings) == []
+
+
+def rows_or_empty(settings: Settings) -> list[tuple[object, ...]]:
+    return rows(settings, "SELECT * FROM todos") if settings.database_path.exists() else []
+
+
+@pytest.mark.parametrize("host", ["0.0.0.0", "127.0.0.1", "192.168.30.180", "::1", "example.com"])
+def test_serve_refuses_any_address_outside_the_tailnet(settings: Settings, monkeypatch: pytest.MonkeyPatch, host: str) -> None:
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+
+    result = CliRunner().invoke(cli.app, ["todo", "serve", "--host", host, "--port", "8766"])
+
+    assert result.exit_code == 2
+
+
+def test_serve_reports_an_address_it_cannot_listen_on_and_fails(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+
+    # An address inside the tailnet's range that no interface on the test machine holds.
+    result = CliRunner().invoke(cli.app, ["todo", "serve", "--host", "100.127.255.254", "--port", "8766"])
+
+    assert result.exit_code == 1
+    assert "cannot listen on 100.127.255.254:8766" in result.output

@@ -335,12 +335,12 @@ def agenda(settings: Settings, day: date, dry_run: bool, force: bool = False) ->
     end = datetime.combine(day + timedelta(days=1), time.min, timezone)
     events = list_events_between(settings, config, start, end)
     if dry_run:
-        content = render_agenda(day, events, timezone, *_previewed_todos(settings, day))
+        content = render_agenda(day, events, timezone, *_previewed_todos(settings, day), todo_page=settings.todo_web_url)
         return AgendaPreviewResult(content=content, events=[event_view(event, timezone) for event in events])
     with ProcessLock(settings.lock_path):
         database = Database(settings.database_path)
         try:
-            content = render_agenda(day, events, timezone, *database.agenda_todos(day))
+            content = render_agenda(day, events, timezone, *database.agenda_todos(day), todo_page=settings.todo_web_url)
             deliveries = _create_agenda_deliveries(database, settings, day, timezone, content, force=force)
             if not deliveries:
                 return AgendaDeliveryResult(sent=0, skipped=1, events=len(events))
@@ -391,7 +391,9 @@ def next_day_agenda(
     if dry_run:
         return AgendaPreviewResult(
             day=day,
-            content=render_agenda(day, agenda_events, timezone, *_previewed_todos(settings, day)),
+            content=render_agenda(
+                day, agenda_events, timezone, *_previewed_todos(settings, day), todo_page=settings.todo_web_url
+            ),
             events=[event_view(event, timezone) for event in agenda_events],
             scheduled_reminders=len(schedule_reminders(config, events)),
         )
@@ -402,7 +404,7 @@ def next_day_agenda(
             scheduled_reminders, cancelled_reminders = _sync_scheduled_reminders(
                 database, config, events, now, sync_end, timezone, settings
             )
-            content = render_agenda(day, agenda_events, timezone, *database.agenda_todos(day))
+            content = render_agenda(day, agenda_events, timezone, *database.agenda_todos(day), todo_page=settings.todo_web_url)
             deliveries = _create_agenda_deliveries(database, settings, day, timezone, content, force=force)
             if not deliveries:
                 return AgendaDeliveryResult(

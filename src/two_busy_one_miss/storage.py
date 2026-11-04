@@ -874,6 +874,9 @@ class Database:
         return int(cursor.lastrowid)
 
     def todo(self, todo_id: int) -> sqlite3.Row | None:
+        # Past this no id can exist, and SQLite raises OverflowError rather than finding nothing.
+        if not 0 < todo_id < 2**63:
+            return None
         row: sqlite3.Row | None = self.connection.execute("SELECT * FROM todos WHERE id=?", (todo_id,)).fetchone()
         return row
 

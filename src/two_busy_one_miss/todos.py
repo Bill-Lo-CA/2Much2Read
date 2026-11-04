@@ -58,13 +58,18 @@ def _today(settings: Settings, now: datetime | None) -> date:
     return (now or datetime.now(timezone)).astimezone(timezone).date()
 
 
-def add_todo(settings: Settings, title: str, on: str | None, *, now: datetime | None = None) -> TodoAddResult:
+def clean_title(title: str) -> str:
     cleaned = " ".join(title.split())
     # What the agenda would show of it, since a title of only a link or control characters shows nothing.
     if not _agenda_cell(cleaned):
         raise ValueError("a to-do needs a title with something to show")
     if len(cleaned) > MAX_TITLE_CHARACTERS:
         raise ValueError(f"a to-do's title must not exceed {MAX_TITLE_CHARACTERS} characters")
+    return cleaned
+
+
+def add_todo(settings: Settings, title: str, on: str | None, *, now: datetime | None = None) -> TodoAddResult:
+    cleaned = clean_title(title)
     weekdays = parse_weekdays(on)
     first_day = _today(settings, now)
     database = Database(settings.database_path)
