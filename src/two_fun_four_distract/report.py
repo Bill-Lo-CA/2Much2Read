@@ -61,6 +61,9 @@ def _computer_lines(computer: list[Counted], browser: list[Counted], screen_seco
     so a site is only counted for as long as the computer saw a browser on screen in that minute.
     What is left of a browser's time after its sites, such as a private window the extension is not
     allowed to see, stays in as browsing with no site named.
+
+    Sites can show at once, in two windows, but only one can have focus. So they share the browser's
+    focused time for the minute, the largest claim first, rather than each being held to all of it.
     """
     focused: dict[str, float] = {}
     visible: dict[str, float] = {}
@@ -76,17 +79,17 @@ def _computer_lines(computer: list[Counted], browser: list[Counted], screen_seco
             focused[row.name] = focused.get(row.name, 0) + row.focused_seconds
             visible[row.name] = visible.get(row.name, 0) + row.visible_seconds
 
-    named_focused: dict[str, int] = {}
+    focus_left = dict(browser_focused)
     named_visible: dict[str, int] = {}
-    for row in browser:
-        site_focused = min(row.focused_seconds, browser_focused.get(row.minute, 0))
+    for row in sorted(browser, key=lambda row: (row.minute, -row.focused_seconds, row.name)):
+        site_focused = min(row.focused_seconds, focus_left.get(row.minute, 0))
+        focus_left[row.minute] = focus_left.get(row.minute, 0) - site_focused
         site_visible = min(row.visible_seconds, browser_visible.get(row.minute, 0))
         focused[row.name] = focused.get(row.name, 0) + site_focused
         visible[row.name] = visible.get(row.name, 0) + site_visible
-        named_focused[row.minute] = named_focused.get(row.minute, 0) + site_focused
         named_visible[row.minute] = named_visible.get(row.minute, 0) + site_visible
 
-    other_focused = sum(max(seconds - named_focused.get(minute, 0), 0) for minute, seconds in browser_focused.items())
+    other_focused = sum(focus_left.values())
     other_visible = sum(max(seconds - named_visible.get(minute, 0), 0) for minute, seconds in browser_visible.items())
     if other_focused:
         focused[OTHER_BROWSING] = other_focused

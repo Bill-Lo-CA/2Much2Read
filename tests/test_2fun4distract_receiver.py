@@ -105,7 +105,9 @@ def browser_usage(settings: Settings) -> list[tuple[object, ...]]:
 
 
 def now_text(delta: timedelta = timedelta()) -> str:
-    return (datetime.now(UTC) + delta).strftime("%Y-%m-%dT%H:%M:%SZ")
+    """Far enough into a recent minute that a sample of up to 45 seconds stays inside it."""
+    moment = (datetime.now(UTC) - timedelta(minutes=2)).replace(second=45) + delta
+    return moment.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def batch(*processes: str, batch_id: str | None = None, at: str | None = None) -> bytes:
@@ -241,6 +243,21 @@ def test_a_sample_counts_for_the_time_it_says_passed(computer_only: UsageServer,
 
     assert computer_usage(settings) == [("Code", 40, 40)]
     assert screen_usage(settings) == [(40,)]
+
+
+def test_time_held_up_by_sending_is_kept_across_the_minute(computer_only: UsageServer, settings: Settings) -> None:
+    minute = (datetime.now(UTC) - timedelta(minutes=2)).replace(second=0, microsecond=0)
+    moments = [(10, 25), (25, 15), (40, 15), (55, 15)]
+    samples = [
+        sample_of((minute + timedelta(seconds=second)).strftime("%Y-%m-%dT%H:%M:%SZ"), "Code", seconds=seconds)
+        for second, seconds in moments
+    ]
+    body = json.dumps({"batch_id": str(uuid.uuid4()), "samples": samples}).encode()
+
+    assert post_batch(computer_only, body).status == 200
+
+    assert computer_usage(settings) == [("Code", 15, 15), ("Code", 55, 55)]
+    assert screen_usage(settings) == [(15,), (55,)]
 
 
 def test_a_locked_or_old_sample_is_no_time_on_screen(computer_only: UsageServer, settings: Settings) -> None:

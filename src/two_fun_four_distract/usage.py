@@ -88,7 +88,7 @@ class BrowserSample(_Sent):
 
 @dataclass(frozen=True)
 class Counted:
-    """Seconds one sample adds for one app or site, in the minute it falls in."""
+    """Seconds one sample adds for one app or site, in one of the minutes it ran through."""
 
     minute: str
     name: str
@@ -98,6 +98,31 @@ class Counted:
 
 def minute_of(moment: datetime) -> str:
     return moment.astimezone(UTC).strftime("%Y-%m-%dT%H:%M")
+
+
+def minutes_spanned(end: datetime, seconds: int) -> list[tuple[str, int]]:
+    """How many of the seconds up to a moment fell in each minute.
+
+    A sample carries the time since the one before, which can run back across a minute. Putting all
+    of it in the minute it was taken would push that minute past its length, and the excess would be
+    lost to the cap on a minute while the minute before it stayed short.
+    """
+    end = end.astimezone(UTC).replace(microsecond=0)
+    moment = end - timedelta(seconds=seconds)
+    spanned: list[tuple[str, int]] = []
+    while moment < end:
+        stop = min(moment.replace(second=0) + timedelta(minutes=1), end)
+        spanned.append((minute_of(moment), int((stop - moment).total_seconds())))
+        moment = stop
+    return spanned
+
+
+def _counted(end: datetime, seconds: int, focused: set[str], visible: set[str]) -> list[Counted]:
+    return [
+        Counted(minute, name, spent if name in focused else 0, spent)
+        for minute, spent in minutes_spanned(end, seconds)
+        for name in sorted(visible)
+    ]
 
 
 def recent(moment: datetime, now: datetime) -> bool:
@@ -119,8 +144,7 @@ def count_computer_sample(sample: ComputerSample) -> list[Counted]:
                 focused.add(name)
         elif entry.percent >= MIN_VISIBLE_PERCENT:
             visible.add(name)
-    minute = minute_of(sample.at)
-    return [Counted(minute, name, sample.seconds if name in focused else 0, sample.seconds) for name in sorted(visible)]
+    return _counted(sample.at, sample.seconds, focused, visible)
 
 
 def count_browser_sample(sample: BrowserSample) -> list[Counted]:
@@ -133,8 +157,7 @@ def count_browser_sample(sample: BrowserSample) -> list[Counted]:
             visible.add(domain)
         if entry.focused:
             focused.add(domain)
-    minute = minute_of(sample.at)
-    return [Counted(minute, name, sample.seconds if name in focused else 0, sample.seconds) for name in sorted(visible)]
+    return _counted(sample.at, sample.seconds, focused, visible)
 
 
 @dataclass(frozen=True)

@@ -172,6 +172,44 @@ def test_all_sites_in_a_minute_count_against_the_browsers_time(database: Databas
     assert built.visible.items == [("a.com", 20), ("b.com", 20), ("其他網頁", 20)]
 
 
+def test_sites_share_the_browsers_focus_rather_than_each_having_all_of_it(database: Database) -> None:
+    computer(database, at(9), "chrome", 30, 30)
+    computer(database, at(9), "Code", 30, 30)
+    browser(database, at(9), "a.com", 30, 30)
+    browser(database, at(9), "b.com", 30, 30)
+
+    built = report(database)
+
+    assert built.focused.total_seconds == 60
+    assert built.focused.items == [("Code", 30), ("a.com", 30)]
+    assert built.visible.items == [("Code", 30), ("a.com", 30), ("b.com", 30)]
+
+
+def test_the_largest_claim_on_a_browsers_focus_goes_first(database: Database) -> None:
+    computer(database, at(9), "chrome", 30, 30)
+    browser(database, at(9), "a.com", 10, 10)
+    browser(database, at(9), "b.com", 50, 50)
+
+    assert report(database).focused.items == [("b.com", 30)]
+
+
+def test_a_browsers_focus_is_shared_within_its_own_minute_only(database: Database) -> None:
+    for minute in range(2):
+        computer(database, at(9, minute), "chrome", 30, 30)
+        browser(database, at(9, minute), "a.com", 30, 30)
+
+    assert report(database).focused.items == [("a.com", 60)]
+
+
+def test_a_site_with_no_browser_that_minute_takes_no_focus(database: Database) -> None:
+    browser(database, at(9), "a.com", 30, 30)
+
+    built = report(database)
+
+    assert built.focused.items == []
+    assert built.focused.total_seconds == 0
+
+
 def test_equal_times_read_in_name_order(database: Database) -> None:
     computer(database, at(9, 0), "zeta", 60, 60)
     computer(database, at(9, 1), "alpha", 60, 60)

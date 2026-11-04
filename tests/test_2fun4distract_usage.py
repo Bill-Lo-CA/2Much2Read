@@ -22,6 +22,7 @@ from two_fun_four_distract.usage import (
     count_browser_sample,
     count_computer_sample,
     minute_of,
+    minutes_spanned,
     phone_time,
     recent,
 )
@@ -165,6 +166,44 @@ def test_a_sample_counts_for_its_own_length() -> None:
 
 def test_a_process_name_is_cleaned_before_it_counts() -> None:
     assert count_computer_sample(sample(entry("  Code\x00 "))) == [Counted(MINUTE, "Code", 0, 15)]
+
+
+@pytest.mark.parametrize(
+    ("end", "seconds", "spanned"),
+    [
+        ("21:08:30", 15, [("2026-11-04T21:08", 15)]),
+        ("21:08:15", 15, [("2026-11-04T21:08", 15)]),
+        ("21:08:14", 15, [("2026-11-04T21:07", 1), ("2026-11-04T21:08", 14)]),
+        ("21:08:10", 25, [("2026-11-04T21:07", 15), ("2026-11-04T21:08", 10)]),
+        ("21:08:00", 15, [("2026-11-04T21:07", 15)]),
+        ("21:08:30", 60, [("2026-11-04T21:07", 30), ("2026-11-04T21:08", 30)]),
+        ("21:08:30.750", 15, [("2026-11-04T21:08", 15)]),
+    ],
+)
+def test_minutes_spanned(end: str, seconds: int, spanned: list[tuple[str, int]]) -> None:
+    assert minutes_spanned(datetime.fromisoformat(f"2026-11-04T{end}+00:00"), seconds) == spanned
+
+
+def test_a_sample_running_back_across_a_minute_counts_in_both() -> None:
+    late = ComputerSample(
+        at=datetime(2026, 11, 4, 21, 8, 10, tzinfo=UTC),
+        seconds=25,
+        idle_seconds=0,
+        locked=False,
+        entries=[entry("Code", foreground=True)],
+    )
+
+    assert count_computer_sample(late) == [Counted("2026-11-04T21:07", "Code", 15, 15), Counted(MINUTE, "Code", 10, 10)]
+
+
+def test_a_site_sample_running_back_across_a_minute_counts_in_both() -> None:
+    late = BrowserSample(
+        at=datetime(2026, 11, 4, 21, 8, 10, tzinfo=UTC),
+        seconds=30,
+        entries=[BrowserEntry(domain="a.com", focused=True, visible=True)],
+    )
+
+    assert count_browser_sample(late) == [Counted("2026-11-04T21:07", "a.com", 20, 20), Counted(MINUTE, "a.com", 10, 10)]
 
 
 def test_browser_sites_count_as_the_extension_reports_them() -> None:

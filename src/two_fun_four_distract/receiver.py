@@ -38,7 +38,7 @@ from .usage import (
     clean_name,
     count_browser_sample,
     count_computer_sample,
-    minute_of,
+    minutes_spanned,
     recent,
 )
 
@@ -120,7 +120,7 @@ def _record_computer(settings: Settings, body: bytes) -> _Answer:
         for sample in batch.samples:
             if recent(sample.at, now) and (counted := count_computer_sample(sample)):
                 rows.extend(counted)
-                shown.append((minute_of(sample.at), sample.seconds))
+                shown.extend(minutes_spanned(sample.at, sample.seconds))
     except (ValidationError, ValueError):
         return BAD_REQUEST
     return _written(settings, lambda database: _ignore(database.add_computer_batch(batch.batch_id, rows, now, shown=shown)))
