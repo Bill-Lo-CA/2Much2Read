@@ -480,6 +480,24 @@ def test_add_outside_a_terminal_needs_a_title(settings: Settings, monkeypatch: p
     assert rows_or_empty(settings) == []
 
 
+def test_todo_on_its_own_outside_a_terminal_says_so_and_adds_nothing(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+
+    result = CliRunner().invoke(cli.app, ["todo"])
+
+    assert result.exit_code == 2
+    assert "title is needed" in result.output
+    assert rows_or_empty(settings) == []
+
+
+def test_todo_still_lists_its_commands_in_its_help() -> None:
+    result = CliRunner().invoke(cli.app, ["todo", "--help"])
+
+    assert result.exit_code == 0
+    for command in ("add", "list", "done", "undo", "remove", "serve"):
+        assert command in result.output
+
+
 def rows_or_empty(settings: Settings) -> list[tuple[object, ...]]:
     return rows(settings, "SELECT * FROM todos") if settings.database_path.exists() else []
 

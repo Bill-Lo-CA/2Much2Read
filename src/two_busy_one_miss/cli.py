@@ -40,7 +40,7 @@ app = typer.Typer(no_args_is_help=True)
 auth_app = typer.Typer(no_args_is_help=True)
 calendars_app = typer.Typer(no_args_is_help=True)
 rules_app = typer.Typer(no_args_is_help=True)
-todo_app = typer.Typer(no_args_is_help=True)
+todo_app = typer.Typer()
 app.add_typer(auth_app, name="auth")
 app.add_typer(calendars_app, name="calendars")
 app.add_typer(rules_app, name="rules")
@@ -243,6 +243,16 @@ def _add_todo_asked(settings: Settings, on: str | None) -> None:
     result = add_todo(settings, *answers)
     days = "every day" if len(result.weekdays) == 7 else ", ".join(result.weekdays)
     typer.echo(f"Added to-do {result.id}: {result.title} ({days})")
+
+
+@todo_app.callback(invoke_without_command=True)
+def todo_main(context: typer.Context) -> None:
+    """Add a to-do by answering prompts, or use one of the commands below."""
+    if context.invoked_subcommand is None:
+        try:
+            _add_todo_asked(Settings(), None)
+        except ValueError as error:
+            raise typer.BadParameter(str(error)) from error
 
 
 @todo_app.command("add")

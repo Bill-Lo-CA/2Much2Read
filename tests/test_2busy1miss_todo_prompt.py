@@ -285,7 +285,7 @@ def test_ask_todo_needs_no_list_when_the_days_are_given(monkeypatch: pytest.Monk
 class Terminal:
     """The real command on a real pseudo-terminal, typed at."""
 
-    def __init__(self, tmp_path: Path, *arguments: str) -> None:
+    def __init__(self, tmp_path: Path, *arguments: str, command: tuple[str, ...] = ("todo", "add")) -> None:
         self.database = tmp_path / "reminders.sqlite3"
         reminders = tmp_path / "reminders.yaml"
         reminders.write_text("timezone: America/Toronto\ncalendars:\n  - id: primary\n", encoding="utf-8")
@@ -293,7 +293,7 @@ class Terminal:
         self.before = termios.tcgetattr(self.slave)
         self.output = b""
         self.process = subprocess.Popen(
-            [sys.executable, "-c", "from two_busy_one_miss.cli import app; app()", "todo", "add", *arguments],
+            [sys.executable, "-c", "from two_busy_one_miss.cli import app; app()", *command, *arguments],
             stdin=self.slave,
             stdout=self.slave,
             stderr=self.slave,
@@ -357,8 +357,8 @@ class Terminal:
 def open_terminal(tmp_path: Path) -> Iterator[Callable[..., Terminal]]:
     opened: list[Terminal] = []
 
-    def start(*arguments: str) -> Terminal:
-        terminal = Terminal(tmp_path, *arguments)
+    def start(*arguments: str, command: tuple[str, ...] = ("todo", "add")) -> Terminal:
+        terminal = Terminal(tmp_path, *arguments, command=command)
         opened.append(terminal)
         return terminal
 
@@ -382,6 +382,44 @@ def test_a_to_do_added_by_arrow_keys(open_terminal: Callable[..., Terminal]) -> 
     assert "Added to-do 1: 三十下伏地挺身 (mon, wed)" in terminal.output.decode()
     assert terminal.titles() == [("三十下伏地挺身", "mon,wed")]
     terminal.assert_left_as_found()
+
+
+def test_todo_on_its_own_asks_for_a_to_do(open_terminal: Callable[..., Terminal]) -> None:
+    terminal = open_terminal(command=("todo",))
+    terminal.expect("To-do: ")
+    terminal.type("三十下伏地挺身\r")
+    terminal.expect("Which days?")
+    terminal.type(b"\x1b[B\x1b[B\x1b[B\r")
+    terminal.expect("[ ] Mon")
+    terminal.type(b" \x1b[B\x1b[B ")
+    terminal.expect("[x] Wed")
+    terminal.type(b"\r")
+
+    assert terminal.finish() == 0
+    assert "Added to-do 1: 三十下伏地挺身 (mon, wed)" in terminal.output.decode()
+    assert terminal.titles() == [("三十下伏地挺身", "mon,wed")]
+    terminal.assert_left_as_found()
+
+
+def test_todo_on_its_own_can_be_cancelled(open_terminal: Callable[..., Terminal]) -> None:
+    terminal = open_terminal(command=("todo",))
+    terminal.expect("To-do: ")
+    terminal.type("喝水\r")
+    terminal.expect("Which days?")
+    terminal.type(b"\x1b")
+
+    assert terminal.finish() == 1
+    assert b"nothing was added" in terminal.output
+    assert terminal.titles() == []
+    terminal.assert_left_as_found()
+
+
+def test_a_command_under_todo_does_not_also_ask(open_terminal: Callable[..., Terminal]) -> None:
+    terminal = open_terminal(command=("todo", "list"))
+
+    assert terminal.finish() == 0
+    assert b"To-do:" not in terminal.output
+    assert b'"todos": []' in terminal.output
 
 
 def test_a_to_do_added_for_every_day_in_two_keys(open_terminal: Callable[..., Terminal]) -> None:
