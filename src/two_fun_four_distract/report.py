@@ -73,7 +73,8 @@ def _computer_lines(computer: list[Counted], browser: list[Counted], screen_seco
     for row in computer:
         minute_focused[row.minute] = minute_focused.get(row.minute, 0) + row.focused_seconds
         if _is_browser(row.name):
-            browser_focused[row.minute] = max(browser_focused.get(row.minute, 0), row.focused_seconds)
+            # Two browsers cannot have focus at once, so theirs add up. They can both show, so theirs may overlap.
+            browser_focused[row.minute] = min(browser_focused.get(row.minute, 0) + row.focused_seconds, SECONDS_PER_MINUTE)
             browser_visible[row.minute] = max(browser_visible.get(row.minute, 0), row.visible_seconds)
         else:
             focused[row.name] = focused.get(row.name, 0) + row.focused_seconds

@@ -319,15 +319,38 @@ def test_a_browser_process_name_is_matched_whatever_its_case(database: Database)
     assert report(database).focused.items == [("a.com", 60)]
 
 
-def test_a_browser_in_two_processes_is_not_counted_twice(database: Database) -> None:
-    computer(database, at(9), "chrome", 45, 50)
-    computer(database, at(9), "msedge", 15, 20)
-    browser(database, at(9), "a.com", 45, 50)
+def test_two_browsers_showing_at_once_are_not_counted_twice(database: Database) -> None:
+    computer(database, at(9), "chrome", 0, 50)
+    computer(database, at(9), "msedge", 0, 20)
+    browser(database, at(9), "a.com", 0, 50)
+
+    assert report(database).visible.items == [("a.com", 50)]
+
+
+def test_two_browsers_focused_in_turn_add_up(database: Database) -> None:
+    computer(database, at(9), "chrome", 30, 30)
+    computer(database, at(9), "msedge", 30, 30)
+    browser(database, at(9), "a.com", 30, 30)
+    browser(database, at(9), "b.com", 30, 30)
 
     built = report(database)
 
-    assert built.visible.items == [("a.com", 50)]
-    assert built.focused.items == [("a.com", 45)]
+    assert built.focused.total_seconds == 60
+    assert built.focused.items == [("a.com", 30), ("b.com", 30)]
+
+
+def test_two_browsers_focused_in_turn_add_up_with_no_site_named(database: Database) -> None:
+    computer(database, at(9), "chrome", 30, 30)
+    computer(database, at(9), "msedge", 30, 30)
+
+    assert report(database).focused.items == [("其他網頁", 60)]
+
+
+def test_browsers_focus_cannot_pass_the_length_of_a_minute(database: Database) -> None:
+    computer(database, at(9), "chrome", 45, 45)
+    computer(database, at(9), "msedge", 45, 45)
+
+    assert report(database).focused.items == [("其他網頁", 60)]
 
 
 def test_only_the_days_minutes_count(database: Database) -> None:
