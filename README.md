@@ -536,6 +536,43 @@ uv run 2busy1miss reset-agenda-checkpoint --delivery-id ID
 
 Manual and next-day agendas use the same durable delivery record, de-duplicated by date, timezone, and Discord destination; `agenda-retry` retries failed records and `--force` is the explicit resend path. `2busy1miss-runtime-agenda.timer` runs at `AGENDA_SCHEDULE_TIME` in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone and synchronizes the configured reminder horizon. Its persistent catch-up is ignored before that configured time, so a morning startup cannot send the next day's agenda early. Empty days are sent as `No events`. Reminder messages use the same Markdown code-block style as agendas; a retry after an event starts marks the job `expired` instead of sending it.
 
+### Daily to-dos
+
+To-dos are what a calendar cannot express, such as thirty push-ups every morning. They live in the
+same SQLite database as the reminders:
+
+```bash
+uv run 2busy1miss todo add "三十下伏地挺身"
+uv run 2busy1miss todo add "跑步" --on mon,wed,fri
+uv run 2busy1miss todo list [--day 2026-11-04]
+uv run 2busy1miss todo done ID [--day 2026-11-04]
+uv run 2busy1miss todo undo ID [--day 2026-11-04]
+uv run 2busy1miss todo remove ID
+```
+
+They send no message of their own. The agenda lists its day's open to-dos under `To do`, and what
+the day before it left undone under `Undone`:
+
+```text
+2busy1miss agenda · 2026-11-05
+TIME        | EVENT
+------------+-------------------------------------------
+07:30-08:00 | 起床時間 (Main)
+------------+-------------------------------------------
+To do       | 三十下伏地挺身
+------------+-------------------------------------------
+Undone      | 11-04: 跑步
+```
+
+The scheduled agenda goes out the evening before, so that `Undone` is what the 4th had left at
+`AGENDA_SCHEDULE_TIME`; a to-do done later that evening still counts as done, but the agenda already
+sent does not change. Without any to-dos the agenda is exactly as it was.
+
+A day is the reminder timezone's: `reminders.yaml`'s `timezone` when set, otherwise
+`REMINDER_TIMEZONE`. `--day` defaults to today. `done` refuses a day still to come and a day the
+to-do does not fall on, and `remove` stops it counting from today while keeping what was done before.
+These commands take no lock, so one typed while the per-minute timer runs cannot fail for it.
+
 ## 2bored1made
 
 Two ways to send: `send` posts one notification now, and `run` delivers whichever recurring

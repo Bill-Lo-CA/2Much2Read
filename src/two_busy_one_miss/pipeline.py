@@ -197,6 +197,14 @@ def _destination_key(destination: DiscordDestination) -> str:
     return destination.key.removeprefix("webhook:")
 
 
+def _previewed_todos(settings: Settings, day: date) -> tuple[list[str], list[str]]:
+    """A dry run's to-dos, read without changing anything on disk."""
+    with reading_connection(settings.database_path, ("todos", "todo_completions")) as connection:
+        if connection is None:
+            return [], []
+        return Database.reading(connection).agenda_todos(day)
+
+
 def _create_agenda_deliveries(
     database: Database, settings: Settings, day: date, timezone: ZoneInfo, content: str, *, force: bool
 ) -> list[tuple[int, DiscordDestination]]:
@@ -326,12 +334,13 @@ def agenda(settings: Settings, day: date, dry_run: bool, force: bool = False) ->
     start = datetime.combine(day, time.min, timezone)
     end = datetime.combine(day + timedelta(days=1), time.min, timezone)
     events = list_events_between(settings, config, start, end)
-    content = render_agenda(day, events, timezone)
     if dry_run:
+        content = render_agenda(day, events, timezone, *_previewed_todos(settings, day))
         return AgendaPreviewResult(content=content, events=[event_view(event, timezone) for event in events])
     with ProcessLock(settings.lock_path):
         database = Database(settings.database_path)
         try:
+            content = render_agenda(day, events, timezone, *database.agenda_todos(day))
             deliveries = _create_agenda_deliveries(database, settings, day, timezone, content, force=force)
             if not deliveries:
                 return AgendaDeliveryResult(sent=0, skipped=1, events=len(events))
@@ -379,11 +388,10 @@ def next_day_agenda(
     sync_end = now + event_query_lookahead(config, settings.reminder_lookahead_days)
     events = list_events_between(settings, config, now, sync_end)
     agenda_events = [event for event in events if event.end > start and event.start < end]
-    content = render_agenda(day, agenda_events, timezone)
     if dry_run:
         return AgendaPreviewResult(
             day=day,
-            content=content,
+            content=render_agenda(day, agenda_events, timezone, *_previewed_todos(settings, day)),
             events=[event_view(event, timezone) for event in agenda_events],
             scheduled_reminders=len(schedule_reminders(config, events)),
         )
@@ -394,6 +402,7 @@ def next_day_agenda(
             scheduled_reminders, cancelled_reminders = _sync_scheduled_reminders(
                 database, config, events, now, sync_end, timezone, settings
             )
+            content = render_agenda(day, agenda_events, timezone, *database.agenda_todos(day))
             deliveries = _create_agenda_deliveries(database, settings, day, timezone, content, force=force)
             if not deliveries:
                 return AgendaDeliveryResult(

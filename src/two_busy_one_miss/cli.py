@@ -30,14 +30,17 @@ from .pipeline import (
     run,
     test_rules,
 )
+from .todos import add_todo, complete_todo, list_todos, remove_todo, reopen_todo
 
 app = typer.Typer(no_args_is_help=True)
 auth_app = typer.Typer(no_args_is_help=True)
 calendars_app = typer.Typer(no_args_is_help=True)
 rules_app = typer.Typer(no_args_is_help=True)
+todo_app = typer.Typer(no_args_is_help=True)
 app.add_typer(auth_app, name="auth")
 app.add_typer(calendars_app, name="calendars")
 app.add_typer(rules_app, name="rules")
+app.add_typer(todo_app, name="todo")
 
 _HEALTHY_CHECKS = {"ok", "not_created", "webhook", "bot", "both"}
 
@@ -208,5 +211,64 @@ def reset_delivery_checkpoint(delivery_id: Annotated[int, typer.Option("--delive
 def reset_agenda_checkpoint_command(delivery_id: Annotated[int, typer.Option("--delivery-id", min=1)]) -> None:
     try:
         emit(reset_agenda_checkpoint(Settings(), delivery_id))
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+
+
+def _parsed_day(value: str | None) -> date | None:
+    if value is None:
+        return None
+    try:
+        return date.fromisoformat(value)
+    except ValueError as error:
+        raise typer.BadParameter("date must use YYYY-MM-DD") from error
+
+
+@todo_app.command("add")
+def todo_add_command(
+    title: Annotated[str, typer.Argument()],
+    on: Annotated[str | None, typer.Option("--on", help="Weekdays such as mon,wed,fri; every day when left out.")] = None,
+) -> None:
+    try:
+        emit(add_todo(Settings(), title, on))
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+
+
+@todo_app.command("list")
+def todo_list_command(day: Annotated[str | None, typer.Option("--day")] = None) -> None:
+    parsed = _parsed_day(day)
+    try:
+        emit(list_todos(Settings(), parsed))
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+
+
+@todo_app.command("done")
+def todo_done_command(
+    todo_id: Annotated[int, typer.Argument()], day: Annotated[str | None, typer.Option("--day")] = None
+) -> None:
+    parsed = _parsed_day(day)
+    try:
+        emit(complete_todo(Settings(), todo_id, parsed))
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+
+
+@todo_app.command("undo")
+def todo_undo_command(
+    todo_id: Annotated[int, typer.Argument()], day: Annotated[str | None, typer.Option("--day")] = None
+) -> None:
+    parsed = _parsed_day(day)
+    try:
+        emit(reopen_todo(Settings(), todo_id, parsed))
+    except ValueError as error:
+        raise typer.BadParameter(str(error)) from error
+
+
+@todo_app.command("remove")
+def todo_remove_command(todo_id: Annotated[int, typer.Argument()]) -> None:
+    try:
+        emit(remove_todo(Settings(), todo_id))
     except ValueError as error:
         raise typer.BadParameter(str(error)) from error

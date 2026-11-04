@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from datetime import UTC, date, datetime, time, timedelta
 from urllib.parse import urlsplit
 from zoneinfo import ZoneInfo
@@ -11,6 +12,7 @@ from .google_calendar import CalendarEvent, in_zone
 from .rules import ReminderCandidate
 
 URL = re.compile(r"https?://[^\s<>()]+", re.IGNORECASE)
+RULE = "------------+-------------------------------------------"
 
 
 def _when(value: datetime) -> str:
@@ -24,7 +26,7 @@ def render_reminder(candidate: ReminderCandidate, timezone: ZoneInfo) -> str:
         "```text",
         f"2busy1miss reminder · {candidate.before} before",
         "TIME        | EVENT",
-        "------------+-------------------------------------------",
+        RULE,
         f"{when:<11} | {_agenda_cell(event.title)}",
         f"{'':<11} | Starts: {_when(event.start)}",
     ]
@@ -116,7 +118,24 @@ def _agenda_when(day: date, event: CalendarEvent) -> str:
     return f"{start}-{end}"
 
 
-def render_agenda(day: date, events: list[CalendarEvent], timezone: ZoneInfo) -> str:
+def _todo_lines(day: date, todos: Sequence[str], undone: Sequence[str]) -> list[str]:
+    """The agenda's to-do rows under rules of their own: none at all when there is nothing to list."""
+    yesterday = day - timedelta(days=1)
+    sections = (
+        ("To do", [_agenda_cell(title) for title in todos]),
+        ("Undone", [f"{yesterday:%m-%d}: {_agenda_cell(title)}" for title in undone]),
+    )
+    lines: list[str] = []
+    for label, cells in sections:
+        if cells:
+            lines.append(RULE)
+            lines.extend(f"{label if index == 0 else '':<11} | {cell}" for index, cell in enumerate(cells))
+    return lines
+
+
+def render_agenda(
+    day: date, events: list[CalendarEvent], timezone: ZoneInfo, todos: Sequence[str] = (), undone: Sequence[str] = ()
+) -> str:
     # Ordered by instant, then converted - not the other way round. Once two events share a zone
     # they compare by wall clock and ignore fold (PEP 495), which puts 01:30 EST before 01:30 EDT
     # on the night the hour repeats.
@@ -126,10 +145,11 @@ def render_agenda(day: date, events: list[CalendarEvent], timezone: ZoneInfo) ->
         "```text",
         f"2busy1miss agenda · {day.isoformat()}",
         "TIME        | EVENT",
-        "------------+-------------------------------------------",
+        RULE,
     ]
+    todo_lines = _todo_lines(day, todos, undone)
     if not events:
-        return _with_links([*lines, f"{'':<11} | No events"], events)
+        return _with_links([*lines, f"{'':<11} | No events", *todo_lines], events)
     for event in ordered_events:
         when = _agenda_when(day, event)
         summary = _agenda_cell(event.title)
@@ -138,4 +158,4 @@ def render_agenda(day: date, events: list[CalendarEvent], timezone: ZoneInfo) ->
         lines.append(f"{when:<11} | {summary}")
         if location := _agenda_cell(event.location):
             lines.append(f"{'':<11} | {location}")
-    return _with_links(lines, ordered_events)
+    return _with_links([*lines, *todo_lines], ordered_events)

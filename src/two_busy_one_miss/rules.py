@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import date, datetime, timedelta
 
 from .config import EventMatch, RemindersConfig
 from .google_calendar import CalendarEvent
+
+WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
 
 
 @dataclass(frozen=True)
@@ -14,6 +16,21 @@ class ReminderCandidate:
     rule_id: str
     before: str
     reminder_time: datetime
+
+
+def parse_weekdays(value: str | None) -> str:
+    """The days a to-do falls on, as `mon,wed,fri` in calendar order; every day when none are named."""
+    if value is None:
+        return ",".join(WEEKDAYS)
+    named = {part.strip().casefold() for part in value.split(",")}
+    unknown = sorted(named.difference(WEEKDAYS))
+    if unknown:
+        raise ValueError(f"unknown weekday {unknown[0]!r}; expected names such as mon,wed,fri")
+    return ",".join(weekday for weekday in WEEKDAYS if weekday in named)
+
+
+def falls_on(weekdays: str, day: date) -> bool:
+    return WEEKDAYS[day.weekday()] in weekdays.split(",")
 
 
 def parse_offset(value: str) -> timedelta:
