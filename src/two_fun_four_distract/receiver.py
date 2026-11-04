@@ -31,7 +31,16 @@ from two_read_runtime.tailnet import TailnetServer, on_tailnet
 
 from .config import Settings
 from .storage import Database
-from .usage import BrowserSample, ComputerBatch, clean_name, count_browser_sample, count_computer_sample, recent
+from .usage import (
+    BrowserSample,
+    ComputerBatch,
+    Counted,
+    clean_name,
+    count_browser_sample,
+    count_computer_sample,
+    minute_of,
+    recent,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -106,10 +115,15 @@ def _record_computer(settings: Settings, body: bytes) -> _Answer:
     now = datetime.now(UTC)
     try:
         batch = ComputerBatch.model_validate_json(body)
-        rows = [row for sample in batch.samples if recent(sample.at, now) for row in count_computer_sample(sample)]
+        rows: list[Counted] = []
+        shown: list[tuple[str, int]] = []
+        for sample in batch.samples:
+            if recent(sample.at, now) and (counted := count_computer_sample(sample)):
+                rows.extend(counted)
+                shown.append((minute_of(sample.at), sample.seconds))
     except (ValidationError, ValueError):
         return BAD_REQUEST
-    return _written(settings, lambda database: _ignore(database.add_computer_batch(batch.batch_id, rows, now)))
+    return _written(settings, lambda database: _ignore(database.add_computer_batch(batch.batch_id, rows, now, shown=shown)))
 
 
 def _ignore(_: object) -> None:

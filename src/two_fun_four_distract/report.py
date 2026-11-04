@@ -54,7 +54,7 @@ def _is_browser(name: str) -> bool:
     return name.casefold() in BROWSER_PROCESSES
 
 
-def _computer_lines(computer: list[Counted], browser: list[Counted]) -> tuple[Line, Line]:
+def _computer_lines(computer: list[Counted], browser: list[Counted], screen_seconds: int) -> tuple[Line, Line]:
     """The focused and the visible line, with a browser's time shown as the sites it was spent on.
 
     The extension can tell which sites are open but not whether something else covers the window,
@@ -65,12 +65,10 @@ def _computer_lines(computer: list[Counted], browser: list[Counted]) -> tuple[Li
     focused: dict[str, float] = {}
     visible: dict[str, float] = {}
     minute_focused: dict[str, int] = {}
-    minute_visible: dict[str, int] = {}
     browser_focused: dict[str, int] = {}
     browser_visible: dict[str, int] = {}
     for row in computer:
         minute_focused[row.minute] = minute_focused.get(row.minute, 0) + row.focused_seconds
-        minute_visible[row.minute] = max(minute_visible.get(row.minute, 0), row.visible_seconds)
         if _is_browser(row.name):
             browser_focused[row.minute] = max(browser_focused.get(row.minute, 0), row.focused_seconds)
             browser_visible[row.minute] = max(browser_visible.get(row.minute, 0), row.visible_seconds)
@@ -95,7 +93,7 @@ def _computer_lines(computer: list[Counted], browser: list[Counted]) -> tuple[Li
     if other_visible:
         visible[OTHER_BROWSING] = other_visible
     focused_total = sum(min(seconds, SECONDS_PER_MINUTE) for seconds in minute_focused.values())
-    return _line(focused_total, focused), _line(sum(minute_visible.values()), visible)
+    return _line(focused_total, focused), _line(screen_seconds, visible)
 
 
 def build_report(database: Database | None, day: date, timezone: ZoneInfo, now: datetime) -> DayReport:
@@ -109,6 +107,7 @@ def build_report(database: Database | None, day: date, timezone: ZoneInfo, now: 
     focused, visible = _computer_lines(
         database.usage("computer_usage", start, end),
         database.usage("browser_usage", start, end),
+        database.screen_seconds(start, end),
     )
     return DayReport(
         day,

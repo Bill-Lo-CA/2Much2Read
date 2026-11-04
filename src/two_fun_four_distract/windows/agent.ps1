@@ -8,7 +8,13 @@ $Directory = Join-Path $env:LOCALAPPDATA "2fun4distract"
 $Pending = Join-Path $Directory "pending"
 $LogFile = Join-Path $Directory "agent.log"
 $IntervalSeconds = 15
+# What the receiver takes for one sample. A longer gap is the computer having slept, not time on screen.
+$MaxSampleSeconds = 60
 $SamplesPerBatch = 4
+# Sending is on the same thread as sampling, so it must not hold it up for long. Whatever is not sent
+# in this time goes with the next batch.
+$RequestTimeoutSeconds = 5
+$SendBudgetSeconds = 10
 # Two weeks of batches, after which the receiver would not count them anyway.
 $MaxPendingFiles = 20160
 $MaxLogBytes = 1048576
@@ -180,7 +186,7 @@ function Get-ProcessNameOrNull([uint32]$ProcessId) {
     try { return (Get-Process -Id $ProcessId).ProcessName } catch { return $null }
 }
 
-function New-Sample {
+function New-Sample([int]$Seconds) {
     $taken = [ScreenSampler]::Take()
     $foregroundName = $null
     if ($taken.ForegroundProcessId -ne 0) { $foregroundName = Get-ProcessNameOrNull $taken.ForegroundProcessId }
@@ -197,7 +203,7 @@ function New-Sample {
     })
     return @{
         at           = [DateTime]::UtcNow.ToString("yyyy-MM-ddTHH:mm:ssZ", [Globalization.CultureInfo]::InvariantCulture)
-        seconds      = $IntervalSeconds
+        seconds      = $Seconds
         idle_seconds = [long]$taken.IdleSeconds
         locked       = (($null -eq $foregroundName) -or ($foregroundName -in @("LockApp", "LogonUI")))
         entries      = $entries
@@ -218,10 +224,12 @@ function Send-Pending {
         $files | Select-Object -First ($files.Count - $MaxPendingFiles) | Remove-Item
         $files = @($files | Select-Object -Last $MaxPendingFiles)
     }
+    $sending = [Diagnostics.Stopwatch]::StartNew()
     foreach ($file in $files) {
+        if ($sending.Elapsed.TotalSeconds -ge $SendBudgetSeconds) { return }
         try {
             Invoke-RestMethod -Method Post -Uri "$Server/computer/samples" -ContentType "application/json" `
-                -Body ([IO.File]::ReadAllBytes($file.FullName)) -TimeoutSec 15 | Out-Null
+                -Body ([IO.File]::ReadAllBytes($file.FullName)) -TimeoutSec $RequestTimeoutSeconds | Out-Null
             Remove-Item $file.FullName
         } catch [System.Net.WebException] {
             $response = $_.Exception.Response
@@ -247,9 +255,13 @@ Add-Type -TypeDefinition $source
 [ScreenSampler]::MakeDpiAware()
 
 $samples = New-Object System.Collections.ArrayList
+$sinceLastSample = [Diagnostics.Stopwatch]::StartNew()
+$elapsed = $IntervalSeconds
 while ($true) {
     try {
-        [void]$samples.Add((New-Sample))
+        # What actually passed, so that time spent sending is still time on screen.
+        if ($elapsed -gt $MaxSampleSeconds) { $elapsed = $IntervalSeconds }
+        [void]$samples.Add((New-Sample ([int][Math]::Round($elapsed))))
         if ($samples.Count -ge $SamplesPerBatch) {
             Save-Batch $samples.ToArray()
             $samples.Clear()
@@ -260,4 +272,6 @@ while ($true) {
         Write-Log "$($_.Exception.Message)"
     }
     Start-Sleep -Seconds $IntervalSeconds
+    $elapsed = $sinceLastSample.Elapsed.TotalSeconds
+    $sinceLastSample.Restart()
 }

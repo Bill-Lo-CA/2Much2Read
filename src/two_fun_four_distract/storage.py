@@ -32,6 +32,10 @@ CREATE TABLE IF NOT EXISTS computer_usage(
   visible_seconds INTEGER NOT NULL,
   PRIMARY KEY(minute, app)
 );
+CREATE TABLE IF NOT EXISTS screen_usage(
+  minute TEXT PRIMARY KEY,
+  visible_seconds INTEGER NOT NULL
+);
 CREATE TABLE IF NOT EXISTS browser_usage(
   minute TEXT NOT NULL,
   domain TEXT NOT NULL,
@@ -48,7 +52,7 @@ CREATE TABLE IF NOT EXISTS summaries(
 );
 """
 
-READ_TABLES = ("phone_events", "computer_usage", "browser_usage")
+READ_TABLES = ("phone_events", "computer_usage", "screen_usage", "browser_usage")
 # Long enough that no resend from the computer can outlive it: pending batches are kept for 14 days.
 BATCH_RETENTION = timedelta(days=30)
 
@@ -100,7 +104,9 @@ class Database:
                 "INSERT INTO phone_events(app,kind,at) VALUES(?,?,?)", (app, kind, at.astimezone(UTC).isoformat())
             )
 
-    def add_computer_batch(self, batch_id: str, rows: Iterable[Counted], now: datetime) -> bool:
+    def add_computer_batch(
+        self, batch_id: str, rows: Iterable[Counted], now: datetime, *, shown: Iterable[tuple[str, int]] = ()
+    ) -> bool:
         """False, adding nothing, for a batch already taken: one whose reply was lost is sent again."""
         with self.connection:
             taken = self.connection.execute(
@@ -109,6 +115,12 @@ class Database:
             if taken.rowcount == 0:
                 return False
             _add_usage(self.connection, "computer_usage", rows)
+            self.connection.executemany(
+                f"""INSERT INTO screen_usage(minute,visible_seconds) VALUES(?,MIN(?,{SECONDS_PER_MINUTE}))
+                ON CONFLICT(minute) DO UPDATE SET
+                  visible_seconds=MIN(visible_seconds+excluded.visible_seconds,{SECONDS_PER_MINUTE})""",
+                list(shown),
+            )
             self.connection.execute(
                 "DELETE FROM computer_batches WHERE received_at<?", ((now - BATCH_RETENTION).astimezone(UTC).isoformat(),)
             )
@@ -135,6 +147,18 @@ class Database:
             Counted(str(row["minute"]), str(row["name"]), int(row["focused_seconds"]), int(row["visible_seconds"]))
             for row in rows
         ]
+
+    def screen_seconds(self, start: datetime, end: datetime) -> int:
+        """How long anything at all was showing, which the per-app totals cannot say.
+
+        Apps showing at once and apps following each other in a minute leave the same per-app rows,
+        so this is counted from each sample as it arrives rather than worked out from them later.
+        """
+        row = self.connection.execute(
+            "SELECT COALESCE(SUM(visible_seconds),0) FROM screen_usage WHERE minute>=? AND minute<?",
+            (start.astimezone(UTC).strftime("%Y-%m-%dT%H:%M"), end.astimezone(UTC).strftime("%Y-%m-%dT%H:%M")),
+        ).fetchone()
+        return int(row[0])
 
     def summary_sent(self, day: date, destination_key: str) -> bool:
         row = self.connection.execute(

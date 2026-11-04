@@ -49,7 +49,8 @@ def at(hour: int, minute: int = 0, second: int = 0) -> datetime:
 
 
 def computer(database: Database, moment: datetime, name: str, focused: int, visible: int) -> None:
-    database.add_computer_batch(f"{moment}{name}", [Counted(minute_of(moment), name, focused, visible)], moment)
+    minute = minute_of(moment)
+    database.add_computer_batch(f"{moment}{name}", [Counted(minute, name, focused, visible)], moment, shown=[(minute, visible)])
 
 
 def browser(database: Database, moment: datetime, name: str, focused: int, visible: int) -> None:
@@ -184,14 +185,52 @@ def test_a_second_of_time_is_still_listed(database: Database) -> None:
     assert report(database).focused.items == [("brief", 1)]
 
 
-def test_totals_for_a_minute_are_exact(database: Database) -> None:
+def test_focused_time_in_a_minute_is_exact(database: Database) -> None:
     computer(database, at(9), "a", 20, 40)
     computer(database, at(9), "b", 30, 20)
 
+    assert report(database).focused.total_seconds == 50
+
+
+def test_time_on_screen_is_what_each_sample_said_not_the_largest_app(database: Database) -> None:
+    minute = minute_of(at(9))
+    rows = [Counted(minute, "Code", 30, 30), Counted(minute, "Notepad", 30, 30)]
+    database.add_computer_batch("batch", rows, at(9), shown=[(minute, 30), (minute, 30)])
+
     built = report(database)
 
-    assert built.focused.total_seconds == 50
-    assert built.visible.total_seconds == 40
+    assert built.visible.total_seconds == 60
+    assert built.visible.items == [("Code", 30), ("Notepad", 30)]
+
+
+def test_time_on_screen_cannot_pass_the_length_of_a_minute(database: Database) -> None:
+    minute = minute_of(at(9))
+    database.add_computer_batch("first", [], at(9), shown=[(minute, 45)])
+    database.add_computer_batch("second", [], at(9), shown=[(minute, 45)])
+
+    assert report(database).visible.total_seconds == 60
+
+
+def test_a_single_sample_cannot_pass_the_length_of_a_minute_on_screen(database: Database) -> None:
+    database.add_computer_batch("batch", [], at(9), shown=[(minute_of(at(9)), 90)])
+
+    assert database.screen_seconds(at(9), at(10)) == 60
+
+
+def test_only_the_days_time_on_screen_counts(database: Database) -> None:
+    for moment in (at(0, 0) - timedelta(minutes=1), at(0, 0), at(23, 59), at(23, 59) + timedelta(minutes=1)):
+        database.add_computer_batch(str(moment), [], moment, shown=[(minute_of(moment), 60)])
+
+    assert report(database).visible.total_seconds == 120
+
+
+def test_a_batch_already_taken_adds_no_time_on_screen(database: Database) -> None:
+    minute = minute_of(at(9))
+
+    database.add_computer_batch("batch", [], at(9), shown=[(minute, 15)])
+    database.add_computer_batch("batch", [], at(9), shown=[(minute, 15)])
+
+    assert database.screen_seconds(at(9), at(10)) == 15
 
 
 def test_a_site_counts_no_longer_than_a_browser_was_on_screen_that_minute(database: Database) -> None:

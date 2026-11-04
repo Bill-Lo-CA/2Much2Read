@@ -23,6 +23,7 @@ from two_fun_four_distract import cli, config, receiver
 from two_fun_four_distract.config import Settings
 from two_fun_four_distract.receiver import EXTENSION_ORIGIN, SETUP_FILES, UsageServer
 from two_fun_four_distract.storage import Database
+from two_fun_four_distract.usage import MAX_SAMPLE_SECONDS
 from two_read_runtime.tailnet import on_tailnet
 
 # The test's own connections come from loopback, so loopback plays each device in turn.
@@ -206,6 +207,57 @@ def test_the_computer_records_samples(computer_only: UsageServer, settings: Sett
     assert computer_usage(settings) == [("Code", 15, 15), ("Discord", 0, 15)]
 
 
+def sample_of(at: str, process: str, *, seconds: int = 15, locked: bool = False) -> dict[str, object]:
+    entries = [{"monitor": 1, "process": process, "percent": 50.0, "foreground": True}]
+    return {"at": at, "seconds": seconds, "idle_seconds": 0, "locked": locked, "entries": entries}
+
+
+def screen_usage(settings: Settings) -> list[tuple[object, ...]]:
+    return rows(settings, "SELECT visible_seconds FROM screen_usage ORDER BY minute")
+
+
+def test_apps_following_each_other_in_a_minute_still_add_up_on_screen(computer_only: UsageServer, settings: Settings) -> None:
+    at = (datetime.now(UTC).replace(second=0, microsecond=0) - timedelta(minutes=2)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    samples = [sample_of(at, "Code"), sample_of(at, "Code"), sample_of(at, "Notepad"), sample_of(at, "Notepad")]
+    body = json.dumps({"batch_id": str(uuid.uuid4()), "samples": samples}).encode()
+
+    assert post_batch(computer_only, body).status == 200
+
+    assert computer_usage(settings) == [("Code", 30, 30), ("Notepad", 30, 30)]
+    assert screen_usage(settings) == [(60,)]
+
+
+def test_apps_showing_at_once_count_once_on_screen(computer_only: UsageServer, settings: Settings) -> None:
+    assert post_batch(computer_only, batch("Code", "Discord")).status == 200
+
+    assert screen_usage(settings) == [(15,)]
+
+
+def test_a_sample_counts_for_the_time_it_says_passed(computer_only: UsageServer, settings: Settings) -> None:
+    samples = [sample_of(now_text(), "Code", seconds=40)]
+    body = json.dumps({"batch_id": str(uuid.uuid4()), "samples": samples}).encode()
+
+    assert post_batch(computer_only, body).status == 200
+
+    assert computer_usage(settings) == [("Code", 40, 40)]
+    assert screen_usage(settings) == [(40,)]
+
+
+def test_a_locked_or_old_sample_is_no_time_on_screen(computer_only: UsageServer, settings: Settings) -> None:
+    samples = [sample_of(now_text(), "Code", locked=True), sample_of(now_text(-timedelta(days=15)), "Code")]
+    body = json.dumps({"batch_id": str(uuid.uuid4()), "samples": samples}).encode()
+
+    assert post_batch(computer_only, body).status == 200
+
+    assert screen_usage(settings) == []
+
+
+def test_the_agents_longest_sample_is_one_the_receiver_takes() -> None:
+    agent = (WINDOWS / "agent.ps1").read_text(encoding="utf-8")
+
+    assert f"$MaxSampleSeconds = {MAX_SAMPLE_SECONDS}\n" in agent
+
+
 def test_a_batch_sent_twice_counts_once_and_is_still_answered_as_taken(computer_only: UsageServer, settings: Settings) -> None:
     body = batch("Code")
 
@@ -213,6 +265,7 @@ def test_a_batch_sent_twice_counts_once_and_is_still_answered_as_taken(computer_
     assert post_batch(computer_only, body).status == 200
 
     assert computer_usage(settings) == [("Code", 15, 15)]
+    assert screen_usage(settings) == [(15,)]
 
 
 def test_a_minute_of_an_app_cannot_be_worth_more_than_a_minute(computer_only: UsageServer, settings: Settings) -> None:
@@ -376,7 +429,7 @@ def test_the_phone_cannot_fetch_the_setup_files(phone_only: UsageServer) -> None
 def test_a_store_that_cannot_be_written_says_so_without_the_reason(
     computer_only: UsageServer, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    def locked(*_: object) -> None:
+    def locked(*_: object, **__: object) -> None:
         raise sqlite3.OperationalError("a value that must not show")
 
     monkeypatch.setattr(Database, "add_computer_batch", locked)
@@ -394,7 +447,7 @@ def test_a_failed_write_leaves_the_batch_to_be_sent_again(
     body = batch("Code")
     original = Database.add_computer_batch
 
-    def fails(*_: object) -> bool:
+    def fails(*_: object, **__: object) -> bool:
         raise sqlite3.OperationalError("locked")
 
     monkeypatch.setattr(Database, "add_computer_batch", fails)
