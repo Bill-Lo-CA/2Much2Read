@@ -4,7 +4,7 @@ import json
 import sqlite3
 from collections.abc import Iterator
 from contextlib import contextmanager
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import Self, cast
 
@@ -12,7 +12,7 @@ from two_read_runtime.discord import CorruptMessageIdsError, DiscordDestination,
 from two_read_runtime.permissions import prepare_private_file, repair_sqlite_files
 
 from .google_calendar import CalendarEvent
-from .rules import ReminderCandidate
+from .rules import ReminderCandidate, falls_on
 
 
 def instant(value: datetime) -> str:
@@ -147,8 +147,33 @@ CREATE TABLE IF NOT EXISTS agenda_deliveries(
   updated_at TEXT NOT NULL,
   UNIQUE(agenda_day, timezone, destination_hash)
 );
+CREATE TABLE IF NOT EXISTS todos(
+  id INTEGER PRIMARY KEY,
+  title TEXT NOT NULL,
+  weekdays TEXT NOT NULL,
+  first_day TEXT NOT NULL,
+  removed_on TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS todo_completions(
+  todo_id INTEGER NOT NULL REFERENCES todos(id) ON DELETE CASCADE,
+  day TEXT NOT NULL,
+  completed_at TEXT NOT NULL,
+  PRIMARY KEY(todo_id, day)
+);
 """
 )
+
+
+def todo_counts_on(row: sqlite3.Row, day: date) -> bool:
+    """Whether a to-do is owed on a day: its weekday, from the day it was added until it was removed."""
+    removed_on = row["removed_on"]
+    return (
+        str(row["first_day"]) <= day.isoformat()
+        and (removed_on is None or str(removed_on) > day.isoformat())
+        and falls_on(str(row["weekdays"]), day)
+    )
 
 
 class Database:
@@ -837,6 +862,57 @@ class Database:
         )
         self.connection.commit()
         return int(row["id"])
+
+    def add_todo(self, title: str, weekdays: str, first_day: date) -> int:
+        now = datetime.now(UTC).isoformat()
+        cursor = self.connection.execute(
+            "INSERT INTO todos(title,weekdays,first_day,created_at,updated_at) VALUES(?,?,?,?,?)",
+            (title, weekdays, first_day.isoformat(), now, now),
+        )
+        self.connection.commit()
+        assert cursor.lastrowid is not None
+        return int(cursor.lastrowid)
+
+    def todo(self, todo_id: int) -> sqlite3.Row | None:
+        row: sqlite3.Row | None = self.connection.execute("SELECT * FROM todos WHERE id=?", (todo_id,)).fetchone()
+        return row
+
+    def todos(self, day: date) -> list[sqlite3.Row]:
+        """Every to-do ever added, each with whether it was done on a day."""
+        return self.connection.execute(
+            """SELECT t.id,t.title,t.weekdays,t.first_day,t.removed_on,c.completed_at IS NOT NULL AS done
+            FROM todos t LEFT JOIN todo_completions c ON c.todo_id=t.id AND c.day=? ORDER BY t.id""",
+            (day.isoformat(),),
+        ).fetchall()
+
+    def _open_todo_titles(self, day: date) -> list[str]:
+        return [str(row["title"]) for row in self.todos(day) if todo_counts_on(row, day) and not row["done"]]
+
+    def agenda_todos(self, day: date) -> tuple[list[str], list[str]]:
+        """What an agenda lists: the day's open to-dos, and those the day before left undone."""
+        return self._open_todo_titles(day), self._open_todo_titles(day - timedelta(days=1))
+
+    def complete_todo(self, todo_id: int, day: date) -> bool:
+        cursor = self.connection.execute(
+            "INSERT OR IGNORE INTO todo_completions(todo_id,day,completed_at) VALUES(?,?,?)",
+            (todo_id, day.isoformat(), datetime.now(UTC).isoformat()),
+        )
+        self.connection.commit()
+        return bool(cursor.rowcount)
+
+    def reopen_todo(self, todo_id: int, day: date) -> bool:
+        cursor = self.connection.execute("DELETE FROM todo_completions WHERE todo_id=? AND day=?", (todo_id, day.isoformat()))
+        self.connection.commit()
+        return bool(cursor.rowcount)
+
+    def remove_todo(self, todo_id: int, day: date) -> bool:
+        """Stop a to-do counting from a day on; what was done before stays on record."""
+        cursor = self.connection.execute(
+            "UPDATE todos SET removed_on=?,updated_at=? WHERE id=? AND removed_on IS NULL",
+            (day.isoformat(), datetime.now(UTC).isoformat(), todo_id),
+        )
+        self.connection.commit()
+        return bool(cursor.rowcount)
 
     def pending_agenda_deliveries(self, day: date, timezone: str, destination_hash: str) -> list[sqlite3.Row]:
         return self.connection.execute(
