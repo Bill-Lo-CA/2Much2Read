@@ -1,0 +1,11 @@
+{
+  "manifest_version": 3,
+  "name": "2fun4distract",
+  "version": "1.0",
+  "description": "Reports the domain of each window's active tab to your own 2fun4distract service, and nothing else.",
+  "key": "MIIBIjANBgkqhkiG9w0BAQEFAAOCAQ8AMIIBCgKCAQEAlpJi1s67d15/TaCE1vX2SLEtBq72Rbg+jMYnbCiFHQCbeLeUAcnrJTziJR6Gl1i5CCSf0Y12n6EtAnqBQo+HzpoiltgTKBk5/XLJR0rNYS7eCfUzbXkIF0Cz2h1SL7z986FmbQ+5RwhJYjb5XgIx41AceSvrcGkQqqsBhexNnsTHb6nXOoKCM2FOHWhFE1Nj0yNWg5Q7pPttkCy2trdUlS2l24Yy6dB1nGUlYqLeYCzudNcufPplwiN3aZ39k5cKUQ3oST4ROUtb4MuAtx1uePOxNuFAGBztD964KmSZTHBFJ3caLlkKhyDtNqoGo8VoZW1QJ+Rp6oC+VA35PtKeDQIDAQAB",
+  "incognito": "not_allowed",
+  "permissions": ["alarms", "idle", "tabs"],
+  "host_permissions": ["http://__HOST__/*"],
+  "background": { "service_worker": "background.js" }
+}

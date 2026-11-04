@@ -78,7 +78,7 @@ resolved=$(env -i HOME="$HOME" "$repo_dir/.venv/bin/python" - <<'PY'
 import sys
 
 from two_busy_one_miss.config import Settings, load_reminders
-from two_busy_one_miss.todo_web import interpreter_root
+from two_read_runtime.tailnet import interpreter_root
 
 try:
     settings = Settings()

@@ -1,0 +1,36 @@
+[Unit]
+Description=2fun4distract Usage Receiver (tailnet only)
+# Tailscale can come up after this does, so it keeps trying however long that takes.
+StartLimitIntervalSec=0
+
+[Service]
+Type=exec
+# No EnvironmentFile: that file holds the Discord webhook, and nothing here sends anything.
+ExecStart=__EXECUTABLE__ serve --host __HOST__ --port __PORT__ --phone __PHONE__ --computer __COMPUTER__
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+UMask=0077
+ProtectSystem=strict
+# Home is empty but for the code, the interpreter if it is installed there, and the database. Every
+# token and environment file, and every other tool's database, is not there to read.
+ProtectHome=tmpfs
+BindReadOnlyPaths=__REPO_DIR__/.venv __REPO_DIR__/src __INTERPRETER_ROOT__
+BindPaths=%h/.local/share/2much2read-runtime/2fun4distract
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectKernelLogs=true
+ProtectControlGroups=true
+LockPersonality=true
+RestrictSUIDSGID=true
+RestrictRealtime=true
+RestrictAddressFamilies=AF_UNIX AF_INET
+RestrictNamespaces=true
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+PrivateDevices=true
+
+[Install]
+WantedBy=default.target

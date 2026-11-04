@@ -7,8 +7,8 @@ permissions:
 # fail. It is too slow for every pull request - the whole tree is about 15,000 mutants - so this
 # runs weekly, and on demand, over the modules that guard a security boundary: endpoint and webhook
 # validation, Discord delivery and mention control, file permissions, OAuth tokens, the article
-# fetcher's network policy, which email links may become a story's link, and who the to-do page
-# answers.
+# fetcher's network policy, which email links may become a story's link, and who the to-do page and
+# the usage receiver answer.
 on:
   workflow_dispatch:
   schedule:
@@ -41,12 +41,14 @@ jobs:
           "two_much_two_read.mime.*"
           "two_much_two_read.url_enrichment.*"
           "two_busy_one_miss.todo_web.*"
+          "two_fun_four_distract.receiver.*"
+          "two_read_runtime.tailnet.*"
 
       - name: Report survivors, and fail on code no test reaches
         run: |
           uv run --with mutmut==3.8.0 mutmut results --all true > results.txt
           grep -E ': (survived|no tests)$' results.txt || true
-          if grep -qE '^\s*two_(read_runtime\.(endpoint_policy|discord|permissions|oauth)|much_two_read\.(article_fetcher|mime|url_enrichment)|busy_one_miss\.todo_web)\..*: no tests$' results.txt; then
+          if grep -qE '^\s*two_(read_runtime\.(endpoint_policy|discord|permissions|oauth|tailnet)|much_two_read\.(article_fetcher|mime|url_enrichment)|busy_one_miss\.todo_web|fun_four_distract\.receiver)\..*: no tests$' results.txt; then
             echo "A security module has code no test reaches; see the 'no tests' lines above." >&2
             exit 1
           fi

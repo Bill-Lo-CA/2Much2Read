@@ -1202,3 +1202,355 @@ def test_todo_web_installer_will_not_write_a_python_path_a_unit_cannot_hold(tmp_
     assert result.returncode == 1
     assert "a unit file cannot name that path" in result.stderr
     assert not unit.exists()
+
+
+FUN_ADDRESSES = ("--phone", "100.89.98.83", "--computer", "100.74.58.93")
+
+
+def _run_fun_installer(
+    tmp_path: Path,
+    *arguments: str,
+    answer: str = "y\n",
+    env: str | None = f"DISCORD_WEBHOOK_URL={SECRET_WEBHOOK}\n",
+    tailscale_output: str = TAILSCALE_ADDRESS,
+) -> tuple[subprocess.CompletedProcess[str], Path, str]:
+    root = Path(__file__).parents[1]
+    home = tmp_path / "home"
+    config_root = home / ".config" / "2much2read-runtime"
+    config_root.mkdir(parents=True, exist_ok=True)
+    if env is not None:
+        (config_root / ".2fun4distract.env").write_text(env, encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "systemctl.log"
+    log.touch()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text('#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n', encoding="utf-8")
+    systemctl.chmod(0o755)
+    tailscale = fake_bin / "tailscale"
+    tailscale.write_text(f'#!/bin/sh\nprintf "%s\\n" "{tailscale_output}"\n', encoding="utf-8")
+    tailscale.chmod(0o755)
+    result = subprocess.run(
+        ["sh", "scripts/install-2fun4distract-user-service.sh", *arguments],
+        cwd=root,
+        env=os.environ
+        | {
+            "HOME": str(home),
+            "PATH": f"{fake_bin}:{os.environ['PATH']}",
+            "SYSTEMCTL_LOG": str(log),
+            # A variable in this shell must not outrank the managed file the service would read.
+            "SUMMARY_TIMEZONE": "Asia/Tokyo",
+        },
+        text=True,
+        capture_output=True,
+        input=answer,
+    )
+    return result, home / ".config" / "systemd" / "user", log.read_text(encoding="utf-8")
+
+
+def test_fun_installer_writes_a_receiver_with_no_way_to_the_credentials(tmp_path: Path) -> None:
+    result, units, calls = _run_fun_installer(tmp_path, *FUN_ADDRESSES)
+
+    assert result.returncode == 0, result.stderr
+    root = Path(__file__).parents[1]
+    receiver = (units / "2fun4distract-receiver.service").read_text(encoding="utf-8")
+    assert (
+        f"ExecStart={root}/.venv/bin/2fun4distract serve --host {TAILSCALE_ADDRESS} --port 8767 "
+        "--phone 100.89.98.83 --computer 100.74.58.93\n"
+    ) in receiver
+    assert f"BindReadOnlyPaths={root}/.venv {root}/src\n" in receiver
+    assert "BindPaths=%h/.local/share/2much2read-runtime/2fun4distract\n" in receiver
+    assert "ProtectHome=tmpfs\n" in receiver
+    assert "\nEnvironmentFile=" not in receiver
+    assert "__" not in receiver
+    assert SECRET_WEBHOOK not in receiver
+    assert SECRET_WEBHOOK not in result.stdout + result.stderr
+    assert calls.splitlines() == [
+        "--user daemon-reload",
+        "--user enable 2fun4distract-receiver.service 2fun4distract-summary.timer",
+        "--user restart 2fun4distract-receiver.service 2fun4distract-summary.timer",
+    ]
+
+
+def test_fun_installer_schedules_the_summary_from_the_managed_file(tmp_path: Path) -> None:
+    env = f"DISCORD_WEBHOOK_URL={SECRET_WEBHOOK}\nSUMMARY_TIMEZONE=Europe/Berlin\nSUMMARY_SCHEDULE_TIME=07:30\n"
+    result, units, _ = _run_fun_installer(tmp_path, *FUN_ADDRESSES, env=env)
+
+    assert result.returncode == 0, result.stderr
+    timer = (units / "2fun4distract-summary.timer").read_text(encoding="utf-8")
+    assert "OnCalendar=*-*-* 07:30:00 Europe/Berlin\n" in timer
+    assert "Persistent=true\n" in timer
+
+
+def test_fun_installer_writes_the_summary_service(tmp_path: Path) -> None:
+    result, units, _ = _run_fun_installer(tmp_path, *FUN_ADDRESSES)
+
+    assert result.returncode == 0, result.stderr
+    service = (units / "2fun4distract-summary.service").read_text(encoding="utf-8")
+    assert f"ExecStart={Path(__file__).parents[1]}/.venv/bin/2fun4distract summary\n" in service
+    assert "EnvironmentFile=%h/.config/2much2read-runtime/.2fun4distract.env\n" in service
+    assert "ReadWritePaths=%h/.local/share/2much2read-runtime/2fun4distract\n" in service
+    assert "__" not in service
+
+
+def test_fun_installer_creates_private_settings_from_the_example_and_keeps_existing_ones(tmp_path: Path) -> None:
+    result, _, _ = _run_fun_installer(tmp_path, *FUN_ADDRESSES, env=None)
+
+    assert result.returncode == 0, result.stderr
+    home = tmp_path / "home"
+    env = home / ".config" / "2much2read-runtime" / ".2fun4distract.env"
+    assert env.stat().st_mode & 0o777 == 0o600
+    assert "DISCORD_WEBHOOK_URL=\n" in env.read_text(encoding="utf-8")
+    assert (home / ".local" / "share" / "2much2read-runtime" / "2fun4distract").stat().st_mode & 0o777 == 0o700
+
+
+def test_fun_installer_leaves_existing_settings_alone(tmp_path: Path) -> None:
+    result, _, _ = _run_fun_installer(tmp_path, *FUN_ADDRESSES)
+
+    assert result.returncode == 0, result.stderr
+    env = tmp_path / "home" / ".config" / "2much2read-runtime" / ".2fun4distract.env"
+    assert env.read_text(encoding="utf-8") == f"DISCORD_WEBHOOK_URL={SECRET_WEBHOOK}\n"
+    assert env.stat().st_mode & 0o777 == 0o600
+
+
+def test_fun_installer_starts_nothing_unless_told_to(tmp_path: Path) -> None:
+    result, units, calls = _run_fun_installer(tmp_path, *FUN_ADDRESSES, answer="\n")
+
+    assert result.returncode == 0, result.stderr
+    assert (units / "2fun4distract-receiver.service").is_file()
+    assert calls.splitlines() == ["--user daemon-reload"]
+    assert "Not started" in result.stdout
+
+
+def test_fun_installer_tells_how_to_set_up_each_device(tmp_path: Path) -> None:
+    result, _, _ = _run_fun_installer(tmp_path, *FUN_ADDRESSES)
+
+    assert f"http://{TAILSCALE_ADDRESS}:8767/phone/open?app=" in result.stdout
+    assert f"irm http://{TAILSCALE_ADDRESS}:8767/setup/install.ps1" in result.stdout
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        (),
+        ("--phone", "100.89.98.83"),
+        ("--computer", "100.74.58.93"),
+        ("--phone",),
+        ("--phone", ""),
+    ],
+)
+def test_fun_installer_needs_both_addresses(tmp_path: Path, arguments: tuple[str, ...]) -> None:
+    result, units, calls = _run_fun_installer(tmp_path, *arguments)
+
+    assert result.returncode == 2
+    assert not (units / "2fun4distract-receiver.service").exists()
+    assert calls == ""
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ("--phone", "192.168.30.180", "--computer", "100.74.58.93"),
+        ("--phone", "100.89.98.83", "--computer", "8.8.8.8"),
+        ("--phone", "100.89.98.83|evil", "--computer", "100.74.58.93"),
+        ("--phone", "phone.example", "--computer", "100.74.58.93"),
+    ],
+)
+def test_fun_installer_needs_addresses_on_the_tailnet(tmp_path: Path, arguments: tuple[str, ...]) -> None:
+    result, units, calls = _run_fun_installer(tmp_path, *arguments)
+
+    assert result.returncode == 2
+    assert "is not a Tailscale address" in result.stderr
+    assert not (units / "2fun4distract-receiver.service").exists()
+    assert calls == ""
+
+
+@pytest.mark.parametrize("port", ["8767|evil", "1023", "65536", "0", "008767"])
+def test_fun_installer_refuses_a_port_the_command_would_not_take(tmp_path: Path, port: str) -> None:
+    result, units, _ = _run_fun_installer(tmp_path, *FUN_ADDRESSES, "--port", port)
+
+    assert result.returncode == 2
+    assert not (units / "2fun4distract-receiver.service").exists()
+
+
+def test_fun_installer_needs_a_tailscale_address_of_its_own(tmp_path: Path) -> None:
+    result, units, calls = _run_fun_installer(tmp_path, *FUN_ADDRESSES, tailscale_output="")
+
+    assert result.returncode == 1
+    assert "no Tailscale address" in result.stderr
+    assert not (units / "2fun4distract-receiver.service").exists()
+    assert calls == ""
+
+
+def test_fun_installer_names_only_the_type_of_a_settings_failure(tmp_path: Path) -> None:
+    rejected = "secret-value-that-is-not-a-timezone"
+    result, units, calls = _run_fun_installer(tmp_path, *FUN_ADDRESSES, env=f"SUMMARY_TIMEZONE={rejected}\n")
+
+    assert result.returncode == 1
+    assert "ValidationError" in result.stderr
+    assert rejected not in result.stdout + result.stderr
+    assert not (units / "2fun4distract-receiver.service").exists()
+    assert calls == ""
+
+
+@pytest.mark.parametrize(
+    "name", ["2fun4distract-receiver.service", "2fun4distract-summary.service", "2fun4distract-summary.timer"]
+)
+def test_fun_installer_refuses_a_symlinked_unit(tmp_path: Path, name: str) -> None:
+    systemd_dir = tmp_path / "home" / ".config" / "systemd" / "user"
+    systemd_dir.mkdir(parents=True)
+    target = tmp_path / "outside.unit"
+    target.write_text("keep", encoding="utf-8")
+    (systemd_dir / name).symlink_to(target)
+
+    result, _, calls = _run_fun_installer(tmp_path, *FUN_ADDRESSES)
+
+    assert result.returncode == 1
+    assert "symbolic link" in result.stderr
+    assert target.read_text(encoding="utf-8") == "keep"
+    assert calls == ""
+
+
+def test_fun_installer_refuses_a_symlinked_env_file(tmp_path: Path) -> None:
+    config_root = tmp_path / "home" / ".config" / "2much2read-runtime"
+    config_root.mkdir(parents=True)
+    target = tmp_path / "outside.env"
+    target.write_text("secret", encoding="utf-8")
+    target.chmod(0o644)
+    (config_root / ".2fun4distract.env").symlink_to(target)
+
+    result, _, _ = _run_fun_installer(tmp_path, *FUN_ADDRESSES, env=None)
+
+    assert result.returncode == 1
+    assert "symbolic link" in result.stderr
+    assert target.stat().st_mode & 0o777 == 0o644
+
+
+def _run_fun_installer_on_python_at(tmp_path: Path, root: str) -> tuple[subprocess.CompletedProcess[str], Path, Path]:
+    """The installer in a checkout whose python reports the given root, with {home} filled in."""
+    repo = Path(__file__).parents[1]
+    home = tmp_path / "home"
+    checkout = tmp_path / "checkout"
+    (home / ".config" / "2much2read-runtime").mkdir(parents=True)
+    (checkout / "scripts").mkdir(parents=True)
+    (checkout / "deploy" / "systemd").mkdir(parents=True)
+    (checkout / "config").mkdir(parents=True)
+    (checkout / ".venv" / "bin").mkdir(parents=True)
+    for relative in (
+        "scripts/install-2fun4distract-user-service.sh",
+        "deploy/systemd/2fun4distract-receiver.service",
+        "deploy/systemd/2fun4distract-summary.service",
+        "deploy/systemd/2fun4distract-summary.timer",
+        "config/2fun4distract.env.example",
+    ):
+        (checkout / relative).write_text((repo / relative).read_text(encoding="utf-8"), encoding="utf-8")
+    python = checkout / ".venv" / "bin" / "python"
+    answers = "time=08:00\\ntimezone=America/Toronto\\ninterpreter_root=%s\\n"
+    python.write_text(f"#!/bin/sh\ncat >/dev/null\nprintf '{answers}' '{root.format(home=home)}'\n", encoding="utf-8")
+    python.chmod(0o755)
+    command = checkout / ".venv" / "bin" / "2fun4distract"
+    command.touch()
+    command.chmod(0o755)
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    (fake_bin / "systemctl").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    (fake_bin / "systemctl").chmod(0o755)
+    (fake_bin / "tailscale").write_text(f'#!/bin/sh\nprintf "%s\\n" "{TAILSCALE_ADDRESS}"\n', encoding="utf-8")
+    (fake_bin / "tailscale").chmod(0o755)
+    result = subprocess.run(
+        ["sh", "scripts/install-2fun4distract-user-service.sh", *FUN_ADDRESSES],
+        cwd=checkout,
+        env=os.environ | {"HOME": str(home), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+        input="\n",
+    )
+    return result, home / ".config" / "systemd" / "user" / "2fun4distract-receiver.service", home
+
+
+def test_fun_installer_binds_a_python_under_home(tmp_path: Path) -> None:
+    result, unit, home = _run_fun_installer_on_python_at(tmp_path, "{home}/.local/share/uv/python")
+
+    assert result.returncode == 0, result.stderr
+    assert f"/src {home}/.local/share/uv/python\n" in unit.read_text(encoding="utf-8")
+
+
+def test_fun_installer_leaves_a_python_outside_home_alone(tmp_path: Path) -> None:
+    result, unit, _ = _run_fun_installer_on_python_at(tmp_path, "/usr")
+
+    assert result.returncode == 0, result.stderr
+    assert "/src\n" in unit.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("root", ["{home}", "{home}/.local", "{home}/.local/share", "{home}/.config"])
+def test_fun_installer_will_not_bind_what_holds_the_credentials(tmp_path: Path, root: str) -> None:
+    result, unit, _ = _run_fun_installer_on_python_at(tmp_path, root)
+
+    assert result.returncode == 1
+    assert "binding it would expose" in result.stderr
+    assert not unit.exists()
+
+
+@pytest.mark.parametrize("root", ["{home}/my python", "{home}/py|thon"])
+def test_fun_installer_will_not_write_a_python_path_a_unit_cannot_hold(tmp_path: Path, root: str) -> None:
+    result, unit, _ = _run_fun_installer_on_python_at(tmp_path, root)
+
+    assert result.returncode == 1
+    assert "a unit file cannot name that path" in result.stderr
+    assert not unit.exists()
+
+
+def test_fun_uninstaller_removes_only_its_own_units(tmp_path: Path) -> None:
+    root = Path(__file__).parents[1]
+    systemd_dir = tmp_path / "home" / ".config" / "systemd" / "user"
+    systemd_dir.mkdir(parents=True)
+    owned = ["2fun4distract-receiver.service", "2fun4distract-summary.service", "2fun4distract-summary.timer"]
+    for unit in owned:
+        (systemd_dir / unit).write_text("owned", encoding="utf-8")
+    (systemd_dir / "2busy1miss-runtime.service").write_text("keep", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    log = tmp_path / "systemctl.log"
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "$*" >> "$SYSTEMCTL_LOG"\n[ "$2" = "is-active" ] && exit 3\nexit 0\n', encoding="utf-8"
+    )
+    systemctl.chmod(0o755)
+
+    subprocess.run(
+        ["sh", "scripts/uninstall-2fun4distract-user-service.sh"],
+        cwd=root,
+        env=os.environ | {"HOME": str(tmp_path / "home"), "PATH": f"{fake_bin}:{os.environ['PATH']}", "SYSTEMCTL_LOG": str(log)},
+        check=True,
+        text=True,
+        capture_output=True,
+    )
+
+    assert not any((systemd_dir / unit).exists() for unit in owned)
+    assert (systemd_dir / "2busy1miss-runtime.service").read_text(encoding="utf-8") == "keep"
+    calls = log.read_text(encoding="utf-8")
+    assert "disable --now 2fun4distract-receiver.service 2fun4distract-summary.timer" in calls
+    assert "daemon-reload" in calls
+
+
+def test_fun_uninstaller_refuses_while_a_service_is_active(tmp_path: Path) -> None:
+    root = Path(__file__).parents[1]
+    systemd_dir = tmp_path / "home" / ".config" / "systemd" / "user"
+    systemd_dir.mkdir(parents=True)
+    (systemd_dir / "2fun4distract-receiver.service").write_text("owned", encoding="utf-8")
+    fake_bin = tmp_path / "bin"
+    fake_bin.mkdir()
+    systemctl = fake_bin / "systemctl"
+    systemctl.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    systemctl.chmod(0o755)
+
+    result = subprocess.run(
+        ["sh", "scripts/uninstall-2fun4distract-user-service.sh"],
+        cwd=root,
+        env=os.environ | {"HOME": str(tmp_path / "home"), "PATH": f"{fake_bin}:{os.environ['PATH']}"},
+        text=True,
+        capture_output=True,
+    )
+
+    assert result.returncode == 1
+    assert (systemd_dir / "2fun4distract-receiver.service").exists()
