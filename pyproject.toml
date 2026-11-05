@@ -5,7 +5,7 @@ build-backend = "hatchling.build"
 [project]
 name = "2much2read"
 version = "0.1.0"
-description = "Local-first Gmail digests and Google Calendar reminders via Discord"
+description = "Local-first Gmail digests, Calendar reminders and to-dos, usage tracking and nudges via Discord"
 readme = "README.md"
 requires-python = ">=3.11,<3.14"
 dependencies = [
