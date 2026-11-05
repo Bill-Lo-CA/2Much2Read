@@ -23,6 +23,7 @@ from two_busy_one_miss import todo_web, todos
 from two_busy_one_miss.config import Settings
 from two_busy_one_miss.storage import Database
 from two_busy_one_miss.todo_web import TodoPageServer
+from two_read_runtime.tailnet import interpreter_root
 
 # A Wednesday.
 TODAY = date(2026, 11, 4)
@@ -598,7 +599,7 @@ def test_interpreter_root_of_a_uv_managed_python(tmp_path: Path) -> None:
     venv.mkdir(parents=True)
     (venv / "python").symlink_to(installs / "cpython-3.13-linux-x86_64-gnu" / "bin" / "python3.13")
 
-    assert todo_web.interpreter_root(str(venv / "python"), str(real)) == str(installs)
+    assert interpreter_root(str(venv / "python"), str(real)) == str(installs)
 
 
 def test_interpreter_root_follows_a_standard_venvs_links_out_of_the_environment(tmp_path: Path) -> None:
@@ -610,7 +611,7 @@ def test_interpreter_root_follows_a_standard_venvs_links_out_of_the_environment(
     (venv / "python3").symlink_to(install / "bin" / "python3")
     (venv / "python").symlink_to("python3")
 
-    assert todo_web.interpreter_root(str(venv / "python"), str(install)) == str(install)
+    assert interpreter_root(str(venv / "python"), str(install)) == str(install)
 
 
 def test_interpreter_root_reads_a_relative_link(tmp_path: Path) -> None:
@@ -621,7 +622,7 @@ def test_interpreter_root_reads_a_relative_link(tmp_path: Path) -> None:
     venv.mkdir(parents=True)
     (venv / "python").symlink_to(Path("..") / ".." / "python" / "bin" / "python3")
 
-    assert todo_web.interpreter_root(str(venv / "python"), str(install)) == str(install)
+    assert interpreter_root(str(venv / "python"), str(install)) == str(install)
 
 
 def test_interpreter_root_of_the_system_python_is_the_system(tmp_path: Path) -> None:
@@ -629,7 +630,7 @@ def test_interpreter_root_of_the_system_python_is_the_system(tmp_path: Path) -> 
     venv.mkdir(parents=True)
     (venv / "python").symlink_to("/usr/bin/python3.12")
 
-    assert todo_web.interpreter_root(str(venv / "python"), "/usr") == "/usr"
+    assert interpreter_root(str(venv / "python"), "/usr") == "/usr"
 
 
 def test_interpreter_root_of_a_copied_python_is_its_installation(tmp_path: Path) -> None:
@@ -637,4 +638,4 @@ def test_interpreter_root_of_a_copied_python_is_its_installation(tmp_path: Path)
     venv.mkdir(parents=True)
     (venv / "python").touch()
 
-    assert todo_web.interpreter_root(str(venv / "python"), "/opt/python") == "/opt/python"
+    assert interpreter_root(str(venv / "python"), "/opt/python") == "/opt/python"

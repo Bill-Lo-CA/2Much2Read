@@ -1,0 +1,9 @@
+[Unit]
+Description=2fun4distract Daily Summary Timer
+
+[Timer]
+OnCalendar=*-*-* __SUMMARY_SCHEDULE_TIME__:00 __SUMMARY_TIMEZONE__
+Persistent=true
+
+[Install]
+WantedBy=timers.target

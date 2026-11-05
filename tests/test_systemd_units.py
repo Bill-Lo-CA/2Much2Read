@@ -167,3 +167,37 @@ def test_per_minute_dispatchers_run_every_minute(unit: str) -> None:
 
     assert "OnCalendar=*-*-* *:*:00" in timer
     assert "RandomizedDelaySec" not in timer
+
+
+def test_2fun4distract_receiver_runs_with_no_way_to_a_credential() -> None:
+    receiver = (UNITS / "2fun4distract-receiver.service").read_text(encoding="utf-8")
+
+    assert "EnvironmentFile" not in receiver.replace("# No EnvironmentFile", "")
+    assert "ProtectHome=tmpfs\n" in receiver
+    assert "BindPaths=%h/.local/share/2much2read-runtime/2fun4distract\n" in receiver
+    assert "2much2read-runtime/.2" not in receiver
+    assert "RestrictAddressFamilies=AF_UNIX AF_INET\n" in receiver
+    assert "Restart=on-failure\n" in receiver
+    assert "StartLimitIntervalSec=0\n" in receiver
+
+
+def test_2fun4distract_summary_is_an_installer_template_retrying_a_bounded_number_of_times() -> None:
+    timer = (UNITS / "2fun4distract-summary.timer").read_text(encoding="utf-8")
+    service = (UNITS / "2fun4distract-summary.service").read_text(encoding="utf-8")
+
+    assert "OnCalendar=*-*-* __SUMMARY_SCHEDULE_TIME__:00 __SUMMARY_TIMEZONE__\n" in timer
+    assert "Persistent=true\n" in timer
+    assert "ExecStart=__EXECUTABLE__ summary\n" in service
+    assert "Restart=on-failure\n" in service
+    assert "RestartSec=1h\n" in service
+    assert "StartLimitBurst=6\n" in service
+
+
+@pytest.mark.parametrize("unit", ["2fun4distract-receiver.service", "2fun4distract-summary.service"])
+def test_2fun4distract_units_are_hardened_like_the_rest(unit: str) -> None:
+    service = (UNITS / unit).read_text(encoding="utf-8")
+
+    for setting in ("NoNewPrivileges=true", "PrivateTmp=true", "UMask=0077", "ProtectSystem=strict", "PrivateDevices=true"):
+        assert f"{setting}\n" in service
+    assert "network-online.target" not in service
+    assert "ProtectProc" not in service

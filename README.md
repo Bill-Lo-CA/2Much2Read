@@ -603,6 +603,60 @@ installer refuses a Python whose directory also holds the credentials or databas
 installed directly in `~/.local`. Rerun the installer after changing the timezone,
 and `systemctl --user restart 2busy1miss-todo-web.service` after deploying new code.
 
+## 2fun4distract
+
+Time on the phone and the computer, with the previous day's summary in Discord each morning:
+
+```text
+2fun4distract · 2026-11-04
+手機         2h14m | 漫画人极速版 1h02m · 世界迷霧 38m
+電腦 焦點    5h40m | Code 3h20m · youtube.com 40m
+電腦 看得到  8h10m | Code 4h05m · youtube.com 3h30m
+```
+
+`焦點` is the window being worked in, and stops after 5 minutes with no input. `看得到` is whatever covers
+at least 10% of a monitor, focused or not, so a video on a second screen counts; it stops after 30
+minutes with no input or when the screen locks. An app showing on two monitors is still one app's
+time, so the apps on the `看得到` line can add up to more than its total.
+
+```bash
+sh scripts/install-2fun4distract-user-service.sh --phone 100.x.y.z --computer 100.x.y.z [--port 8767]
+uv run 2fun4distract doctor
+uv run 2fun4distract report [--day 2026-11-04]
+uv run 2fun4distract summary [--day 2026-11-04] [--dry-run] [--force]
+```
+
+The installer takes the devices' Tailscale addresses from `tailscale status`, and prints the two
+setup steps below with this machine's address filled in. Rerun it after changing `SUMMARY_TIMEZONE`
+or `SUMMARY_SCHEDULE_TIME`, and run `systemctl --user restart 2fun4distract-receiver.service` after
+deploying new code.
+
+**iPhone.** Apple offers no way to export Screen Time, so this uses two automations in Shortcuts.
+Each has the App trigger with every app to record ticked, Run Immediately, and one action, Get
+Contents of URL, with its method set to POST. Their URLs are `http://ADDRESS:8767/phone/open?app=` and
+`/phone/close?app=`, each ending in the Shortcut Input variable. Only ticked apps count, so the phone
+line is not the whole phone. Tailscale has to stay on: with it off, each event is lost and Shortcuts
+shows a notification that it could not reach the server. A session with no closing event ends at the
+next event or after 30 minutes, and the summary says how much of the phone's time is such an estimate.
+
+**Windows.** One command in PowerShell on that computer, printed by the installer, fetches an agent
+and starts it now and at each sign-in, with no administrator rights. `-Uninstall` removes it. The
+agent looks at each monitor every 15 seconds and sends process names, how much of the monitor each
+covers, and how long since the last input. It never reads a window title. It keeps what it cannot send
+for two weeks.
+
+**Sites.** The same command prints how to load a small extension into Chrome or Edge. It sends the
+domain of each window's active tab every 30 seconds, and no path, query or title. It is not allowed in
+private windows, whose time shows as `其他網頁`. A site only counts while the agent saw a browser on
+screen that minute, so a browser hidden behind another app is not counted as showing. With two browser
+windows open and only one of them hidden, the hidden one's site still counts.
+
+The receiver answers only those two addresses, on this machine's Tailscale address. The devices hold
+no secret, because the address is what identifies them. It accepts no write from a website, and runs
+with an empty home holding only the code and its own database directory. It therefore uses the default
+database path, whatever `.2fun4distract.env` says. The summary is a separate timer, and is the only
+part that reads that file. Summaries name apps and sites, and those names go to Discord.
+
 ## 2bored1made
 
 Two ways to send: `send` posts one notification now, and `run` delivers whichever recurring
