@@ -1,14 +1,19 @@
 # 2Much2Read
 
-Three local-first tools that post only their final output to a private Discord destination:
+Four local-first tools that post only their final output to a private Discord destination:
 
 - `2much2read` reads configured Gmail newsletters, extracts candidates with local Ollama, reranks them locally, and records digests in SQLite.
-- `2busy1miss` syncs configured Google Calendar events into SQLite reminder jobs,
-  then sends due reminders without repeatedly querying Google.
+- `2busy1miss` syncs configured Google Calendar events into SQLite reminder jobs, then sends due
+  reminders and a next-day agenda without repeatedly querying Google. It also keeps the to-dos a
+  calendar cannot express, which can be ticked off from a page over Tailscale.
+- `2fun4distract` records time on an iPhone and on a Windows computer, including what only shows on
+  a second monitor and which sites a browser spent it on, and sends the previous day's summary.
 - `2bored1made` sends a direct local notification, and repeats a configured message on a daily
   schedule until it has been delivered a fixed number of times.
 
-They are separate commands, OAuth clients, OAuth tokens, YAML files, SQLite databases, and environment files. They share only configuration-path resolution, Discord delivery, and a process lock implementation.
+They are separate commands, YAML files, SQLite databases, and environment files, and `2much2read` and `2busy1miss` have separate OAuth clients and tokens. They share only the helpers in `two_read_runtime`, such as configuration-path resolution, Discord delivery, and a process lock.
+
+Most of this runs as short jobs on systemd timers. Two services stay running, and both are optional and answer only over Tailscale: the to-do page and the `2fun4distract` receiver.
 
 ## Runtime files
 
@@ -19,6 +24,7 @@ The commands use one private root with app-specific token and data directories, 
   .2bored1made.env
   .2much2read.env
   .2busy1miss.env
+  .2fun4distract.env
   gmail-client-secret.json
   calendar-client-secret.json
   sources.yaml
@@ -36,12 +42,15 @@ The commands use one private root with app-specific token and data directories, 
   2busy1miss/
     2busy1miss.sqlite3
     2busy1miss.lock
+  2fun4distract/
+    2fun4distract.sqlite3
+    2fun4distract.lock
   2bored1made/
     2bored1made.sqlite3
     2bored1made.lock
 ```
 
-The environment files may contain duplicate variable names because each command and systemd unit loads only its own file. Do not source them together. The 2much2read and 2busy1miss installers set the shared config root and app directories to mode `0700`, repair managed environment/YAML/OAuth/token/database/sidecar/lock files to `0600`, and keep SQLite databases inside the matching protected data directory.
+The environment files may contain duplicate variable names because each command and systemd unit loads only its own file. Do not source them together. The 2much2read, 2busy1miss and 2fun4distract installers set the shared config root and app directories to mode `0700`, repair managed environment/YAML/OAuth/token/database/sidecar/lock files to `0600`, and keep SQLite databases inside the matching protected data directory.
 
 ### Migration and custom paths
 
@@ -53,16 +62,24 @@ otherwise the app starts against empty state at the new path while the old files
 
 The systemd templates allow writes only to the matching app config and data directories. If an environment-file path override such as `DATABASE_PATH`, `*_TOKEN_PATH`, or `*_CONFIG_PATH` points elsewhere, manual CLI runs may work but the sandboxed service will not; keep overrides under those app directories or add a reviewed user-unit drop-in with the required `ReadWritePaths` exception.
 
-The service sandbox makes three deliberate exemptions, and they have different scopes. `PrivateDevices` is omitted only from `2much2read-runtime.service`, which loads a model and needs the GPU; the three services that load no model set `PrivateDevices=true`. The same unit is also the only one whose system-call filter denies `@privileged` without `@resources`: PyTorch calls `sched_setaffinity` when the reranker loads, and a denied call kills the process with `SIGSYS`. That is how the 2026-09-25 digest was lost, nine minutes into the run. `MemoryDenyWriteExecute` is omitted from all four, for an unrelated reason: the Google-authenticated paths import `cryptography`, which loads `_cffi_backend`, and cffi callbacks need writable-executable memory. Inspect the installed units with:
+The service sandbox makes three deliberate exemptions, and they have different scopes. `PrivateDevices` is omitted only from `2much2read-runtime.service`, which loads a model and needs the GPU; every service that loads no model sets `PrivateDevices=true`. The same unit is also the only one whose system-call filter denies `@privileged` without `@resources`: PyTorch calls `sched_setaffinity` when the reranker loads, and a denied call kills the process with `SIGSYS`. That is how the 2026-09-25 digest was lost, nine minutes into the run. `MemoryDenyWriteExecute` is omitted from all of them, for an unrelated reason: the Google-authenticated paths import `cryptography`, which loads `_cffi_backend`, and cffi callbacks need writable-executable memory.
+
+The two services that stay running go further than the rest, since they listen on a network. `2busy1miss-todo-web.service` and `2fun4distract-receiver.service` load no environment file and use `ProtectHome=tmpfs`, so their home holds only the code and the few files they need, and no token or webhook is there to read. Inspect the installed units with:
 
 ```bash
 systemd-analyze --user security 2much2read-runtime.service
 systemd-analyze --user security 2busy1miss-runtime.service
 systemd-analyze --user security 2busy1miss-runtime-agenda.service
+systemd-analyze --user security 2busy1miss-todo-web.service
+systemd-analyze --user security 2fun4distract-receiver.service
+systemd-analyze --user security 2fun4distract-summary.service
 systemd-analyze --user security 2bored1made-runtime.service
 systemd-analyze --user verify ~/.config/systemd/user/2much2read-runtime.service
 systemd-analyze --user verify ~/.config/systemd/user/2busy1miss-runtime.service
 systemd-analyze --user verify ~/.config/systemd/user/2busy1miss-runtime-agenda.service
+systemd-analyze --user verify ~/.config/systemd/user/2busy1miss-todo-web.service
+systemd-analyze --user verify ~/.config/systemd/user/2fun4distract-receiver.service
+systemd-analyze --user verify ~/.config/systemd/user/2fun4distract-summary.service
 systemd-analyze --user verify ~/.config/systemd/user/2bored1made-runtime.service
 ```
 
@@ -82,6 +99,8 @@ DISCORD_BOT_CHANNEL_ID=
 `webhook` requires `DISCORD_WEBHOOK_URL`; `bot` requires a bot token and numeric
 channel ID; `both` independently sends to each. Newsletter and Calendar deliveries
 persist one checkpoint per destination, so a retry sends only a failed destination.
+`2fun4distract summary` records each destination that has had a day's summary, so a retry sends
+only to the others.
 `2bored1made send` intentionally remains stateless: it reports a partial result when one
 destination fails, and a manual resend is required. Recurring nudges are the exception and
 have their own database, because a countdown has to remember how far it has counted.
@@ -839,13 +858,23 @@ sqlite3 ~/.local/share/2much2read-runtime/2much2read/2much2read.sqlite3 \
   ".backup '/secure-backups/2much2read.sqlite3'"
 sqlite3 ~/.local/share/2much2read-runtime/2busy1miss/2busy1miss.sqlite3 \
   ".backup '/secure-backups/2busy1miss.sqlite3'"
+sqlite3 ~/.local/share/2much2read-runtime/2fun4distract/2fun4distract.sqlite3 \
+  ".backup '/secure-backups/2fun4distract.sqlite3'"
 ```
 
 Inspect timers and recent failures without sending work:
 
 ```bash
-systemctl --user status 2much2read-runtime.timer 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer
-journalctl --user -u 2much2read-runtime.service -u 2busy1miss-runtime.service -u 2busy1miss-runtime-agenda.service -n 100 --no-pager
+systemctl --user status 2much2read-runtime.timer 2busy1miss-runtime.timer 2busy1miss-runtime-agenda.timer 2fun4distract-summary.timer
+systemctl --user status 2busy1miss-todo-web.service 2fun4distract-receiver.service
+journalctl --user -u 2much2read-runtime.service -u 2busy1miss-runtime.service -u 2busy1miss-runtime-agenda.service -u 2fun4distract-summary.service -n 100 --no-pager
+```
+
+The timers' jobs pick up new code on their next run. The two services that stay running keep what
+they started with, so restart them after deploying:
+
+```bash
+systemctl --user restart 2busy1miss-todo-web.service 2fun4distract-receiver.service
 ```
 
 A scheduled run has no terminal, so its progress lines go to the journal as log records instead:
