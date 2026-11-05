@@ -542,7 +542,7 @@ To-dos are what a calendar cannot express, such as thirty push-ups every morning
 same SQLite database as the reminders:
 
 ```bash
-uv run 2busy1miss todo add                          # asks for the title, then the days from a list
+uv run 2busy1miss todo                              # asks for the title, then the days from a list
 uv run 2busy1miss todo add "三十下伏地挺身"
 uv run 2busy1miss todo add "跑步" --on mon,wed,fri
 uv run 2busy1miss todo list [--day 2026-11-04]
@@ -574,8 +574,9 @@ A day is the reminder timezone's: `reminders.yaml`'s `timezone` when set, otherw
 to-do does not fall on, and `remove` stops it counting from today while keeping what was done before.
 These commands take no lock, so one typed while the per-minute timer runs cannot fail for it.
 
-`todo add` with no title asks for one, then offers the days as a list: the arrow keys move, Enter
-chooses, Space ticks a day under `Pick days...`, Esc cancels. Outside a terminal it needs the title.
+`todo` on its own asks for a title, then offers the days as a list: the arrow keys move, Enter
+chooses, Space ticks a day under `Pick days...`, Esc cancels. `todo add` with no title does the same.
+Outside a terminal there is nobody to ask, so use `todo add` with a title.
 
 #### The to-do page
 
