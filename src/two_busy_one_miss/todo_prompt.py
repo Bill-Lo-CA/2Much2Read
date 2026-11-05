@@ -9,7 +9,7 @@ import termios
 import tty
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import contextmanager
-from typing import TextIO
+from typing import NamedTuple, TextIO
 
 from .rules import WEEKDAYS
 
@@ -22,7 +22,7 @@ CANCEL = "cancel"
 # How long a lone Escape byte waits to see whether it starts an arrow key's sequence.
 ESCAPE_WAIT_SECONDS = 0.05
 
-QUESTION = "Which days?"
+QUESTION = "How often?"
 EVERY_DAY = ",".join(WEEKDAYS)
 PRESETS = (
     ("Every day", EVERY_DAY),
@@ -30,11 +30,22 @@ PRESETS = (
     ("Weekends (sat, sun)", ",".join(WEEKDAYS[5:])),
 )
 PICK_DAYS = "Pick days..."
+ONCE_IN_A_PERIOD = (
+    ("Once a week (any day)", "week"),
+    ("Once a month (any day)", "month"),
+)
 CHOOSE_HINT = "Up/Down to move, Enter to choose, Esc to cancel"
 PICK_HINT = "Up/Down to move, Space to tick, Enter to confirm, Esc to go back"
 NONE_PICKED_HINT = "Tick at least one day, or press Esc to go back"
 
 ReadKey = Callable[[], str]
+
+
+class Schedule(NamedTuple):
+    """What was chosen: the weekdays as `--on` takes them, if it has any, and the period."""
+
+    on: str | None
+    period: str
 
 
 def _escape_sequence(descriptor: int) -> str:
@@ -147,21 +158,26 @@ def choose_many(question: str, options: Sequence[str], read: ReadKey, out: TextI
             cursor = _moved(cursor, key, len(options))
 
 
-def ask_weekdays(read: ReadKey, out: TextIO) -> str | None:
-    """The days chosen, written the way `--on` takes them, or None when cancelled."""
+def ask_schedule(read: ReadKey, out: TextIO) -> Schedule | None:
+    """How often a to-do is owed, or None when cancelled."""
     options = [label for label, _ in PRESETS]
+    pick_days = len(options)
     while True:
-        chosen = choose(QUESTION, [*options, PICK_DAYS], read, out)
+        chosen = choose(QUESTION, [*options, PICK_DAYS, *(label for label, _ in ONCE_IN_A_PERIOD)], read, out)
         if chosen is None:
             return None
-        if chosen < len(PRESETS):
+        if chosen < pick_days:
             out.write(f"{QUESTION} {options[chosen]}\n")
-            return PRESETS[chosen][1]
+            return Schedule(PRESETS[chosen][1], "day")
+        if chosen > pick_days:
+            label, period = ONCE_IN_A_PERIOD[chosen - pick_days - 1]
+            out.write(f"{QUESTION} {label}\n")
+            return Schedule(None, period)
         ticked = choose_many(QUESTION, [weekday.capitalize() for weekday in WEEKDAYS], read, out)
         if ticked is not None:
             weekdays = [WEEKDAYS[index] for index in ticked]
             out.write(f"{QUESTION} {', '.join(weekdays)}\n")
-            return ",".join(weekdays)
+            return Schedule(",".join(weekdays), "day")
 
 
 def ask_title(check: Callable[[str], str]) -> str | None:
@@ -197,14 +213,17 @@ def _keypresses(descriptor: int, out: TextIO) -> Iterator[None]:
         termios.tcsetattr(descriptor, termios.TCSADRAIN, saved)
 
 
-def ask_todo(check_title: Callable[[str], str], on: str | None) -> tuple[str, str] | None:
-    """A to-do's title and days from the person at the terminal, or None when they cancel."""
+def ask_todo(check_title: Callable[[str], str], on: str | None, period: str | None = None) -> tuple[str, Schedule] | None:
+    """A to-do's title and schedule from the person at the terminal, or None when they cancel.
+
+    What the command line already said about how often is not asked again.
+    """
     title = ask_title(check_title)
     if title is None:
         return None
-    if on is not None:
-        return title, on
+    if on is not None or period is not None:
+        return title, Schedule(on, period or "day")
     descriptor = sys.stdin.fileno()
     with _keypresses(descriptor, sys.stdout):
-        weekdays = ask_weekdays(lambda: read_key(descriptor), sys.stdout)
-    return None if weekdays is None else (title, weekdays)
+        schedule = ask_schedule(lambda: read_key(descriptor), sys.stdout)
+    return None if schedule is None else (title, schedule)

@@ -555,20 +555,25 @@ uv run 2busy1miss reset-agenda-checkpoint --delivery-id ID
 
 Manual and next-day agendas use the same durable delivery record, de-duplicated by date, timezone, and Discord destination; `agenda-retry` retries failed records and `--force` is the explicit resend path. `2busy1miss-runtime-agenda.timer` runs at `AGENDA_SCHEDULE_TIME` in the user service manager's local timezone. It sends the next calendar day according to the configured reminder timezone and synchronizes the configured reminder horizon. Its persistent catch-up is ignored before that configured time, so a morning startup cannot send the next day's agenda early. Empty days are sent as `No events`. Reminder messages use the same Markdown code-block style as agendas; a retry after an event starts marks the job `expired` instead of sending it.
 
-### Daily to-dos
+### To-dos
 
-To-dos are what a calendar cannot express, such as thirty push-ups every morning. They live in the
-same SQLite database as the reminders:
+To-dos are what a calendar cannot express, such as thirty push-ups every morning, or an hour of
+something at some point each week. They live in the same SQLite database as the reminders:
 
 ```bash
-uv run 2busy1miss todo                              # asks for the title, then the days from a list
+uv run 2busy1miss todo                              # asks for the title, then how often from a list
 uv run 2busy1miss todo add "三十下伏地挺身"
 uv run 2busy1miss todo add "跑步" --on mon,wed,fri
+uv run 2busy1miss todo add "寫週報" --every week
+uv run 2busy1miss todo add "繳房租" --every month
 uv run 2busy1miss todo list [--day 2026-11-04]
 uv run 2busy1miss todo done ID [--day 2026-11-04]
 uv run 2busy1miss todo undo ID [--day 2026-11-04]
 uv run 2busy1miss todo remove ID
 ```
+
+A daily to-do is owed on each of its days. A weekly or monthly one is owed once in that time, on
+any day: doing it once is done until the next week starts on Monday, or the next month on the 1st.
 
 They send no message of their own. The agenda lists its day's open to-dos under `To do`, and what
 the day before it left undone under `Undone`:
@@ -580,20 +585,23 @@ TIME        | EVENT
 07:30-08:00 | 起床時間 (Main)
 ------------+-------------------------------------------
 To do       | 三十下伏地挺身
+            | 寫週報 (week)
 ------------+-------------------------------------------
 Undone      | 11-04: 跑步
 ```
 
 The scheduled agenda goes out the evening before, so that `Undone` is what the 4th had left at
 `AGENDA_SCHEDULE_TIME`; a to-do done later that evening still counts as done, but the agenda already
-sent does not change. Without any to-dos the agenda is exactly as it was.
+sent does not change. A weekly or monthly to-do is listed every day until it is done, and is undone
+only on the day after its period ran out. Without any to-dos the agenda is exactly as it was.
 
 A day is the reminder timezone's: `reminders.yaml`'s `timezone` when set, otherwise
-`REMINDER_TIMEZONE`. `--day` defaults to today. `done` refuses a day still to come and a day the
-to-do does not fall on, and `remove` stops it counting from today while keeping what was done before.
+`REMINDER_TIMEZONE`. `--day` defaults to today, and for a weekly or monthly to-do any day in the
+period means the same period. `done` refuses a day still to come and a day the to-do does not fall on,
+and `remove` stops it counting from today while keeping what was done before.
 These commands take no lock, so one typed while the per-minute timer runs cannot fail for it.
 
-`todo` on its own asks for a title, then offers the days as a list: the arrow keys move, Enter
+`todo` on its own asks for a title, then offers how often as a list: the arrow keys move, Enter
 chooses, Space ticks a day under `Pick days...`, Esc cancels. `todo add` with no title does the same.
 Outside a terminal there is nobody to ask, so use `todo add` with a title.
 
@@ -607,7 +615,8 @@ sh scripts/install-2busy1miss-todo-web.sh [--port 8766]
 
 It prints the page's address and the `TODO_WEB_URL` line to put in `.2busy1miss.env`, which makes
 any agenda listing to-dos link to it. It shows today's to-dos and yesterday's, and can only tick and
-untick those: adding and removing stay in the commands above.
+untick those: adding and removing stay in the commands above. A weekly or monthly to-do is under
+today until its period ends, and under yesterday only on the day after.
 
 The page has no password, so that its link has nothing to leak in Discord's history. Instead it
 listens only on this machine's Tailscale address, closes connections from outside the tailnet, and

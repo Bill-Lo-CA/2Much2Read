@@ -12,7 +12,7 @@ from two_read_runtime.discord import CorruptMessageIdsError, DiscordDestination,
 from two_read_runtime.permissions import prepare_private_file, repair_sqlite_files
 
 from .google_calendar import CalendarEvent
-from .rules import ReminderCandidate, falls_on
+from .rules import ReminderCandidate, falls_on, period_start
 
 
 def instant(value: datetime) -> str:
@@ -151,6 +151,7 @@ CREATE TABLE IF NOT EXISTS todos(
   id INTEGER PRIMARY KEY,
   title TEXT NOT NULL,
   weekdays TEXT NOT NULL,
+  period TEXT NOT NULL DEFAULT 'day' CHECK(period IN ('day','week','month')),
   first_day TEXT NOT NULL,
   removed_on TEXT,
   created_at TEXT NOT NULL,
@@ -176,6 +177,15 @@ def todo_counts_on(row: sqlite3.Row, day: date) -> bool:
     )
 
 
+def _has_period(connection: sqlite3.Connection) -> bool:
+    return any(str(row[1]) == "period" for row in connection.execute("PRAGMA table_info(todos)"))
+
+
+def _agenda_title(row: sqlite3.Row) -> str:
+    period = str(row["period"])
+    return str(row["title"]) if period == "day" else f"{row['title']} ({period})"
+
+
 class Database:
     def __init__(self, path: Path) -> None:
         prepare_private_file(path)
@@ -192,6 +202,11 @@ class Database:
                 self.connection.execute("ALTER TABLE reminder_attempts ADD COLUMN discord_destination_key TEXT")
                 self.connection.execute(
                     "UPDATE reminder_attempts SET discord_destination_key='webhook' WHERE discord_message_ids_json IS NOT NULL"
+                )
+                self.connection.commit()
+            if not _has_period(self.connection):
+                self.connection.execute(
+                    "ALTER TABLE todos ADD COLUMN period TEXT NOT NULL DEFAULT 'day' CHECK(period IN ('day','week','month'))"
                 )
                 self.connection.commit()
             delivery_columns = {str(row["name"]) for row in self.connection.execute("PRAGMA table_info(reminder_deliveries)")}
@@ -863,11 +878,11 @@ class Database:
         self.connection.commit()
         return int(row["id"])
 
-    def add_todo(self, title: str, weekdays: str, first_day: date) -> int:
+    def add_todo(self, title: str, weekdays: str, first_day: date, period: str = "day") -> int:
         now = datetime.now(UTC).isoformat()
         cursor = self.connection.execute(
-            "INSERT INTO todos(title,weekdays,first_day,created_at,updated_at) VALUES(?,?,?,?,?)",
-            (title, weekdays, first_day.isoformat(), now, now),
+            "INSERT INTO todos(title,weekdays,period,first_day,created_at,updated_at) VALUES(?,?,?,?,?,?)",
+            (title, weekdays, period, first_day.isoformat(), now, now),
         )
         self.connection.commit()
         assert cursor.lastrowid is not None
@@ -881,19 +896,35 @@ class Database:
         return row
 
     def todos(self, day: date) -> list[sqlite3.Row]:
-        """Every to-do ever added, each with whether it was done on a day."""
+        """Every to-do ever added, each with whether it was done in the period that day is in."""
+        # Only opening a database for writing adds the column, so one read for a report may lack it.
+        period = "t.period" if _has_period(self.connection) else "'day'"
         return self.connection.execute(
-            """SELECT t.id,t.title,t.weekdays,t.first_day,t.removed_on,c.completed_at IS NOT NULL AS done
-            FROM todos t LEFT JOIN todo_completions c ON c.todo_id=t.id AND c.day=? ORDER BY t.id""",
-            (day.isoformat(),),
+            f"""SELECT t.id,t.title,t.weekdays,t.first_day,t.removed_on,{period} AS period,
+            c.completed_at IS NOT NULL AS done
+            FROM todos t LEFT JOIN todo_completions c ON c.todo_id=t.id
+              AND c.day=CASE {period} WHEN 'week' THEN ? WHEN 'month' THEN ? ELSE ? END
+            ORDER BY t.id""",
+            (period_start("week", day).isoformat(), period_start("month", day).isoformat(), day.isoformat()),
         ).fetchall()
 
-    def _open_todo_titles(self, day: date) -> list[str]:
-        return [str(row["title"]) for row in self.todos(day) if todo_counts_on(row, day) and not row["done"]]
-
     def agenda_todos(self, day: date) -> tuple[list[str], list[str]]:
-        """What an agenda lists: the day's open to-dos, and those the day before left undone."""
-        return self._open_todo_titles(day), self._open_todo_titles(day - timedelta(days=1))
+        """What an agenda lists: the day's open to-dos, and what the day before left undone.
+
+        A weekly or monthly to-do is listed every day until it is done, so it is only undone once its
+        period has run out, on the day after the last one.
+        """
+        yesterday = day - timedelta(days=1)
+        return (
+            [_agenda_title(row) for row in self.todos(day) if todo_counts_on(row, day) and not row["done"]],
+            [
+                _agenda_title(row)
+                for row in self.todos(yesterday)
+                if todo_counts_on(row, yesterday)
+                and not row["done"]
+                and period_start(str(row["period"]), yesterday) != period_start(str(row["period"]), day)
+            ],
+        )
 
     def complete_todo(self, todo_id: int, day: date) -> bool:
         cursor = self.connection.execute(

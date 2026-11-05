@@ -17,7 +17,7 @@ from two_read_runtime.sqlite_snapshot import reading_connection
 
 from .config import Settings, load_reminders
 from .renderer import _agenda_cell
-from .rules import parse_weekdays
+from .rules import parse_period, parse_weekdays, period_start
 from .storage import Database, todo_counts_on
 
 MAX_TITLE_CHARACTERS = 200
@@ -27,6 +27,7 @@ class TodoView(BaseModel):
     id: int
     title: str
     weekdays: list[str]
+    period: str
     due: bool
     done: bool
 
@@ -42,6 +43,7 @@ class TodoAddResult(BaseModel):
     id: int
     title: str
     weekdays: list[str]
+    period: str
 
 
 class TodoChangeResult(BaseModel):
@@ -68,16 +70,26 @@ def clean_title(title: str) -> str:
     return cleaned
 
 
-def add_todo(settings: Settings, title: str, on: str | None, *, now: datetime | None = None) -> TodoAddResult:
+def parse_schedule(on: str | None, period: str) -> tuple[str, str]:
+    """The weekdays and period of a to-do, checked. A weekly or monthly one can be done on any day."""
+    parse_period(period)
+    if period != "day" and on is not None:
+        raise ValueError("--on is for daily to-dos: a weekly or monthly one can be done on any day")
+    return parse_weekdays(on), period
+
+
+def add_todo(
+    settings: Settings, title: str, on: str | None, *, period: str = "day", now: datetime | None = None
+) -> TodoAddResult:
     cleaned = clean_title(title)
-    weekdays = parse_weekdays(on)
+    weekdays, period = parse_schedule(on, period)
     first_day = _today(settings, now)
     database = Database(settings.database_path)
     try:
-        todo_id = database.add_todo(cleaned, weekdays, first_day)
+        todo_id = database.add_todo(cleaned, weekdays, first_day, period)
     finally:
         database.close()
-    return TodoAddResult(id=todo_id, title=cleaned, weekdays=weekdays.split(","))
+    return TodoAddResult(id=todo_id, title=cleaned, weekdays=weekdays.split(","), period=period)
 
 
 def list_todos(settings: Settings, day: date | None = None, *, now: datetime | None = None) -> TodoListResult:
@@ -94,6 +106,7 @@ def list_todos(settings: Settings, day: date | None = None, *, now: datetime | N
                     id=int(row["id"]),
                     title=str(row["title"]),
                     weekdays=str(row["weekdays"]).split(","),
+                    period=str(row["period"]),
                     due=todo_counts_on(row, day),
                     done=bool(row["done"]),
                 )
@@ -115,7 +128,8 @@ def complete_todo(settings: Settings, todo_id: int, day: date | None = None, *, 
             raise ValueError(f"no to-do with id {todo_id}")
         if not todo_counts_on(row, day):
             raise ValueError(f"to-do {todo_id} is not due on {day.isoformat()}; it falls on {row['weekdays']}")
-        return TodoChangeResult(id=todo_id, day=day, changed=database.complete_todo(todo_id, day))
+        changed = database.complete_todo(todo_id, period_start(str(row["period"]), day))
+        return TodoChangeResult(id=todo_id, day=day, changed=changed)
     finally:
         database.close()
 
@@ -124,9 +138,11 @@ def reopen_todo(settings: Settings, todo_id: int, day: date | None = None, *, no
     day = day or _today(settings, now)
     database = Database(settings.database_path)
     try:
-        if database.todo(todo_id) is None:
+        row = database.todo(todo_id)
+        if row is None:
             raise ValueError(f"no to-do with id {todo_id}")
-        return TodoChangeResult(id=todo_id, day=day, changed=database.reopen_todo(todo_id, day))
+        changed = database.reopen_todo(todo_id, period_start(str(row["period"]), day))
+        return TodoChangeResult(id=todo_id, day=day, changed=changed)
     finally:
         database.close()
 

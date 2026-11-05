@@ -31,10 +31,9 @@ from .pipeline import (
     run,
     test_rules,
 )
-from .rules import parse_weekdays
 from .todo_prompt import ask_todo
 from .todo_web import DEFAULT_PORT, serve
-from .todos import add_todo, clean_title, complete_todo, list_todos, remove_todo, reopen_todo
+from .todos import TodoAddResult, add_todo, clean_title, complete_todo, list_todos, parse_schedule, remove_todo, reopen_todo
 
 app = typer.Typer(no_args_is_help=True)
 auth_app = typer.Typer(no_args_is_help=True)
@@ -228,21 +227,27 @@ def _parsed_day(value: str | None) -> date | None:
         raise typer.BadParameter("date must use YYYY-MM-DD") from error
 
 
-def _add_todo_asked(settings: Settings, on: str | None) -> None:
+def _how_often(result: TodoAddResult) -> str:
+    if result.period != "day":
+        return f"once a {result.period}"
+    return "every day" if len(result.weekdays) == 7 else ", ".join(result.weekdays)
+
+
+def _add_todo_asked(settings: Settings, on: str | None, every: str | None) -> None:
     if not (sys.stdin.isatty() and sys.stdout.isatty()):
         raise ValueError("a title is needed outside a terminal, where there is nobody to ask")
-    if on is not None:
-        parse_weekdays(on)
+    # Before anything is asked, so that nobody types a title only to have it refused for this.
+    parse_schedule(on, every or "day")
     try:
-        answers = ask_todo(clean_title, on)
+        answers = ask_todo(clean_title, on, every)
     except KeyboardInterrupt:
         answers = None
     if answers is None:
         typer.echo("Cancelled; nothing was added.", err=True)
         raise typer.Exit(code=1)
-    result = add_todo(settings, *answers)
-    days = "every day" if len(result.weekdays) == 7 else ", ".join(result.weekdays)
-    typer.echo(f"Added to-do {result.id}: {result.title} ({days})")
+    title, schedule = answers
+    result = add_todo(settings, title, schedule.on, period=schedule.period)
+    typer.echo(f"Added to-do {result.id}: {result.title} ({_how_often(result)})")
 
 
 @todo_app.callback(invoke_without_command=True)
@@ -250,22 +255,25 @@ def todo_main(context: typer.Context) -> None:
     """Add a to-do by answering prompts, or use one of the commands below."""
     if context.invoked_subcommand is None:
         try:
-            _add_todo_asked(Settings(), None)
+            _add_todo_asked(Settings(), None, None)
         except ValueError as error:
             raise typer.BadParameter(str(error)) from error
 
 
 @todo_app.command("add")
 def todo_add_command(
-    title: Annotated[str | None, typer.Argument(help="Leave it out in a terminal to be asked for it and for the days.")] = None,
+    title: Annotated[str | None, typer.Argument(help="Leave it out in a terminal to be asked for it and for how often.")] = None,
     on: Annotated[str | None, typer.Option("--on", help="Weekdays such as mon,wed,fri; every day when left out.")] = None,
+    every: Annotated[
+        str | None, typer.Option("--every", help="day, week or month. Weekly or monthly is once in that time, on any day.")
+    ] = None,
 ) -> None:
     try:
         settings = Settings()
         if title is None:
-            _add_todo_asked(settings, on)
+            _add_todo_asked(settings, on, every)
         else:
-            emit(add_todo(settings, title, on))
+            emit(add_todo(settings, title, on, period=every or "day"))
     except ValueError as error:
         raise typer.BadParameter(str(error)) from error
 
