@@ -36,6 +36,7 @@ from two_read_runtime.tailnet import TAILNET, TailnetServer
 
 from . import todos
 from .config import Settings
+from .rules import period_start
 from .todos import TodoChangeResult, TodoListResult, TodoView
 
 logger = logging.getLogger(__name__)
@@ -131,6 +132,14 @@ button:focus-visible { outline: 3px solid var(--accent); outline-offset: 2px; }
 .done .mark { border-color: var(--accent); background: var(--accent); }
 .done .mark::after { content: "\\2713"; }
 .done .title { color: var(--muted); text-decoration: line-through; }
+.period {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 13px;
+  font-weight: 600;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+}
 """
 
 HEADERS = (
@@ -170,13 +179,14 @@ def _document(body: str) -> str:
 
 def _row(todo: TodoView, day: date) -> str:
     state = ' class="done"' if todo.done else ""
+    period = "" if todo.period == "day" else f'<span class="period">{html.escape(todo.period)}</span>'
     return (
         f'<form method="post" action="/toggle"{state}>'
         f'<input type="hidden" name="id" value="{todo.id}">'
         f'<input type="hidden" name="day" value="{day.isoformat()}">'
         f'<input type="hidden" name="change" value="{"undo" if todo.done else "done"}">'
         f'<button type="submit" aria-pressed="{"true" if todo.done else "false"}">'
-        f'<span class="mark" aria-hidden="true"></span><span class="title">{html.escape(todo.title)}</span>'
+        f'<span class="mark" aria-hidden="true"></span><span class="title">{html.escape(todo.title)}</span>{period}'
         "</button></form>"
     )
 
@@ -207,6 +217,9 @@ def _show(settings: Settings, status: HTTPStatus = HTTPStatus.OK, notice: str | 
         yesterday = todos.list_todos(settings, today.day - timedelta(days=1))
     except (OSError, ValueError, sqlite3.Error) as error:
         return _unavailable(error)
+    # A weekly or monthly to-do is the same one today as yesterday, until its period has run out.
+    ended = [todo for todo in yesterday.todos if period_start(todo.period, yesterday.day) != period_start(todo.period, today.day)]
+    yesterday = yesterday.model_copy(update={"todos": ended})
     parts = [
         f'<p role="alert">{html.escape(notice)}</p>' if notice else "",
         _section("Today", today, when_empty="Nothing due today."),

@@ -8,6 +8,7 @@ from .config import EventMatch, RemindersConfig
 from .google_calendar import CalendarEvent
 
 WEEKDAYS = ("mon", "tue", "wed", "thu", "fri", "sat", "sun")
+PERIODS = ("day", "week", "month")
 
 
 @dataclass(frozen=True)
@@ -27,6 +28,21 @@ def parse_weekdays(value: str | None) -> str:
     if unknown:
         raise ValueError(f"unknown weekday {unknown[0]!r}; expected names such as mon,wed,fri")
     return ",".join(weekday for weekday in WEEKDAYS if weekday in named)
+
+
+def parse_period(value: str) -> str:
+    if value not in PERIODS:
+        raise ValueError(f"unknown period {value!r}; expected day, week or month")
+    return value
+
+
+def period_start(period: str, day: date) -> date:
+    """The first day of the period a day is in. A to-do is owed once per period, from a Monday or a 1st."""
+    if period == "week":
+        return day - timedelta(days=day.weekday())
+    if period == "month":
+        return day.replace(day=1)
+    return day
 
 
 def falls_on(weekdays: str, day: date) -> bool:

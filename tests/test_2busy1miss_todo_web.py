@@ -639,3 +639,95 @@ def test_interpreter_root_of_a_copied_python_is_its_installation(tmp_path: Path)
     (venv / "python").touch()
 
     assert interpreter_root(str(venv / "python"), "/opt/python") == "/opt/python"
+
+
+def add_every(settings: Settings, title: str, period: str, first_day: date = TODAY - timedelta(days=30)) -> int:
+    moment = datetime(first_day.year, first_day.month, first_day.day)
+    return todos.add_todo(settings, title, None, period=period, now=moment).id
+
+
+def test_a_weekly_to_do_says_so_and_is_only_under_today_within_its_week(page: TodoPageServer, settings: Settings) -> None:
+    add_every(settings, "寫週報", "week")
+
+    text = get(page).text
+
+    assert '<span class="title">寫週報</span><span class="period">week</span>' in text
+    assert "Yesterday" not in text
+
+
+def test_a_daily_to_do_shows_no_period(page: TodoPageServer, settings: Settings) -> None:
+    add(settings)
+
+    assert 'class="period"' not in get(page).text
+
+
+def test_ticking_a_weekly_to_do_is_done_for_the_week(page: TodoPageServer, settings: Settings) -> None:
+    todo_id = add_every(settings, "寫週報", "week")
+
+    assert post(page, todo_id).status == 303
+
+    assert completions(settings) == [(todo_id, "2026-11-02")]
+    assert 'aria-pressed="true"' in get(page).text
+
+
+def test_unticking_a_weekly_to_do_takes_the_week_back(page: TodoPageServer, settings: Settings) -> None:
+    todo_id = add_every(settings, "寫週報", "week")
+    post(page, todo_id)
+
+    assert post(page, todo_id, change="undo").status == 303
+
+    assert completions(settings) == []
+
+
+def test_last_weeks_to_do_is_under_yesterday_on_monday_and_ticks_last_week(
+    page: TodoPageServer, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monday = date(2026, 11, 9)
+    monkeypatch.setattr(todos, "_today", lambda _settings, now: now.date() if now else monday)
+    todo_id = add_every(settings, "寫週報", "week")
+
+    today, yesterday = get(page).text.split("Yesterday")
+
+    assert "寫週報" in today
+    assert "寫週報" in yesterday
+    assert 'name="day" value="2026-11-08"' in yesterday
+
+    assert post(page, todo_id, monday - timedelta(days=1)).status == 303
+
+    assert completions(settings) == [(todo_id, "2026-11-02")]
+    today, yesterday = get(page).text.split("Yesterday")
+    assert 'aria-pressed="false"' in today
+    assert 'aria-pressed="true"' in yesterday
+
+
+def test_last_months_to_do_is_under_yesterday_on_the_first(
+    page: TodoPageServer, settings: Settings, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    first = date(2026, 12, 1)
+    monkeypatch.setattr(todos, "_today", lambda _settings, now: now.date() if now else first)
+    add_every(settings, "繳房租", "month")
+
+    _, yesterday = get(page).text.split("Yesterday")
+
+    assert "繳房租" in yesterday
+    assert '<span class="period">month</span>' in yesterday
+
+
+def test_a_monthly_to_do_is_only_under_today_within_its_month(page: TodoPageServer, settings: Settings) -> None:
+    add_every(settings, "繳房租", "month")
+
+    text = get(page).text
+
+    assert "繳房租" in text
+    assert "Yesterday" not in text
+
+
+def test_a_daily_to_do_is_still_under_yesterday_beside_a_weekly_one(page: TodoPageServer, settings: Settings) -> None:
+    add(settings, "喝水")
+    add_every(settings, "寫週報", "week")
+
+    today, yesterday = get(page).text.split("Yesterday")
+
+    assert "寫週報" in today
+    assert "喝水" in yesterday
+    assert "寫週報" not in yesterday

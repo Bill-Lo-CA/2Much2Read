@@ -16,7 +16,7 @@ from two_busy_one_miss import cli, pipeline, todos
 from two_busy_one_miss.config import Settings
 from two_busy_one_miss.google_calendar import CalendarEvent
 from two_busy_one_miss.renderer import RULE, render_agenda
-from two_busy_one_miss.rules import falls_on, parse_weekdays
+from two_busy_one_miss.rules import falls_on, parse_period, parse_weekdays, period_start
 from two_busy_one_miss.storage import Database
 from two_read_runtime.locking import ProcessLock
 
@@ -78,7 +78,9 @@ def test_a_new_todo_is_cleaned_and_listed(settings: Settings) -> None:
     assert todos.list_todos(settings, now=noon(MONDAY)).model_dump(mode="json") == {
         "status": "ok",
         "day": "2026-11-02",
-        "todos": [{"id": added.id, "title": "三十下 伏地挺身", "weekdays": ["mon", "wed"], "due": True, "done": False}],
+        "todos": [
+            {"id": added.id, "title": "三十下 伏地挺身", "weekdays": ["mon", "wed"], "period": "day", "due": True, "done": False}
+        ],
     }
 
 
@@ -364,7 +366,13 @@ def test_the_commands_write_one_json_result(settings: Settings, monkeypatch: pyt
 
     added = runner.invoke(cli.app, ["todo", "add", "三十下伏地挺身", "--on", "mon,wed,fri"])
     assert added.exit_code == 0, added.output
-    assert json.loads(added.stdout) == {"status": "ok", "id": 1, "title": "三十下伏地挺身", "weekdays": ["mon", "wed", "fri"]}
+    assert json.loads(added.stdout) == {
+        "status": "ok",
+        "id": 1,
+        "title": "三十下伏地挺身",
+        "weekdays": ["mon", "wed", "fri"],
+        "period": "day",
+    }
 
     done = runner.invoke(cli.app, ["todo", "done", "1", "--day", "2026-11-02"])
     assert done.exit_code == 0, done.output
@@ -373,7 +381,7 @@ def test_the_commands_write_one_json_result(settings: Settings, monkeypatch: pyt
     listed = runner.invoke(cli.app, ["todo", "list", "--day", "2026-11-02"])
     assert listed.exit_code == 0, listed.output
     assert json.loads(listed.stdout)["todos"] == [
-        {"id": 1, "title": "三十下伏地挺身", "weekdays": ["mon", "wed", "fri"], "due": True, "done": True}
+        {"id": 1, "title": "三十下伏地挺身", "weekdays": ["mon", "wed", "fri"], "period": "day", "due": True, "done": True}
     ]
 
     undone = runner.invoke(cli.app, ["todo", "undo", "1", "--day", "2026-11-02"])
@@ -519,3 +527,297 @@ def test_serve_reports_an_address_it_cannot_listen_on_and_fails(settings: Settin
 
     assert result.exit_code == 1
     assert "cannot listen on 100.127.255.254:8766" in result.output
+
+
+@pytest.mark.parametrize(
+    ("period", "day", "start"),
+    [
+        ("day", date(2026, 11, 4), date(2026, 11, 4)),
+        ("week", date(2026, 11, 2), date(2026, 11, 2)),
+        ("week", date(2026, 11, 4), date(2026, 11, 2)),
+        ("week", date(2026, 11, 8), date(2026, 11, 2)),
+        ("week", date(2026, 11, 9), date(2026, 11, 9)),
+        ("week", date(2027, 1, 1), date(2026, 12, 28)),
+        ("month", date(2026, 11, 1), date(2026, 11, 1)),
+        ("month", date(2026, 11, 30), date(2026, 11, 1)),
+        ("month", date(2028, 2, 29), date(2028, 2, 1)),
+    ],
+)
+def test_period_start(period: str, day: date, start: date) -> None:
+    assert period_start(period, day) == start
+
+
+@pytest.mark.parametrize("value", ["", "year", "WEEK", "weekly"])
+def test_a_period_there_is_no_such_thing_as_is_refused(value: str) -> None:
+    with pytest.raises(ValueError, match="unknown period"):
+        parse_period(value)
+
+
+def weekly(settings: Settings, first_day: date = MONDAY, title: str = "寫週報") -> int:
+    return todos.add_todo(settings, title, None, period="week", now=noon(first_day)).id
+
+
+def monthly(settings: Settings, first_day: date = MONDAY, title: str = "繳房租") -> int:
+    return todos.add_todo(settings, title, None, period="month", now=noon(first_day)).id
+
+
+def views(settings: Settings, day: date) -> list[tuple[str, bool, bool]]:
+    return [(view.title, view.due, view.done) for view in todos.list_todos(settings, day).todos]
+
+
+def test_a_daily_to_do_is_the_default_period(settings: Settings) -> None:
+    added = todos.add_todo(settings, "喝水", None, now=noon(MONDAY))
+
+    assert added.period == "day"
+    assert todos.list_todos(settings, MONDAY).todos[0].period == "day"
+
+
+def test_a_weekly_to_do_falls_on_every_day_and_says_what_it_is(settings: Settings) -> None:
+    added = todos.add_todo(settings, "寫週報", None, period="week", now=noon(MONDAY))
+
+    assert added.period == "week"
+    assert added.weekdays == ["mon", "tue", "wed", "thu", "fri", "sat", "sun"]
+    assert todos.list_todos(settings, MONDAY).todos[0].period == "week"
+
+
+@pytest.mark.parametrize("period", ["week", "month"])
+def test_days_cannot_be_named_for_a_weekly_or_monthly_to_do(settings: Settings, period: str) -> None:
+    with pytest.raises(ValueError, match="--on is for daily to-dos"):
+        todos.add_todo(settings, "寫週報", "mon", period=period, now=noon(MONDAY))
+
+
+def test_days_can_be_named_for_a_daily_to_do_when_said_outright(settings: Settings) -> None:
+    assert todos.add_todo(settings, "跑步", "mon", period="day", now=noon(MONDAY)).weekdays == ["mon"]
+
+
+def test_a_period_there_is_no_such_thing_as_adds_nothing(settings: Settings) -> None:
+    with pytest.raises(ValueError, match="unknown period"):
+        todos.add_todo(settings, "寫週報", None, period="year", now=noon(MONDAY))
+
+    assert not settings.database_path.exists()
+
+
+def test_a_weekly_to_do_is_done_for_the_week_by_any_one_day(settings: Settings) -> None:
+    todo_id = weekly(settings)
+    wednesday = MONDAY + timedelta(days=2)
+
+    assert todos.complete_todo(settings, todo_id, wednesday, now=noon(wednesday)).changed
+
+    for offset in range(7):
+        assert views(settings, MONDAY + timedelta(days=offset)) == [("寫週報", True, True)]
+
+
+def test_a_weekly_to_do_starts_over_on_monday(settings: Settings) -> None:
+    todo_id = weekly(settings)
+    todos.complete_todo(settings, todo_id, MONDAY, now=noon(MONDAY))
+
+    assert views(settings, MONDAY + timedelta(days=6)) == [("寫週報", True, True)]
+    assert views(settings, MONDAY + timedelta(days=7)) == [("寫週報", True, False)]
+
+
+def test_a_monthly_to_do_is_done_for_the_month_and_starts_over_on_the_first(settings: Settings) -> None:
+    todo_id = monthly(settings)
+    late = date(2026, 11, 20)
+    todos.complete_todo(settings, todo_id, late, now=noon(late))
+
+    assert views(settings, date(2026, 11, 2)) == [("繳房租", True, True)]
+    assert views(settings, date(2026, 11, 30)) == [("繳房租", True, True)]
+    assert views(settings, date(2026, 12, 1)) == [("繳房租", True, False)]
+
+
+def test_doing_a_weekly_to_do_twice_in_a_week_changes_nothing_the_second_time(settings: Settings) -> None:
+    todo_id = weekly(settings)
+    tuesday = MONDAY + timedelta(days=1)
+
+    assert todos.complete_todo(settings, todo_id, MONDAY, now=noon(tuesday)).changed
+    assert not todos.complete_todo(settings, todo_id, tuesday, now=noon(tuesday)).changed
+    assert rows(settings, "SELECT day FROM todo_completions") == [("2026-11-02",)]
+
+
+def test_a_weekly_to_do_can_be_undone_from_any_day_of_the_week(settings: Settings) -> None:
+    todo_id = weekly(settings)
+    friday = MONDAY + timedelta(days=4)
+    todos.complete_todo(settings, todo_id, MONDAY, now=noon(friday))
+
+    assert todos.reopen_todo(settings, todo_id, friday, now=noon(friday)).changed
+    assert views(settings, MONDAY) == [("寫週報", True, False)]
+
+
+def test_undoing_a_weekly_to_do_leaves_other_weeks_alone(settings: Settings) -> None:
+    todo_id = weekly(settings)
+    next_week = MONDAY + timedelta(days=7)
+    todos.complete_todo(settings, todo_id, MONDAY, now=noon(next_week))
+    todos.complete_todo(settings, todo_id, next_week, now=noon(next_week))
+
+    todos.reopen_todo(settings, todo_id, next_week, now=noon(next_week))
+
+    assert views(settings, MONDAY) == [("寫週報", True, True)]
+    assert views(settings, next_week) == [("寫週報", True, False)]
+
+
+def test_a_weekly_to_do_is_not_owed_before_it_was_added(settings: Settings) -> None:
+    wednesday = MONDAY + timedelta(days=2)
+    todo_id = weekly(settings, wednesday)
+
+    assert views(settings, MONDAY) == [("寫週報", False, False)]
+    assert views(settings, wednesday) == [("寫週報", True, False)]
+    with pytest.raises(ValueError, match="is not due"):
+        todos.complete_todo(settings, todo_id, MONDAY, now=noon(wednesday))
+
+
+def test_a_weekly_to_do_is_listed_with_its_period_until_it_is_done(settings: Settings) -> None:
+    todo_id = weekly(settings)
+
+    assert agenda_todos(settings, MONDAY)[0] == ["寫週報 (week)"]
+    assert agenda_todos(settings, MONDAY + timedelta(days=3))[0] == ["寫週報 (week)"]
+
+    tuesday = MONDAY + timedelta(days=1)
+    todos.complete_todo(settings, todo_id, tuesday, now=noon(tuesday))
+
+    assert agenda_todos(settings, MONDAY)[0] == []
+    assert agenda_todos(settings, MONDAY + timedelta(days=6))[0] == []
+    assert agenda_todos(settings, MONDAY + timedelta(days=7))[0] == ["寫週報 (week)"]
+
+
+def test_a_monthly_to_do_is_listed_with_its_period(settings: Settings) -> None:
+    monthly(settings)
+
+    assert agenda_todos(settings, MONDAY)[0] == ["繳房租 (month)"]
+
+
+def test_a_daily_to_do_has_no_period_in_the_agenda(settings: Settings) -> None:
+    todos.add_todo(settings, "喝水", None, now=noon(MONDAY))
+
+    assert agenda_todos(settings, MONDAY)[0] == ["喝水"]
+
+
+def test_a_weekly_to_do_is_undone_only_the_day_after_its_week_ran_out(settings: Settings) -> None:
+    weekly(settings)
+
+    for offset in range(1, 7):
+        assert agenda_todos(settings, MONDAY + timedelta(days=offset))[1] == []
+    assert agenda_todos(settings, MONDAY + timedelta(days=7)) == (["寫週報 (week)"], ["寫週報 (week)"])
+    assert agenda_todos(settings, MONDAY + timedelta(days=8))[1] == []
+
+
+def test_a_monthly_to_do_is_undone_only_the_day_after_its_month_ran_out(settings: Settings) -> None:
+    monthly(settings)
+
+    assert agenda_todos(settings, date(2026, 11, 30))[1] == []
+    assert agenda_todos(settings, date(2026, 12, 1))[1] == ["繳房租 (month)"]
+    assert agenda_todos(settings, date(2026, 12, 2))[1] == []
+
+
+def test_a_weekly_to_do_done_in_its_week_is_not_undone(settings: Settings) -> None:
+    todo_id = weekly(settings)
+    todos.complete_todo(settings, todo_id, MONDAY, now=noon(MONDAY))
+
+    assert agenda_todos(settings, MONDAY + timedelta(days=7))[1] == []
+
+
+def test_a_weekly_to_do_added_on_the_last_day_is_still_owed_that_week(settings: Settings) -> None:
+    sunday = MONDAY + timedelta(days=6)
+    weekly(settings, sunday)
+
+    assert agenda_todos(settings, sunday)[0] == ["寫週報 (week)"]
+    assert agenda_todos(settings, sunday + timedelta(days=1))[1] == ["寫週報 (week)"]
+
+
+def test_a_weekly_to_do_added_on_the_first_day_of_the_next_week_is_not_undone_yet(settings: Settings) -> None:
+    next_week = MONDAY + timedelta(days=7)
+    weekly(settings, next_week)
+
+    assert agenda_todos(settings, next_week) == (["寫週報 (week)"], [])
+
+
+def test_a_weekly_to_do_removed_before_its_week_ended_is_not_undone(settings: Settings) -> None:
+    todo_id = weekly(settings)
+    friday = MONDAY + timedelta(days=4)
+    todos.remove_todo(settings, todo_id, now=noon(friday))
+
+    assert agenda_todos(settings, friday)[0] == []
+    assert agenda_todos(settings, MONDAY + timedelta(days=7)) == ([], [])
+
+
+def test_a_daily_to_do_is_still_undone_every_day(settings: Settings) -> None:
+    todos.add_todo(settings, "喝水", None, now=noon(MONDAY))
+
+    assert agenda_todos(settings, MONDAY + timedelta(days=1))[1] == ["喝水"]
+    assert agenda_todos(settings, MONDAY + timedelta(days=2))[1] == ["喝水"]
+
+
+def test_the_agenda_shows_a_period_on_both_lines() -> None:
+    content = render_agenda(MONDAY, [], TORONTO, ["寫週報 (week)"], ["繳房租 (month)"])
+
+    assert "To do       | 寫週報 (week)" in content
+    assert "Undone      | 11-01: 繳房租 (month)" in content
+
+
+OLD_TODOS = """CREATE TABLE todos(
+  id INTEGER PRIMARY KEY, title TEXT NOT NULL, weekdays TEXT NOT NULL, first_day TEXT NOT NULL,
+  removed_on TEXT, created_at TEXT NOT NULL, updated_at TEXT NOT NULL);
+CREATE TABLE todo_completions(
+  todo_id INTEGER NOT NULL, day TEXT NOT NULL, completed_at TEXT NOT NULL, PRIMARY KEY(todo_id, day));
+INSERT INTO todos VALUES(1,'喝水','mon,tue,wed,thu,fri,sat,sun','2026-11-02',NULL,'x','x');
+INSERT INTO todo_completions VALUES(1,'2026-11-02','x');
+"""
+
+
+def test_a_database_from_before_periods_gets_the_column_and_keeps_its_to_dos(settings: Settings) -> None:
+    with closing(sqlite3.connect(settings.database_path)) as connection:
+        connection.executescript(OLD_TODOS)
+
+    assert views(settings, MONDAY) == [("喝水", True, True)]
+    assert agenda_todos(settings, MONDAY)[0] == []
+    assert agenda_todos(settings, MONDAY + timedelta(days=1))[0] == ["喝水"]
+    assert rows(settings, "SELECT period FROM todos") == [("day",)]
+
+
+def test_opening_a_database_for_writing_twice_adds_the_column_once(settings: Settings) -> None:
+    with closing(sqlite3.connect(settings.database_path)) as connection:
+        connection.executescript(OLD_TODOS)
+
+    Database(settings.database_path).close()
+    Database(settings.database_path).close()
+
+    assert rows(settings, "SELECT COUNT(*) FROM pragma_table_info('todos') WHERE name='period'") == [(1,)]
+
+
+def test_a_database_from_before_periods_can_be_read_without_changing_it(settings: Settings, tmp_path: Path) -> None:
+    with closing(sqlite3.connect(settings.database_path)) as connection:
+        connection.executescript(OLD_TODOS)
+    before = directory_digest(tmp_path)
+
+    listed = todos.list_todos(settings, MONDAY).todos
+
+    assert [(view.title, view.period, view.done) for view in listed] == [("喝水", "day", True)]
+    assert directory_digest(tmp_path) == before
+
+
+def test_the_database_refuses_a_period_there_is_no_such_thing_as(settings: Settings) -> None:
+    database = Database(settings.database_path)
+    try:
+        with pytest.raises(sqlite3.IntegrityError):
+            database.add_todo("x", "mon", MONDAY, "year")
+    finally:
+        database.close()
+
+
+def test_add_takes_every_on_the_command_line(settings: Settings, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+
+    result = CliRunner().invoke(cli.app, ["todo", "add", "寫週報", "--every", "week"])
+
+    assert result.exit_code == 0
+    assert json.loads(result.stdout)["period"] == "week"
+    assert rows(settings, "SELECT period FROM todos") == [("week",)]
+
+
+@pytest.mark.parametrize("arguments", [["--every", "year"], ["--every", "week", "--on", "mon"]])
+def test_add_refuses_a_schedule_that_cannot_be(settings: Settings, monkeypatch: pytest.MonkeyPatch, arguments: list[str]) -> None:
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+
+    result = CliRunner().invoke(cli.app, ["todo", "add", "寫週報", *arguments])
+
+    assert result.exit_code == 2
+    assert rows_or_empty(settings) == []

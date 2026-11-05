@@ -26,9 +26,10 @@ from two_busy_one_miss.todo_prompt import (
     PICK_HINT,
     SPACE,
     UP,
+    Schedule,
+    ask_schedule,
     ask_title,
     ask_todo,
-    ask_weekdays,
     choose,
     choose_many,
     read_key,
@@ -56,7 +57,8 @@ def run_choose_many(*pressed: str) -> tuple[list[int] | None, str]:
 def run_weekdays(*pressed: str) -> tuple[str | None, str]:
     out = io.StringIO()
     feed = keys(*pressed)
-    return ask_weekdays(lambda: next(feed), out), out.getvalue()
+    schedule = ask_schedule(lambda: next(feed), out)
+    return (None if schedule is None else schedule.on), out.getvalue()
 
 
 @pytest.mark.parametrize(
@@ -171,14 +173,40 @@ def test_backing_out_of_the_day_list_returns_to_the_presets() -> None:
 def test_both_lists_ask_which_days() -> None:
     _, output = run_weekdays("4", "1", ENTER)
 
-    frames = output.split("\x1b[6A\r\x1b[J")
-    assert frames[0].startswith("Which days?\n❯ 1. Every day\n")
-    assert frames[1].startswith("Which days?\n❯ 1. [ ] Mon\n")
+    frames = output.split("\x1b[8A\r\x1b[J")
+    assert frames[0] == (
+        "How often?\n❯ 1. Every day\n  2. Weekdays (mon-fri)\n  3. Weekends (sat, sun)\n  4. Pick days...\n"
+        f"  5. Once a week (any day)\n  6. Once a month (any day)\n{todo_prompt.CHOOSE_HINT}\n"
+    )
+    assert frames[1].startswith("How often?\n❯ 1. [ ] Mon\n")
 
 
 def test_the_answer_stays_on_the_screen_as_one_line() -> None:
-    assert run_weekdays("2")[1].endswith("Which days? Weekdays (mon-fri)\n")
-    assert run_weekdays("4", "1", "3", ENTER)[1].endswith("Which days? mon, wed\n")
+    assert run_weekdays("2")[1].endswith("How often? Weekdays (mon-fri)\n")
+    assert run_weekdays("4", "1", "3", ENTER)[1].endswith("How often? mon, wed\n")
+    assert run_weekdays("5")[1].endswith("How often? Once a week (any day)\n")
+    assert run_weekdays("6")[1].endswith("How often? Once a month (any day)\n")
+
+
+@pytest.mark.parametrize(
+    ("pressed", "schedule"),
+    [
+        ([ENTER], Schedule(EVERY_DAY, "day")),
+        (["2"], Schedule("mon,tue,wed,thu,fri", "day")),
+        (["3"], Schedule("sat,sun", "day")),
+        (["4", "1", ENTER], Schedule("mon", "day")),
+        (["5"], Schedule(None, "week")),
+        (["6"], Schedule(None, "month")),
+        ([UP, ENTER], Schedule(None, "month")),
+        ([UP, UP, ENTER], Schedule(None, "week")),
+        ([UP, UP, UP, ENTER, "1", ENTER], Schedule("mon", "day")),
+    ],
+)
+def test_ask_schedule(pressed: list[str], schedule: Schedule) -> None:
+    out = io.StringIO()
+    feed = keys(*pressed)
+
+    assert ask_schedule(lambda: next(feed), out) == schedule
 
 
 @pytest.mark.parametrize(
@@ -279,7 +307,13 @@ def test_ask_todo_stops_when_the_title_is_cancelled(monkeypatch: pytest.MonkeyPa
 def test_ask_todo_needs_no_list_when_the_days_are_given(monkeypatch: pytest.MonkeyPatch) -> None:
     answering(monkeypatch, "喝水")
 
-    assert ask_todo(refuse_blank, "mon") == ("喝水", "mon")
+    assert ask_todo(refuse_blank, "mon") == ("喝水", Schedule("mon", "day"))
+
+
+def test_ask_todo_needs_no_list_when_the_period_is_given(monkeypatch: pytest.MonkeyPatch) -> None:
+    answering(monkeypatch, "喝水")
+
+    assert ask_todo(refuse_blank, None, "month") == ("喝水", Schedule(None, "month"))
 
 
 class Terminal:
@@ -338,6 +372,10 @@ class Terminal:
         with closing(sqlite3.connect(self.database)) as connection:
             return connection.execute("SELECT title, weekdays FROM todos").fetchall()
 
+    def periods(self) -> list[str]:
+        with closing(sqlite3.connect(self.database)) as connection:
+            return [str(row[0]) for row in connection.execute("SELECT period FROM todos ORDER BY id")]
+
     def assert_left_as_found(self) -> None:
         assert termios.tcgetattr(self.slave) == self.before
         hidden = self.output.count(b"\x1b[?25l")
@@ -371,7 +409,7 @@ def test_a_to_do_added_by_arrow_keys(open_terminal: Callable[..., Terminal]) -> 
     terminal = open_terminal()
     terminal.expect("To-do: ")
     terminal.type("三十下伏地挺身\r")
-    terminal.expect("Which days?")
+    terminal.expect("How often?")
     terminal.type(b"\x1b[B\x1b[B\x1b[B\r")
     terminal.expect("[ ] Mon")
     terminal.type(b" \x1b[B\x1b[B ")
@@ -388,7 +426,7 @@ def test_todo_on_its_own_asks_for_a_to_do(open_terminal: Callable[..., Terminal]
     terminal = open_terminal(command=("todo",))
     terminal.expect("To-do: ")
     terminal.type("三十下伏地挺身\r")
-    terminal.expect("Which days?")
+    terminal.expect("How often?")
     terminal.type(b"\x1b[B\x1b[B\x1b[B\r")
     terminal.expect("[ ] Mon")
     terminal.type(b" \x1b[B\x1b[B ")
@@ -405,13 +443,59 @@ def test_todo_on_its_own_can_be_cancelled(open_terminal: Callable[..., Terminal]
     terminal = open_terminal(command=("todo",))
     terminal.expect("To-do: ")
     terminal.type("喝水\r")
-    terminal.expect("Which days?")
+    terminal.expect("How often?")
     terminal.type(b"\x1b")
 
     assert terminal.finish() == 1
     assert b"nothing was added" in terminal.output
     assert terminal.titles() == []
     terminal.assert_left_as_found()
+
+
+def test_a_weekly_to_do_chosen_from_the_list(open_terminal: Callable[..., Terminal]) -> None:
+    terminal = open_terminal(command=("todo",))
+    terminal.expect("To-do: ")
+    terminal.type("寫週報\r")
+    terminal.expect("Once a week")
+    terminal.type(b"5")
+
+    assert terminal.finish() == 0
+    assert "Added to-do 1: 寫週報 (once a week)" in terminal.output.decode()
+    assert terminal.periods() == ["week"]
+    terminal.assert_left_as_found()
+
+
+def test_a_monthly_to_do_chosen_with_the_arrow_keys(open_terminal: Callable[..., Terminal]) -> None:
+    terminal = open_terminal(command=("todo",))
+    terminal.expect("To-do: ")
+    terminal.type("繳房租\r")
+    terminal.expect("Once a month")
+    terminal.type(b"\x1b[A\r")
+
+    assert terminal.finish() == 0
+    assert "Added to-do 1: 繳房租 (once a month)" in terminal.output.decode()
+    assert terminal.periods() == ["month"]
+
+
+def test_every_answers_the_question_about_how_often(open_terminal: Callable[..., Terminal]) -> None:
+    terminal = open_terminal("--every", "week")
+    terminal.expect("To-do: ")
+    terminal.type("寫週報\r")
+
+    assert terminal.finish() == 0
+    assert b"How often?" not in terminal.output
+    assert terminal.periods() == ["week"]
+
+
+@pytest.mark.parametrize("arguments", [("--every", "year"), ("--every", "week", "--on", "mon")])
+def test_a_schedule_that_cannot_be_is_refused_before_anything_is_asked(
+    open_terminal: Callable[..., Terminal], arguments: tuple[str, ...]
+) -> None:
+    terminal = open_terminal(*arguments)
+
+    assert terminal.finish() == 2
+    assert b"To-do:" not in terminal.output
+    assert terminal.titles() == []
 
 
 def test_a_command_under_todo_does_not_also_ask(open_terminal: Callable[..., Terminal]) -> None:
@@ -426,7 +510,7 @@ def test_a_to_do_added_for_every_day_in_two_keys(open_terminal: Callable[..., Te
     terminal = open_terminal()
     terminal.expect("To-do: ")
     terminal.type("喝水\r")
-    terminal.expect("Which days?")
+    terminal.expect("How often?")
     terminal.type(b"\r")
 
     assert terminal.finish() == 0
@@ -438,7 +522,7 @@ def test_backspace_takes_back_a_whole_wide_character(open_terminal: Callable[...
     terminal = open_terminal()
     terminal.expect("To-do: ")
     terminal.type("三十\x7f\r")
-    terminal.expect("Which days?")
+    terminal.expect("How often?")
     terminal.type(b"\r")
 
     assert terminal.finish() == 0
@@ -452,7 +536,7 @@ def test_a_title_with_nothing_to_show_is_asked_for_again(open_terminal: Callable
     terminal.expect("something to show")
     terminal.expect("To-do: ", times=2)
     terminal.type("喝水\r")
-    terminal.expect("Which days?")
+    terminal.expect("How often?")
     terminal.type(b"\r")
 
     assert terminal.finish() == 0
@@ -465,7 +549,7 @@ def test_on_answers_the_question_about_days(open_terminal: Callable[..., Termina
     terminal.type("跑步\r")
 
     assert terminal.finish() == 0
-    assert b"Which days?" not in terminal.output
+    assert b"How often?" not in terminal.output
     assert terminal.titles() == [("跑步", "mon,fri")]
 
 
@@ -481,7 +565,7 @@ def test_escape_cancels_and_leaves_the_terminal_as_found(open_terminal: Callable
     terminal = open_terminal()
     terminal.expect("To-do: ")
     terminal.type("喝水\r")
-    terminal.expect("Which days?")
+    terminal.expect("How often?")
     terminal.type(b"\x1b")
 
     assert terminal.finish() == 1
@@ -494,7 +578,7 @@ def test_ctrl_c_in_the_list_cancels_and_leaves_the_terminal_as_found(open_termin
     terminal = open_terminal()
     terminal.expect("To-do: ")
     terminal.type("喝水\r")
-    terminal.expect("Which days?")
+    terminal.expect("How often?")
     os.killpg(terminal.process.pid, signal.SIGINT)
 
     assert terminal.finish() == 1
