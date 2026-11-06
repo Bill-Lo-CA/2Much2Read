@@ -42,15 +42,17 @@ def _similarity(left: set[str], right: set[str]) -> float:
 
 def _score(title: str, candidate: LinkCandidate) -> tuple[MatchMethod, float]:
     normalized_title = _text(title)
+    # A title with no words, only symbols, says nothing about any link. It must not reach the
+    # comparison below, where it equals the empty anchor of every image link, banners included.
+    if not normalized_title:
+        return "unmatched", 0.0
     anchor = _text(candidate.anchor_text)
     nearby = _text(candidate.nearby_text)
     if anchor == normalized_title:
         return "exact_anchor", 1.0
-    if normalized_title and normalized_title in nearby:
+    if normalized_title in nearby:
         return "heading_context", 0.9
     title_tokens = _tokens(title)
-    if not title_tokens:
-        return "unmatched", 0.0
     anchor_score = _similarity(title_tokens, _tokens(candidate.anchor_text))
     if anchor_score >= 0.7:
         return "fuzzy_anchor", anchor_score

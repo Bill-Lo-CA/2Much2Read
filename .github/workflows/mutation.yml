@@ -4,7 +4,7 @@ permissions:
   contents: read
 
 # Mutation testing changes the code under test one small way at a time and expects some test to
-# fail. It is too slow for every pull request - the whole tree is about 15,000 mutants - so this
+# fail. It is too slow for every pull request - the whole tree is about 18,000 mutants - so this
 # runs weekly, and on demand, over the modules that guard a security boundary: endpoint and webhook
 # validation, Discord delivery and mention control, file permissions, OAuth tokens, the article
 # fetcher's network policy, which email links may become a story's link, and who the to-do page and

@@ -1,4 +1,5 @@
 import json
+import re
 from collections.abc import Callable
 
 import httpx
@@ -7,6 +8,7 @@ import respx
 
 from two_read_runtime import discord
 from two_read_runtime.discord import (
+    DISCORD_CONFIG_INVALID,
     DiscordDeliveryError,
     DiscordDestination,
     chunk_text,
@@ -16,6 +18,7 @@ from two_read_runtime.discord import (
     parse_message_ids,
     sanitize_discord_text,
 )
+from two_read_runtime.endpoint_policy import DISCORD_WEBHOOK_INVALID
 
 
 @pytest.mark.parametrize(
@@ -413,12 +416,91 @@ def test_retry_after_is_bounded_and_falls_back_on_nonsense(header: str | None, w
     assert discord._retry_after(httpx.Response(429, headers=headers), 1) == wait
 
 
-@pytest.mark.parametrize("webhook_url", ["https://evil.example/api/webhooks/1/token", ""])
-def test_a_destination_object_is_held_to_the_same_webhook_rules_as_a_url(webhook_url: str) -> None:
+@pytest.mark.parametrize(
+    ("webhook_url", "code"),
+    [("https://evil.example/api/webhooks/1/token", DISCORD_WEBHOOK_INVALID), ("", DISCORD_CONFIG_INVALID)],
+)
+def test_a_destination_object_is_held_to_the_same_webhook_rules_as_a_url(webhook_url: str, code: str) -> None:
     destination = DiscordDestination("webhook", "webhook:key", webhook_url=webhook_url)
 
-    with pytest.raises(DiscordDeliveryError):
+    with pytest.raises(DiscordDeliveryError, match=code):
         deliver(destination, "hello", "2much2read")
+
+
+@respx.mock
+def test_a_destination_object_delivers_to_its_webhook() -> None:
+    # Configuration always builds this object, so this is the path every real message takes.
+    route = respx.post(WEBHOOK).mock(return_value=httpx.Response(200, json={"id": "9"}))
+
+    assert deliver(configured_destinations("webhook", WEBHOOK, "", "")[0], "hello", "2much2read") == ["9"]
+
+    request = route.calls[0].request
+    assert request.url.params["wait"] == "true"
+    assert json.loads(request.content) == {"content": "hello", "username": "2much2read", "allowed_mentions": {"parse": []}}
+
+
+def test_a_destination_object_goes_on_with_the_url_as_validated() -> None:
+    destination = DiscordDestination("webhook", "webhook:key", webhook_url=WEBHOOK.replace("discord.com", "DISCORD.com"))
+
+    assert discord._destination(destination) == DiscordDestination("webhook", "webhook:key", webhook_url=WEBHOOK)
+
+
+def test_a_bare_url_becomes_the_same_destination_configuration_builds() -> None:
+    # A durable delivery finds its row by the key, so the two must agree on it.
+    assert discord._destination(WEBHOOK) == configured_destinations("webhook", WEBHOOK, "", "")[0]
+
+
+@pytest.mark.parametrize(
+    ("value", "code"),
+    [("", "DISCORD_WEBHOOK_URL is required"), ("https://evil.example/api/webhooks/1/token", DISCORD_WEBHOOK_INVALID)],
+)
+def test_a_bare_url_is_refused_with_its_reason(value: str, code: str) -> None:
+    with pytest.raises(DiscordDeliveryError, match=code):
+        deliver(value, "hello", "2much2read")
+
+
+@respx.mock
+def test_a_long_message_with_a_mention_loses_none_of_its_text() -> None:
+    route = respx.post(WEBHOOK).mock(return_value=httpx.Response(200, json={"id": "9"}))
+    lines = [f"line {index}" for index in range(600)]
+
+    deliver(WEBHOOK, "\n".join(lines), "2bored1made", allowed_user_ids=["123"], mention_user_ids=["123"])
+
+    contents = [str(json.loads(call.request.content)["content"]) for call in route.calls]
+    assert len(contents) > 1
+    assert all(len(content) <= 2000 for content in contents)
+    assert contents[0].startswith("<@123> (1/")
+    assert [line for content in contents for line in re.sub(r"^(<@123> )?\(\d+/\d+\) ", "", content).split("\n")] == lines
+
+
+@pytest.mark.parametrize(
+    ("text", "user_ids", "limit", "expected"),
+    [
+        ("hello", ["1"], 2000, ["<@1> hello"]),
+        ("", ["1", "2"], 2000, ["<@1> <@2>"]),
+        # Mentions that exactly fill a message stay together, and one character less parts them.
+        ("", ["1", "2"], 9, ["<@1> <@2>"]),
+        ("", ["1", "2", "3"], 8, ["<@1>", "<@2>", "<@3>"]),
+        # Text that exactly fills what the mention leaves shares its message.
+        ("x" * 15, ["1"], 20, ["<@1> " + "x" * 15]),
+        # A numbered chunk needs 13 characters, so with less room than that the text goes on its own.
+        ("xxx", ["1"], 18, ["<@1> xxx"]),
+        ("xxx", ["1"], 17, ["<@1>", "xxx"]),
+    ],
+)
+def test_mentions_share_a_message_with_the_text_while_it_fits(
+    text: str, user_ids: list[str], limit: int, expected: list[str]
+) -> None:
+    assert discord._chunk_with_mentions(text, user_ids, limit) == expected
+
+
+@pytest.mark.parametrize(("length", "limit"), [(16, 20), (30, 17)])
+def test_text_too_long_to_share_is_split_within_the_limit(length: int, limit: int) -> None:
+    chunks = discord._chunk_with_mentions("x" * length, ["1"], limit)
+
+    assert len(chunks) > 1
+    assert all(len(chunk) <= limit for chunk in chunks)
+    assert "".join(re.sub(r"^(<@1> ?)?(\(\d+/\d+\) )?", "", chunk) for chunk in chunks) == "x" * length
 
 
 @respx.mock

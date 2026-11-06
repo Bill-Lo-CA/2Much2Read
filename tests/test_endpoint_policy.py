@@ -51,10 +51,19 @@ def test_remote_ollama_requires_https_and_opt_in() -> None:
         # A user name alone, or a password alone, is a credential in the URL all the same.
         "http://user@127.0.0.1:11434",
         "http://:secret@127.0.0.1:11434",
+        # httpx accepts both of these, so only the checks here keep them out.
+        "http://127.0.0.1:65536",
+        "http://127.0.0.1:11434 ",
+        123,
         "http://127.0.0.1:99999",
         "http://127.0.0.1:0",
         " http://127.0.0.1:11434",
         "http://127.0.0.1:11434#fragment",
+        # A local host does not make up for another scheme, or an allowed scheme for no host.
+        "ftp://127.0.0.1:11434",
+        "file:///etc/passwd",
+        "http://",
+        "https:///api",
     ],
 )
 def test_rejects_invalid_ollama_endpoints(value: str) -> None:
@@ -87,6 +96,9 @@ def test_allows_official_discord_webhooks(host: str) -> None:
         "https://discord.com/api/webhooks/123/secret+token",
         "https://discord.com/api/webhooks/123/",
         "https://discord.com:444/api/webhooks/123/secret-token",
+        # httpx raises on this one, where it hands back a port out of range without complaint.
+        "https://discord.com:port/api/webhooks/123/secret-token",
+        123,
         "https://discord.com/api/webhooks/123",
         "https://discord.com/api/webhooks/123/secret-token#fragment",
     ],

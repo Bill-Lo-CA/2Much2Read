@@ -623,3 +623,20 @@ def test_a_link_carrying_credentials_is_no_candidate() -> None:
     )
 
     assert _codes(extract_gmail_payload(_body("text/html", html))) == {"L1": "https://example.com/story"}
+
+
+@pytest.mark.parametrize(
+    "href",
+    [
+        "ftp://example.com/d",
+        "file:///etc/passwd",
+        "javascript:alert(1)",
+        "mailto:someone@example.com",
+        "https:///no-host",
+        "https://user@example.com/a",
+        "https://:pw@example.com/a",
+    ],
+)
+def test_a_link_that_is_not_a_plain_web_address_keeps_only_its_label(href: str) -> None:
+    # The text the extractor reads. A candidate's URL type checks again, so only this shows the check here.
+    assert html_to_text(f'<p><a href="{href}">Story</a></p>') == "Story"
