@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -186,6 +187,58 @@ def test_doctor_reports_safe_runtime_permissions(
     assert result.checks["database"] == "not_created"
     assert result.checks["lock_file"] == "not_created"
     assert result.checks["runtime_paths"] == "ok"
+
+
+@pytest.mark.parametrize(
+    ("refresh_token", "token_check", "status"),
+    [
+        # An access token lasts an hour and the digest runs once a day, so a sound install reads this most of the day.
+        ("refresh-token", "refresh_needed", "ok"),
+        ("", "reauth_required", "warning"),
+    ],
+)
+def test_doctor_grades_an_expired_token_by_whether_it_can_be_renewed(
+    tmp_path: Path,
+    newsletter_settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+    refresh_token: str,
+    token_check: str,
+    status: str,
+) -> None:
+    _, _, data_root, config_path, credentials_path, token_path = private_runtime_paths(tmp_path, monkeypatch)
+    mock_ollama(monkeypatch, ["llama3.2:3b", "qwen3:8b", "translategemma:4b"])
+    token_path.write_text(
+        json.dumps(
+            {
+                "token": "access-token",
+                "refresh_token": refresh_token,
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": [
+                    "https://www.googleapis.com/auth/gmail.modify",
+                    "https://www.googleapis.com/auth/gmail.settings.basic",
+                ],
+                "expiry": "2000-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = newsletter_settings.model_copy(
+        update={
+            "sources_config_path": config_path,
+            "gmail_credentials_path": credentials_path,
+            "gmail_token_path": token_path,
+            "database_path": data_root / "2much2read.sqlite3",
+            "lock_path": data_root / "2much2read.lock",
+            "ollama_model": "llama3.2:3b",
+            "ollama_review_model": "qwen3:8b",
+        }
+    )
+
+    result = diagnostics.doctor(settings, send_test=False)
+
+    assert (result.checks["gmail_token"], result.status) == (token_check, status)
 
 
 def test_doctor_reports_unsafe_runtime_permissions(

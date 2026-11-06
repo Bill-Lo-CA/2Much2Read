@@ -45,7 +45,9 @@ app.add_typer(calendars_app, name="calendars")
 app.add_typer(rules_app, name="rules")
 app.add_typer(todo_app, name="todo")
 
-_HEALTHY_CHECKS = {"ok", "not_created", "webhook", "bot", "both"}
+# "refresh_needed" is a sound token whose hour-long access token has run out, and the next read renews
+# it. A token that cannot be renewed reads "reauth_required".
+_HEALTHY_CHECKS = {"ok", "not_created", "webhook", "bot", "both", "refresh_needed"}
 
 
 def _config_error_status(error: Exception) -> str:

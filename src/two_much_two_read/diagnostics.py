@@ -19,7 +19,9 @@ from two_read_runtime.settings_validation import unknown_env_keys
 from .command_models import DoctorResult
 from .config import Settings, load_sources
 
-_HEALTHY_CHECKS = {"ok", "not_created", "webhook", "bot", "both", "local", "remote_https"}
+# "refresh_needed" is how a sound token reads for most of the day: its access token lasts an hour, the
+# digest runs once a day, and that run renews it. A token that cannot be renewed reads "reauth_required".
+_HEALTHY_CHECKS = {"ok", "not_created", "webhook", "bot", "both", "local", "remote_https", "refresh_needed"}
 # Read out of the environment file by install-2much2read-user-service.sh with sed, to render the
 # timer's OnCalendar line. They are not settings and never will be, so they are not misspellings.
 INSTALLER_ENV_KEYS = ("DIGEST_SCHEDULE_TIME", "DIGEST_SCHEDULE_TIMEZONE")

@@ -64,6 +64,45 @@ def test_doctor_tests_each_both_destination(tmp_path: Path, monkeypatch: pytest.
     assert sent == ["webhook", "bot"]
 
 
+@pytest.mark.parametrize(
+    ("refresh_token", "token_check", "status"),
+    [("refresh-token", "refresh_needed", "ok"), ("", "reauth_required", "warning")],
+)
+def test_doctor_grades_an_expired_token_by_whether_it_can_be_renewed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, refresh_token: str, token_check: str, status: str
+) -> None:
+    reminders_path = tmp_path / "reminders.yaml"
+    reminders_path.write_text("calendars:\n  - id: primary\n", encoding="utf-8")
+    token_path = tmp_path / "calendar-token.json"
+    token_path.write_text(
+        json.dumps(
+            {
+                "token": "access-token",
+                "refresh_token": refresh_token,
+                "client_id": "client-id",
+                "client_secret": "client-secret",
+                "token_uri": "https://oauth2.googleapis.com/token",
+                "scopes": ["https://www.googleapis.com/auth/calendar.readonly"],
+                "expiry": "2000-01-01T00:00:00Z",
+            }
+        ),
+        encoding="utf-8",
+    )
+    settings = Settings(
+        reminders_config_path=reminders_path,
+        google_calendar_token_path=token_path,
+        database_path=tmp_path / "reminders.sqlite3",
+        lock_path=tmp_path / "reminders.lock",
+        discord_webhook_url="https://discord.com/api/webhooks/123456789012345678/test-webhook-token",
+    )
+    monkeypatch.setattr(cli, "Settings", lambda: settings)
+    monkeypatch.setattr(cli, "runtime_permission_checks", lambda *args, **kwargs: {"runtime_paths": "ok"})
+
+    payload = json.loads(CliRunner().invoke(cli.app, ["doctor"]).stdout)
+
+    assert (payload["checks"]["google_calendar_token"], payload["status"]) == (token_check, status)
+
+
 def test_doctor_redacts_missing_config_path_and_reports_custom_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     secret_path = tmp_path / "calendar-client-secret-must-not-appear.yaml"
     settings = Settings(
