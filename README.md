@@ -929,7 +929,7 @@ The validation workflow runs these on the runner's Python, and the tests again o
 the edges of the declared range. Mutation testing - changing the code one small way at a time and
 expecting a test to fail - runs weekly in `.github/workflows/mutation.yml` over the modules that
 guard a security boundary, and fails when one of them has code no test reaches. To run it locally,
-over the whole tree (about 15,000 mutants, 45 minutes on 14 workers) or named modules:
+over the whole tree (about 18,000 mutants, 55 minutes on 14 workers) or named modules:
 
 ```bash
 uv run --with mutmut==3.8.0 mutmut run --max-children 14 ["two_read_runtime.discord.*" ...]

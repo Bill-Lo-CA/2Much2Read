@@ -1,9 +1,11 @@
+from datetime import timedelta
+
 import pytest
 from pydantic import HttpUrl
 
-from two_much_two_read.article_fetcher import ResolvedUrl
+from two_much_two_read.article_fetcher import ArticleFetcher, ResolvedUrl, UrlResolutionError
 from two_much_two_read.schemas import LinkCandidate, NewsletterItemAnalysis
-from two_much_two_read.url_enrichment import UrlEnricher, shown_url
+from two_much_two_read.url_enrichment import UrlEnricher, resolve_match, shown_url
 
 
 def analysis(title: str = "Useful article", source_title: str | None = None) -> NewsletterItemAnalysis:
@@ -217,3 +219,138 @@ def test_a_code_already_taken_falls_back_to_the_title() -> None:
     matches = UrlEnricher().match([coded("First story", "L1"), coded("Second story", "L1")], [first, second])
 
     assert [(match.method, match.candidate) for match in matches] == [("model_link", first), ("exact_anchor", second)]
+
+
+TEN_WORD_TITLE = "a b c d e f g h i j"
+
+
+@pytest.mark.parametrize(
+    ("anchor", "method", "confidence"),
+    [
+        ("a b c d e f g h i", "fuzzy_anchor", 0.9),
+        # 7 of the 10 words in common is the least that counts as the same text.
+        ("a b c d e f g", "fuzzy_anchor", 0.7),
+        ("a b c d e f", "unmatched", 0.0),
+    ],
+)
+def test_a_title_near_an_anchor_matches_by_its_words(anchor: str, method: str, confidence: float) -> None:
+    link = candidate("link-0001", anchor, "https://example.com/go")
+
+    match = UrlEnricher().match([analysis(TEN_WORD_TITLE)], [link])[0]
+
+    assert (match.method, match.candidate, match.confidence) == (method, link if confidence else None, confidence)
+
+
+@pytest.mark.parametrize(
+    ("path", "method", "confidence"),
+    [
+        ("a-b-c-d-e-f-g-h-i", "url_slug", 0.9),
+        ("a-b-c-d-e-f-g", "url_slug", 0.7),
+        # Too few words in common is no match, even when it is the only link on offer.
+        ("a-b-c-d-e-f", "unmatched", 0.0),
+    ],
+)
+def test_a_title_near_a_url_slug_matches_by_its_words(path: str, method: str, confidence: float) -> None:
+    link = candidate("link-0001", "Read more", f"https://example.com/{path}")
+
+    match = UrlEnricher().match([analysis(TEN_WORD_TITLE)], [link])[0]
+
+    assert (match.method, match.candidate, match.confidence) == (method, link if confidence else None, confidence)
+
+
+@pytest.mark.parametrize("anchor", ["Read more", ""])
+def test_a_title_with_no_words_to_compare_matches_nothing(anchor: str) -> None:
+    # The empty anchor is an image link, which had been an exact match for such a title at full confidence.
+    match = UrlEnricher().match([analysis("-")], [candidate("link-0001", anchor, "https://example.com/banner")])[0]
+
+    assert (match.method, match.candidate, match.confidence) == ("unmatched", None, 0.0)
+
+
+def test_an_ambiguous_item_does_not_stop_the_items_after_it() -> None:
+    first = analysis()
+    other = candidate("link-0003", "Second story", "https://example.com/second", 2)
+    links = [
+        candidate("link-0001", "Useful article", "https://one.example/article", 0),
+        candidate("link-0002", "Useful article", "https://two.example/article", 1),
+        other,
+    ]
+
+    matches = UrlEnricher().match([first, analysis("Second story")], links)
+
+    assert (matches[0].item, matches[0].method, matches[0].candidate, matches[0].confidence) == (first, "ambiguous", None, 1.0)
+    assert (matches[1].method, matches[1].candidate) == ("exact_anchor", other)
+
+
+def test_a_link_goes_to_one_item_only() -> None:
+    link = candidate("link-0001", "Useful article", "https://example.com/article")
+
+    matches = UrlEnricher().match([analysis(), analysis()], [link])
+
+    assert [(match.method, match.candidate, match.confidence) for match in matches] == [
+        ("exact_anchor", link, 1.0),
+        ("unmatched", None, 0.0),
+    ]
+
+
+def test_the_extractors_link_code_is_taken_at_full_confidence() -> None:
+    link = candidate("link-0001", "Comments", "https://example.com/article")
+
+    match = UrlEnricher().match([coded("Useful article", "L1")], [link])[0]
+
+    assert (match.method, match.candidate, match.confidence) == ("model_link", link, 1.0)
+
+
+def test_a_resolved_item_records_how_it_matched_and_what_the_page_calls_itself() -> None:
+    enricher = UrlEnricher()
+    match = enricher.match([analysis()], [candidate("link-0001", "Useful article", "https://short.example/go")])[0]
+    resolved = ResolvedUrl("https://short.example/go", "https://example.com/article", "https://example.com/canonical")
+
+    item = enricher.resolved_item(match, resolved)
+
+    assert str(item.canonical_url) == "https://example.com/canonical"
+    assert (item.url_match_method, item.url_match_confidence) == ("exact_anchor", 1.0)
+    assert item.url_checked_at is not None and item.url_checked_at.utcoffset() == timedelta(0)
+    assert enricher.resolved_item(match, ResolvedUrl(resolved.requested_url, resolved.final_url, None)).canonical_url is None
+
+
+@pytest.mark.parametrize(
+    ("code", "status"),
+    [
+        ("URL_POLICY_BLOCKED", "blocked"),
+        ("URL_REDIRECT_BLOCKED", "blocked"),
+        ("URL_RESOLUTION_DEADLINE_EXCEEDED", "failed"),
+    ],
+)
+def test_a_link_that_failed_records_how_it_matched_and_why_it_failed(code: str, status: str) -> None:
+    enricher = UrlEnricher()
+    match = enricher.match([analysis()], [candidate("link-0001", "Useful article", "https://example.com/article")])[0]
+
+    item = enricher.failed_item(match, code)
+
+    assert str(item.raw_url) == "https://example.com/article"
+    assert (item.url_match_status, item.url_match_method, item.url_match_confidence) == ("matched", "exact_anchor", 1.0)
+    assert (item.url_resolution_status, item.url_error_code) == (status, code)
+    assert item.url_checked_at is not None and item.url_checked_at.utcoffset() == timedelta(0)
+
+
+def test_an_item_with_no_link_records_why_and_nothing_is_requested() -> None:
+    enricher = UrlEnricher()
+    same_anchor = [
+        candidate("link-0001", "Useful article", "https://one.example/article", 0),
+        candidate("link-0002", "Useful article", "https://two.example/article", 1),
+    ]
+    unmatched = enricher.failed_item(enricher.match([analysis()], [])[0], "URL_MATCH_UNRESOLVED")
+    ambiguous = enricher.failed_item(enricher.match([analysis()], same_anchor)[0], "URL_MATCH_UNRESOLVED")
+
+    assert (unmatched.url_match_status, unmatched.url_match_confidence) == ("unmatched", 0.0)
+    assert (ambiguous.url_match_status, ambiguous.url_match_confidence) == ("ambiguous", 1.0)
+    assert unmatched.url_resolution_status == ambiguous.url_resolution_status == "not_requested"
+    assert unmatched.source_url is None and ambiguous.source_url is None
+
+
+def test_an_item_with_no_link_cannot_be_resolved() -> None:
+    match = UrlEnricher().match([analysis()], [])[0]
+    fetcher = ArticleFetcher(lambda _: pytest.fail("nothing should be looked up"))
+
+    with pytest.raises(UrlResolutionError, match="URL_MATCH_UNRESOLVED"):
+        resolve_match(match, fetcher)

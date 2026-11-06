@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import socket
 import ssl
+from collections.abc import Callable
 from threading import Event
 
 import pytest
@@ -451,9 +452,10 @@ class _Socket:
         self.timeouts.append(value)
 
 
-@pytest.mark.parametrize("secure", [False, True])
+# Ports 80 and 443 are both allowed on either scheme, so each is tried on the other's as well.
+@pytest.mark.parametrize(("secure", "port"), [(False, 80), (False, 443), (True, 443), (True, 80)])
 def test_a_connection_goes_to_the_address_that_was_validated_not_a_fresh_lookup(
-    monkeypatch: pytest.MonkeyPatch, secure: bool
+    monkeypatch: pytest.MonkeyPatch, secure: bool, port: int
 ) -> None:
     """DNS is answered once and checked; asking again at connect time could be answered with a private address."""
     opened: list[tuple[tuple[str, int], float]] = []
@@ -466,7 +468,7 @@ def test_a_connection_goes_to_the_address_that_was_validated_not_a_fresh_lookup(
 
     monkeypatch.setattr("two_much_two_read.article_fetcher.socket.create_connection", create_connection)
     kind = article_fetcher._PinnedHTTPSConnection if secure else article_fetcher._PinnedHTTPConnection
-    connection = kind("news.example", 443 if secure else 80, "93.184.216.34", timeout=4)
+    connection = kind("news.example", port, "93.184.216.34", timeout=4)
     if secure:
         assert isinstance(connection, article_fetcher._PinnedHTTPSConnection)
         assert connection.context.verify_mode is ssl.CERT_REQUIRED and connection.context.check_hostname
@@ -479,7 +481,7 @@ def test_a_connection_goes_to_the_address_that_was_validated_not_a_fresh_lookup(
 
     connection.connect()
 
-    assert opened == [(("93.184.216.34", 443 if secure else 80), 4)]
+    assert opened == [(("93.184.216.34", port), 4)]
     # The certificate is checked against the name the link gave, not the address dialled.
     assert wrapped == (["news.example"] if secure else [])
     assert plain.timeouts == [article_fetcher.READ_TIMEOUT_SECONDS]
@@ -494,3 +496,66 @@ def test_a_socket_never_waits_past_either_deadline(deadline: float, timeout_dead
     ArticleFetcher(clock=lambda: 100.0)._set_socket_timeout(connection, deadline, timeout_deadline)
 
     assert sock.timeouts == [expected]
+
+
+def _dns_answering(*addresses: str) -> Callable[..., list[tuple[object, ...]]]:
+    def getaddrinfo(*_: object, **__: object) -> list[tuple[object, ...]]:
+        return [
+            (socket.AF_INET6 if ":" in address else socket.AF_INET, socket.SOCK_STREAM, 6, "", (address, 0))
+            for address in addresses
+        ]
+
+    return getaddrinfo
+
+
+def test_the_resolver_returns_every_address_a_name_has(monkeypatch: pytest.MonkeyPatch) -> None:
+    asked: list[tuple[tuple[object, ...], dict[str, object]]] = []
+    answer = _dns_answering("93.184.216.34", "2606:2800:220:1::1")
+
+    def getaddrinfo(*args: object, **kwargs: object) -> list[tuple[object, ...]]:
+        asked.append((args, kwargs))
+        return answer()
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+
+    assert article_fetcher._resolve("news.example") == ["93.184.216.34", "2606:2800:220:1::1"]
+    assert asked == [(("news.example", None), {"type": socket.SOCK_STREAM})]
+
+
+def test_a_name_that_does_not_resolve_is_blocked(monkeypatch: pytest.MonkeyPatch) -> None:
+    def getaddrinfo(*_: object, **__: object) -> list[object]:
+        raise socket.gaierror("no such name")
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+
+    with pytest.raises(ArticleFetchError, match="ARTICLE_URL_BLOCKED"):
+        article_fetcher._resolve("news.example")
+
+
+@pytest.mark.parametrize(
+    "addresses",
+    [
+        ["10.0.0.1"],
+        ["127.0.0.1"],
+        ["169.254.169.254"],
+        ["::1"],
+        ["fd00::1"],
+        # One bad answer among good ones is enough: the address dialled must not be left to chance.
+        ["93.184.216.34", "10.0.0.1"],
+        ["2606:2800:220:1::1", "::1"],
+    ],
+)
+def test_the_real_resolver_blocks_a_name_with_any_private_address(monkeypatch: pytest.MonkeyPatch, addresses: list[str]) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _dns_answering(*addresses))
+    fetcher = ArticleFetcher(response_provider=lambda _: pytest.fail("request should not be sent"))
+
+    with pytest.raises(ArticleFetchError, match="ARTICLE_URL_BLOCKED"):
+        fetcher.fetch("https://news.example/article")
+
+
+def test_the_address_checked_from_the_real_resolver_is_the_one_kept_to_dial(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(socket, "getaddrinfo", _dns_answering("93.184.216.34", "2606:2800:220:1::1"))
+
+    validated = ArticleFetcher()._validate_url("https://news.example/article", redirect=False)
+
+    assert (validated.hostname, validated.address) == ("news.example", "93.184.216.34")

@@ -171,3 +171,76 @@ def test_a_path_that_cannot_be_resolved_is_within_nothing(tmp_path: Path, monkey
     monkeypatch.setattr(Path, "resolve", unresolvable)
 
     assert not path_within(tmp_path / "file", tmp_path)
+
+
+@pytest.mark.parametrize("suffix", ["-wal", "-shm", "-journal"])
+def test_any_one_loose_sqlite_sidecar_is_unsafe(tmp_path: Path, suffix: str) -> None:
+    # The write-ahead log holds recent rows in the clear, so it needs the database's own mode.
+    database = tmp_path / "runtime.sqlite3"
+    prepare_private_file(database)
+    sidecar = Path(f"{database}{suffix}")
+    sidecar.write_bytes(b"")
+    os.chmod(sidecar, 0o644)
+
+    assert sqlite_files_status(database) == "unsafe"
+
+
+def _runtime_checks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    token_path: Path | None = None,
+    database_path: Path | None = None,
+    lock_path: Path | None = None,
+) -> dict[str, str]:
+    config_root, data_root = tmp_path / "config", tmp_path / "data"
+    monkeypatch.setattr(permissions, "config_dir", lambda: config_root)
+    monkeypatch.setattr(permissions, "data_dir", lambda: data_root)
+    monkeypatch.setattr(permissions, "app_config_dir", lambda application: config_root / application)
+    monkeypatch.setattr(permissions, "app_data_dir", lambda application: data_root / application)
+    monkeypatch.setattr(permissions, "env_file", lambda application: config_root / f".{application}.env")
+    return permissions.runtime_permission_checks(
+        "2much2read",
+        config_path=tmp_path / "sources.yaml",
+        credentials_path=tmp_path / "secret.json",
+        token_path=token_path or config_root / "2much2read" / "token.json",
+        database_path=database_path or data_root / "2much2read" / "db.sqlite3",
+        lock_path=lock_path or data_root / "2much2read" / "db.lock",
+    )
+
+
+def test_a_fresh_install_tells_what_is_yet_to_come_from_what_must_be_supplied(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    assert _runtime_checks(tmp_path, monkeypatch) == {
+        "config_dir": "not_created",
+        "token_dir": "not_created",
+        "data_root": "not_created",
+        "data_dir": "not_created",
+        "env_file": "missing",
+        "config_file": "missing",
+        "client_secret": "missing",
+        "token_file": "missing",
+        "database": "not_created",
+        "lock_file": "not_created",
+        # Inside their directories even though none of the directories exist yet.
+        "runtime_paths": "ok",
+    }
+
+
+def test_the_env_file_checked_is_the_applications_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    env = tmp_path / "config" / ".2much2read.env"
+    env.parent.mkdir()
+    env.touch()
+    env.chmod(0o600)
+
+    assert _runtime_checks(tmp_path, monkeypatch)["env_file"] == "ok"
+
+
+@pytest.mark.parametrize("leaving", ["token_path", "database_path", "lock_path"])
+def test_runtime_paths_are_custom_once_any_one_leaves_its_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, leaving: str
+) -> None:
+    paths = {leaving: tmp_path / "elsewhere" / "file"}
+
+    assert _runtime_checks(tmp_path, monkeypatch, **paths)["runtime_paths"] == "custom"
